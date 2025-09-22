@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mdc-core",
+    "crates/mdc-providers",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+mdc-core = { path = "crates/mdc-core" }
