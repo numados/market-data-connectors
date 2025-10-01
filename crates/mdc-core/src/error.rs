@@ -64,8 +64,10 @@ mod tests {
             symbol: Symbol::from("BTCUSDT"),
             alert: IntegrityAlert::ResyncStarted,
         };
-        assert!(integrity
-            .to_string()
-            .contains("integrity failure on BTCUSDT"));
+        assert!(
+            integrity
+                .to_string()
+                .contains("integrity failure on BTCUSDT")
+        );
     }
 }

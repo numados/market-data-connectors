@@ -131,11 +131,7 @@ impl Trade {
     /// When `is_buyer_maker` is true, the maker was the buyer, so the taker (aggressor) was the seller (`Side::Ask`).
     /// When `is_buyer_maker` is false, the maker was the seller, so the taker was the buyer (`Side::Bid`).
     pub const fn aggressor_from_buyer_maker(is_buyer_maker: bool) -> Side {
-        if is_buyer_maker {
-            Side::Ask
-        } else {
-            Side::Bid
-        }
+        if is_buyer_maker { Side::Ask } else { Side::Bid }
     }
 }
 

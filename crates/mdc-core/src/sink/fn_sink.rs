@@ -34,8 +34,8 @@ mod tests {
     use super::*;
     use crate::model::{DeliveryStamp, ReferenceRate, RunId, Symbol, UnixNanos, VenueId};
     use rust_decimal::Decimal;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn fn_sink_executes_closure() {

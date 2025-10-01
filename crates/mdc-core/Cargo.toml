@@ -2,19 +2,24 @@
 name = "mdc-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-rust_decimal = { workspace = true }
-smallstr = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
+rust_decimal.workspace = true
+smallstr.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-serde_json = { workspace = true }
-proptest = { workspace = true }
-criterion = { workspace = true }
+serde_json.workspace = true
+proptest.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "model"
+harness = false
