@@ -14,5 +14,52 @@ license = "MIT OR Apache-2.0"
 unsafe_op_in_unsafe_fn = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [workspace.dependencies]
+# Async & Concurrency
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["sync"] }
+futures-util = "0.3"
+
+# Data & Serialization
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+smallstr = { version = "0.3", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simd-json = "0.14"
+bytes = "1"
+
+# Hashing & Compression
+crc32fast = "1"
+flate2 = "1"
+
+# Errors & Observability
+thiserror = "2"
+tracing = "0.1"
+
+# Runtime
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+async-trait = "0.1"
+arc-swap = "1"
+url = "2"
+http = "1"
+
+# Secrets
+secrecy = "0.10"
+
+# Sinks
+crossbeam-channel = "0.5"
+
+# Dev / Test
+proptest = "1"
+proptest-state-machine = "0.3"
+wiremock = "0.6"
+criterion = { version = "0.5", features = ["html_reports"] }
+allocation-counter = "0.8"
+
+# Internal crates
 mdc-core = { path = "crates/mdc-core" }
