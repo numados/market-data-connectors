@@ -31,7 +31,6 @@ pub struct SequenceTracker {
 
 impl SequenceTracker {
     /// Creates an uninitialized sequence tracker.
-    #[must_use]
     pub const fn new() -> Self {
         Self { last: None }
     }
@@ -47,7 +46,6 @@ impl SequenceTracker {
     }
 
     /// Returns the current last applied sequence ID, if initialized.
-    #[must_use]
     pub fn current(&self) -> Option<u64> {
         self.last
     }

@@ -95,7 +95,6 @@ pub struct ResyncController {
 
 impl ResyncController {
     /// Creates a new resync controller starting in [`SyncState::BufferingDiffs`].
-    #[must_use]
     pub fn new(max_buffer: usize) -> Self {
         Self {
             state: SyncState::BufferingDiffs,
@@ -106,25 +105,21 @@ impl ResyncController {
     }
 
     /// Returns the current synchronization state.
-    #[must_use]
     pub fn state(&self) -> SyncState {
         self.state
     }
 
     /// Returns the maximum capacity of the in-flight delta buffer.
-    #[must_use]
     pub fn max_buffer(&self) -> usize {
         self.max_buffer
     }
 
     /// Returns the number of deltas currently held in the buffer.
-    #[must_use]
     pub fn buffered_count(&self) -> usize {
         self.buffer.len()
     }
 
     /// Returns a reference to the underlying [`SequenceTracker`].
-    #[must_use]
     pub fn tracker(&self) -> &SequenceTracker {
         &self.tracker
     }
@@ -161,8 +156,8 @@ impl ResyncController {
 
     /// Step 2: Buffers an owned delta while in [`SyncState::BufferingDiffs`].
     ///
-    /// If buffer capacity is exceeded, the buffer is purged and [`Err(BufferOverflow)`]
-    /// is returned, prompting the caller to restart the snapshot request.
+    /// If buffer capacity is exceeded, the buffer is purged and [`BufferOverflow`]
+    /// is returned in `Err`, prompting the caller to restart the snapshot request.
     pub fn buffer(&mut self, event: MarketEvent<L2Delta>) -> Result<(), BufferOverflow> {
         debug_assert_eq!(
             self.state,

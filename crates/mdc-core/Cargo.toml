@@ -24,3 +24,7 @@ criterion.workspace = true
 [[bench]]
 name = "model"
 harness = false
+
+[[bench]]
+name = "integrity"
+harness = false

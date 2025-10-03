@@ -34,7 +34,6 @@ pub struct EmbargoTracker {
 
 impl EmbargoTracker {
     /// Creates a new, un-embargoed tracker.
-    #[must_use]
     pub const fn new() -> Self {
         Self {
             embargo_until: None,
@@ -42,7 +41,6 @@ impl EmbargoTracker {
     }
 
     /// Returns `true` if snapshot requests are currently embargoed at `now`.
-    #[must_use]
     pub fn is_embargoed(&self, now: Instant) -> bool {
         match self.embargo_until {
             Some(until) => now < until,
@@ -51,7 +49,6 @@ impl EmbargoTracker {
     }
 
     /// Returns the current permit status at `now`.
-    #[must_use]
     pub fn permit(&self, now: Instant) -> SnapshotPermit {
         match self.embargo_until {
             Some(until) if now < until => SnapshotPermit::Embargoed { until },
@@ -60,7 +57,6 @@ impl EmbargoTracker {
     }
 
     /// Returns the active embargo deadline, if any.
-    #[must_use]
     pub fn embargo_until(&self) -> Option<Instant> {
         self.embargo_until
     }
@@ -99,7 +95,6 @@ impl EmbargoTracker {
 ///
 /// Only numeric seconds format is parsed (e.g. `"120"`). Date-based formats
 /// and invalid/negative numbers return `None`, falling back to standard venue defaults.
-#[must_use]
 pub fn parse_retry_after(header: Option<&str>) -> Option<Duration> {
     let raw = header?.trim();
     if raw.is_empty() {

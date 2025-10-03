@@ -38,7 +38,6 @@ pub struct SilenceWatchdog {
 
 impl SilenceWatchdog {
     /// Creates a new silence watchdog initialized at the given `now` timestamp.
-    #[must_use]
     pub const fn new(ping_after: Duration, reconnect_after: Duration, now: Instant) -> Self {
         Self {
             ping_after,
@@ -49,19 +48,16 @@ impl SilenceWatchdog {
     }
 
     /// Returns the duration of silence after which a ping is triggered.
-    #[must_use]
     pub const fn ping_after(&self) -> Duration {
         self.ping_after
     }
 
     /// Returns the grace duration after ping before reconnection is triggered.
-    #[must_use]
     pub const fn reconnect_after(&self) -> Duration {
         self.reconnect_after
     }
 
     /// Returns the timestamp of the last recorded data frame.
-    #[must_use]
     pub const fn last_data_at(&self) -> Instant {
         self.last_data_at
     }
