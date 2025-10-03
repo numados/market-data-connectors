@@ -18,6 +18,7 @@ tracing.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 proptest.workspace = true
+proptest-state-machine.workspace = true
 criterion.workspace = true
 
 [[bench]]
