@@ -15,6 +15,9 @@ pub use integrity::{
 };
 pub use model::*;
 pub use resync::{
-    BufferOverflow, DeltaDecision, ResyncController, ResyncError, SnapshotOutcome, SyncState,
+    BufferOverflow, CooldownPolicy, DeltaDecision, ResyncController, ResyncDecision, ResyncError,
+    ResyncFailure, ResyncPolicy, SnapshotOutcome, SyncState,
 };
-pub use sink::{FnSink, MarketDataSink, VecSink};
+pub use sink::{
+    BookKind, EventContext, FnSink, MarketDataSink, Owned, RawLevelText, StreamingSink, VecSink,
+};

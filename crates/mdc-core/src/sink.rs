@@ -1,12 +1,17 @@
 //! Downstream consumer sink contracts and reference implementations.
 
 pub mod fn_sink;
+pub mod owned;
+pub mod streaming;
 pub mod vec_sink;
 
 pub use fn_sink::FnSink;
+pub use owned::Owned;
+pub use streaming::{BookKind, EventContext, RawLevelText, StreamingSink};
 pub use vec_sink::VecSink;
 
 use crate::model::{MarketDataKind, MarketEvent};
+use std::sync::Arc;
 
 /// Push interface for downstream market data consumption.
 ///
@@ -20,4 +25,12 @@ pub trait MarketDataSink: Send + Sync + 'static {
 
     /// Delivers an event to the downstream sink.
     fn on_event(&self, event: MarketEvent<MarketDataKind>) -> Result<(), Self::Error>;
+}
+
+impl<S: MarketDataSink> MarketDataSink for Arc<S> {
+    type Error = S::Error;
+
+    fn on_event(&self, event: MarketEvent<MarketDataKind>) -> Result<(), Self::Error> {
+        (**self).on_event(event)
+    }
 }
