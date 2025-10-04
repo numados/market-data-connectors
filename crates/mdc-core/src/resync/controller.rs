@@ -247,7 +247,15 @@ impl ResyncController {
                 SequenceCheck::Valid => replay.push(delta),
                 SequenceCheck::OldDataIgnored => {}
                 SequenceCheck::GapDetected { .. } | SequenceCheck::NotSynchronized => {
-                    debug_assert!(false, "unexpected sequence mismatch during delta replay");
+                    // Continuity broken in buffered deltas. Discard older deltas prior to gap,
+                    // keep this delta and subsequent deltas, clear tracker, and request fresh snapshot.
+                    self.buffer.push_front(delta);
+                    self.tracker.clear();
+                    self.state = SyncState::BufferingDiffs;
+                    return Ok(SnapshotOutcome::StaleSnapshot {
+                        snapshot_id,
+                        first_buffered: seq.first,
+                    });
                 }
             }
         }
