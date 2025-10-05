@@ -2,3 +2,6 @@
 
 #[cfg(feature = "binance")]
 pub mod binance;
+
+#[cfg(feature = "kraken")]
+pub mod kraken;

@@ -20,7 +20,16 @@ binance = [
     "dep:bytes",
     "dep:simd-json",
 ]
-all = ["binance"]
+kraken = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+    "dep:crc32fast",
+]
+all = ["binance", "kraken"]
 
 [dependencies]
 mdc-core.workspace = true
@@ -31,7 +40,7 @@ thiserror.workspace = true
 tracing.workspace = true
 smallstr.workspace = true
 
-# Optional dependencies for binance
+# Optional dependencies for providers
 tokio = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
@@ -40,6 +49,7 @@ reqwest = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 simd-json = { workspace = true, optional = true }
+crc32fast = { workspace = true, optional = true }
 
 [dev-dependencies]
 mdc-testkit.workspace = true

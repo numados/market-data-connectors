@@ -962,6 +962,7 @@ version = "0.1.0"
 dependencies = [
  "allocation-counter",
  "bytes",
+ "crc32fast",
  "criterion",
  "futures-util",
  "mdc-core",

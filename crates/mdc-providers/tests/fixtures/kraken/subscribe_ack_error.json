@@ -1,0 +1,8 @@
+{
+  "method": "subscribe",
+  "success": false,
+  "error": "Subscription rejected: symbol not found",
+  "symbol": "INVALID/USD",
+  "time_in": "2023-10-06T17:35:50.123456Z",
+  "time_out": "2023-10-06T17:35:50.123789Z"
+}
