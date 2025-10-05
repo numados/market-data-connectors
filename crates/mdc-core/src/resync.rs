@@ -6,4 +6,6 @@ pub mod policy;
 pub use controller::{
     BufferOverflow, DeltaDecision, ResyncController, ResyncError, SnapshotOutcome, SyncState,
 };
-pub use policy::{CooldownPolicy, ResyncDecision, ResyncFailure, ResyncPolicy};
+pub use policy::{
+    CooldownPolicy, ResyncDecision, ResyncFailure, ResyncPolicy, TimeoutQuarantinePolicy,
+};

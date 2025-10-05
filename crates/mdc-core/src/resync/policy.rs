@@ -94,6 +94,102 @@ impl ResyncPolicy for CooldownPolicy {
     }
 }
 
+/// Internal per-symbol resync lifecycle tracking for `TimeoutQuarantinePolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuarantineTracking {
+    AwaitingSnapshot { started_at: Instant },
+    Quarantined { until: Instant },
+}
+
+/// Resync policy enforcing a snapshot arrival timeout followed by quarantine.
+///
+/// If a snapshot does not arrive within `timeout` (default 5s), the symbol is quarantined
+/// for `quarantine` (default 30s) during which no retries are allowed. A valid snapshot
+/// lifts quarantine early.
+#[derive(Debug, Clone)]
+pub struct TimeoutQuarantinePolicy {
+    timeout: Duration,
+    quarantine: Duration,
+    tracking: HashMap<Symbol, QuarantineTracking>,
+}
+
+impl Default for TimeoutQuarantinePolicy {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(5),
+            quarantine: Duration::from_secs(30),
+            tracking: HashMap::new(),
+        }
+    }
+}
+
+impl TimeoutQuarantinePolicy {
+    /// Creates a new `TimeoutQuarantinePolicy` with the given snapshot timeout and quarantine duration.
+    pub fn new(timeout: Duration, quarantine: Duration) -> Self {
+        Self {
+            timeout,
+            quarantine,
+            tracking: HashMap::new(),
+        }
+    }
+
+    /// Returns the configured snapshot timeout duration.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Returns the configured quarantine duration.
+    pub fn quarantine(&self) -> Duration {
+        self.quarantine
+    }
+}
+
+impl ResyncPolicy for TimeoutQuarantinePolicy {
+    fn on_started(&mut self, symbol: &Symbol, now: Instant) {
+        self.tracking.insert(
+            symbol.clone(),
+            QuarantineTracking::AwaitingSnapshot { started_at: now },
+        );
+    }
+
+    fn on_completed(&mut self, symbol: &Symbol, _now: Instant) {
+        self.tracking.remove(symbol);
+    }
+
+    fn on_failed(&mut self, symbol: &Symbol, _error: &ResyncFailure, now: Instant) {
+        let until = now.checked_add(self.quarantine).unwrap_or(now);
+        self.tracking
+            .insert(symbol.clone(), QuarantineTracking::Quarantined { until });
+    }
+
+    fn decide(&mut self, symbol: &Symbol, now: Instant) -> ResyncDecision {
+        if let Some(&track) = self.tracking.get(symbol) {
+            match track {
+                QuarantineTracking::Quarantined { until } => {
+                    if now < until {
+                        return ResyncDecision::Quarantine(until);
+                    }
+                    self.tracking.remove(symbol);
+                    ResyncDecision::Proceed
+                }
+                QuarantineTracking::AwaitingSnapshot { started_at } => {
+                    let deadline = started_at.checked_add(self.timeout).unwrap_or(started_at);
+                    if now >= deadline {
+                        let until = now.checked_add(self.quarantine).unwrap_or(now);
+                        self.tracking
+                            .insert(symbol.clone(), QuarantineTracking::Quarantined { until });
+                        ResyncDecision::Quarantine(until)
+                    } else {
+                        ResyncDecision::Wait(deadline)
+                    }
+                }
+            }
+        } else {
+            ResyncDecision::Proceed
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +234,60 @@ mod tests {
 
         assert_eq!(
             policy.decide(&sym, now + Duration::from_secs(2)),
+            ResyncDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn test_timeout_quarantine_policy_lifecycle() {
+        let mut policy =
+            TimeoutQuarantinePolicy::new(Duration::from_secs(5), Duration::from_secs(30));
+        let sym = Symbol::from("BTC/USD");
+        let t0 = Instant::now();
+
+        // 1. Initial state: Proceed
+        assert_eq!(policy.decide(&sym, t0), ResyncDecision::Proceed);
+
+        // 2. Resync started at t0
+        policy.on_started(&sym, t0);
+
+        // At t0 + 2s: still waiting for snapshot
+        assert_eq!(
+            policy.decide(&sym, t0 + Duration::from_secs(2)),
+            ResyncDecision::Wait(t0 + Duration::from_secs(5))
+        );
+
+        // At t0 + 5s: timeout expires -> transitions to quarantine for 30s
+        let q_until = t0 + Duration::from_secs(5) + Duration::from_secs(30);
+        assert_eq!(
+            policy.decide(&sym, t0 + Duration::from_secs(5)),
+            ResyncDecision::Quarantine(q_until)
+        );
+
+        // At t0 + 20s: still in quarantine
+        assert_eq!(
+            policy.decide(&sym, t0 + Duration::from_secs(20)),
+            ResyncDecision::Quarantine(q_until)
+        );
+
+        // 3. Valid snapshot arrives at t0 + 25s while in quarantine -> lifts quarantine early!
+        policy.on_completed(&sym, t0 + Duration::from_secs(25));
+        assert_eq!(
+            policy.decide(&sym, t0 + Duration::from_secs(25)),
+            ResyncDecision::Proceed
+        );
+
+        // 4. Test explicit failure -> quarantined immediately
+        let t1 = t0 + Duration::from_secs(100);
+        policy.on_failed(&sym, &ResyncFailure::Transport("reset".into()), t1);
+        assert_eq!(
+            policy.decide(&sym, t1 + Duration::from_secs(10)),
+            ResyncDecision::Quarantine(t1 + Duration::from_secs(30))
+        );
+
+        // Quarantine expires at t1 + 30s
+        assert_eq!(
+            policy.decide(&sym, t1 + Duration::from_secs(30)),
             ResyncDecision::Proceed
         );
     }
