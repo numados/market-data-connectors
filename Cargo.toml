@@ -23,7 +23,7 @@ expect_used = "deny"
 [workspace.dependencies]
 # Async & Concurrency
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
-tokio-util = { version = "0.7", features = ["sync"] }
+tokio-util = "0.7"
 futures-util = "0.3"
 
 # Data & Serialization

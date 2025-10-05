@@ -8,5 +8,48 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+binance = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:url",
+    "dep:bytes",
+    "dep:simd-json",
+]
+all = ["binance"]
+
 [dependencies]
 mdc-core.workspace = true
+rust_decimal.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+smallstr.workspace = true
+
+# Optional dependencies for binance
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+simd-json = { workspace = true, optional = true }
+
+[dev-dependencies]
+mdc-testkit.workspace = true
+tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest.workspace = true
+wiremock.workspace = true
+criterion.workspace = true
+allocation-counter.workspace = true
+
+[[bench]]
+name = "binance_parse"
+harness = false
+required-features = ["binance"]

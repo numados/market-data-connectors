@@ -1,0 +1,12 @@
+{
+  "stream": "btcusdt@depth@100ms",
+  "data": {
+    "e": "depthUpdate",
+    "E": 1672515782140,
+    "s": "BTCUSDT",
+    "U": 161,
+    "u": 165,
+    "b": [],
+    "a": []
+  }
+}
