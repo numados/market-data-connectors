@@ -46,6 +46,10 @@ pub struct BinanceConfig {
     pub watchdog_reconnect_after: Duration,
     /// REST request timeout for depth snapshots.
     pub rest_timeout: Duration,
+    /// Initial reconnect backoff duration. Default: 1 second.
+    pub initial_backoff: Duration,
+    /// Maximum reconnect backoff duration. Default: 15 seconds.
+    pub max_backoff: Duration,
 }
 
 impl Default for BinanceConfig {
@@ -61,6 +65,8 @@ impl Default for BinanceConfig {
             watchdog_ping_after: Duration::from_secs(5),
             watchdog_reconnect_after: Duration::from_secs(5),
             rest_timeout: Duration::from_secs(30),
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(15),
         }
     }
 }
@@ -78,6 +84,8 @@ impl BinanceConfig {
             watchdog_ping_after: Duration::from_secs(5),
             watchdog_reconnect_after: Duration::from_secs(5),
             rest_timeout: Duration::from_secs(5),
+            initial_backoff: Duration::from_millis(20),
+            max_backoff: Duration::from_millis(100),
         }
     }
 }

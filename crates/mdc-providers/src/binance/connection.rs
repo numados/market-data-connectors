@@ -48,7 +48,7 @@ pub fn build_combined_stream_url(
     let mut url = base_url.clone();
     url.set_path("/stream");
     let joined = streams.join("/");
-    url.query_pairs_mut().append_pair("streams", &joined);
+    url.set_query(Some(&format!("streams={joined}")));
     url
 }
 
@@ -105,17 +105,17 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Exponential backoff delay
         if reconnect_attempt > 0 {
-            let backoff_secs = 1u64
-                .checked_shl(reconnect_attempt.min(4) - 1)
-                .unwrap_or(15)
-                .min(15);
+            let mult = 1u32.checked_shl(reconnect_attempt.min(4) - 1).unwrap_or(16);
+            let backoff = (config.initial_backoff * mult).min(config.max_backoff);
             info!(
                 connection_id,
-                backoff_secs, reconnect_attempt, "Reconnecting with backoff"
+                ?backoff,
+                reconnect_attempt,
+                "Reconnecting with backoff"
             );
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
-                _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                _ = tokio::time::sleep(backoff) => {}
             }
         }
 
@@ -174,7 +174,10 @@ pub async fn run_connection_task<S: StreamingSink>(
             );
         }
 
-        let mut watchdog_ticker = tokio::time::interval(Duration::from_millis(500));
+        let tick_interval = (config.watchdog_ping_after / 2)
+            .min(Duration::from_millis(100))
+            .max(Duration::from_millis(5));
+        let mut watchdog_ticker = tokio::time::interval(tick_interval);
 
         // Socket frame loop
         'frame_loop: loop {
@@ -294,7 +297,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                 // Silence watchdog
                 _ = watchdog_ticker.tick() => {
-                    match watchdog.poll(now) {
+                    match watchdog.poll(Instant::now()) {
                         WatchdogAction::SendPing => {
                             debug!(connection_id, "Watchdog triggered ping");
                             let _ = ws_stream.send(Message::Ping(Vec::new())).await;
@@ -422,6 +425,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                     match msg {
                         Message::Text(text) => {
+                            let now = Instant::now();
                             watchdog.on_data_frame(now);
 
                             let parsed: CombinedStream<'_> = match serde_json::from_str(&text) {
@@ -543,9 +547,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 }
                             }
                         }
-                        Message::Ping(_) => {
-                            watchdog.on_data_frame(now);
-                        }
+                        Message::Ping(_) => {}
                         Message::Close(_) => {
                             info!(connection_id, "Received WebSocket close frame");
                             break 'frame_loop;
@@ -576,7 +578,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                 },
             );
         }
-        reconnect_attempt += 1;
+        if !is_paused {
+            reconnect_attempt += 1;
+        } else {
+            reconnect_attempt = 0;
+        }
     }
 }
 

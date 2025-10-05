@@ -978,6 +978,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "mdc-core",
+ "rust_decimal",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

@@ -37,6 +37,7 @@ pub struct MockWsServer {
     handshake_paths: Arc<Mutex<Vec<String>>>,
     received_messages: Arc<Mutex<Vec<String>>>,
     connection_count: Arc<AtomicUsize>,
+    ping_count: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Vec<WsAction>>>>,
     broadcast_tx: broadcast::Sender<Message>,
     _drop_guard: tokio::sync::oneshot::Sender<()>,
@@ -51,6 +52,7 @@ impl MockWsServer {
         let handshake_paths = Arc::new(Mutex::new(Vec::new()));
         let received_messages = Arc::new(Mutex::new(Vec::new()));
         let connection_count = Arc::new(AtomicUsize::new(0));
+        let ping_count = Arc::new(AtomicUsize::new(0));
         let scripts = Arc::new(Mutex::new(VecDeque::new()));
         let (broadcast_tx, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -58,6 +60,7 @@ impl MockWsServer {
         let server_paths = Arc::clone(&handshake_paths);
         let server_received = Arc::clone(&received_messages);
         let server_conns = Arc::clone(&connection_count);
+        let server_pings = Arc::clone(&ping_count);
         let server_scripts = Arc::clone(&scripts);
         let server_broadcast = broadcast_tx.clone();
 
@@ -74,6 +77,7 @@ impl MockWsServer {
                         server_conns.fetch_add(1, Ordering::SeqCst);
                         let paths = Arc::clone(&server_paths);
                         let received = Arc::clone(&server_received);
+                        let pings = Arc::clone(&server_pings);
                         let scripts = Arc::clone(&server_scripts);
                         let mut broadcast_rx = server_broadcast.subscribe();
 
@@ -157,6 +161,9 @@ impl MockWsServer {
                                                     r.push(t.to_string());
                                                 }
                                             }
+                                            Some(Ok(Message::Ping(_))) => {
+                                                pings.fetch_add(1, Ordering::SeqCst);
+                                            }
                                             Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                                             _ => {}
                                         }
@@ -181,6 +188,7 @@ impl MockWsServer {
             handshake_paths,
             received_messages,
             connection_count,
+            ping_count,
             scripts,
             broadcast_tx,
             _drop_guard: shutdown_tx,
@@ -211,6 +219,11 @@ impl MockWsServer {
     /// Returns the total number of TCP connections accepted.
     pub fn connection_count(&self) -> usize {
         self.connection_count.load(Ordering::SeqCst)
+    }
+
+    /// Returns the total number of WebSocket pings received across all connections.
+    pub fn ping_count(&self) -> usize {
+        self.ping_count.load(Ordering::SeqCst)
     }
 
     /// Queues a script of actions to execute sequentially for the next accepted connection.
