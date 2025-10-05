@@ -55,6 +55,7 @@ crc32fast = { workspace = true, optional = true }
 mdc-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest.workspace = true
+proptest-state-machine.workspace = true
 wiremock.workspace = true
 criterion.workspace = true
 allocation-counter.workspace = true

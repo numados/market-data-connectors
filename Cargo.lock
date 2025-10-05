@@ -968,6 +968,7 @@ dependencies = [
  "mdc-core",
  "mdc-testkit",
  "proptest",
+ "proptest-state-machine",
  "reqwest",
  "rust_decimal",
  "serde",
