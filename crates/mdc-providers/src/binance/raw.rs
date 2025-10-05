@@ -135,6 +135,163 @@ impl<'de, 'buf> Visitor<'de> for LevelsVisitor<'buf> {
     }
 }
 
+/// Header metadata of a depth update message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthUpdateHeader<'a> {
+    pub event_time_ms: u64,
+    pub symbol: &'a str,
+    pub first_update_id: u64,
+    pub last_update_id: u64,
+}
+
+/// Zero-allocation deserializer seed for raw depth updates.
+pub struct DepthUpdateSeed<'buf> {
+    pub scratch: &'buf mut ConnectionScratchBuffers,
+}
+
+impl<'buf> DepthUpdateSeed<'buf> {
+    /// Creates a new `DepthUpdateSeed` targeting the given scratch buffers.
+    pub fn new(scratch: &'buf mut ConnectionScratchBuffers) -> Self {
+        scratch.clear();
+        Self { scratch }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for DepthUpdateSeed<'buf> {
+    type Value = DepthUpdateHeader<'de>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(DepthUpdateVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct DepthUpdateVisitor<'buf> {
+    scratch: &'buf mut ConnectionScratchBuffers,
+}
+
+impl<'de, 'buf> Visitor<'de> for DepthUpdateVisitor<'buf> {
+    type Value = DepthUpdateHeader<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Binance depth update JSON object")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: serde::de::MapAccess<'de>,
+    {
+        let mut event_time_ms = None;
+        let mut symbol = None;
+        let mut first_update_id = None;
+        let mut last_update_id = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "E" => event_time_ms = Some(map.next_value::<u64>()?),
+                "s" => symbol = Some(map.next_value::<&'de str>()?),
+                "U" => first_update_id = Some(map.next_value::<u64>()?),
+                "u" => last_update_id = Some(map.next_value::<u64>()?),
+                "b" => {
+                    map.next_value_seed(LevelsSeed::new(&mut self.scratch.bids))?;
+                }
+                "a" => {
+                    map.next_value_seed(LevelsSeed::new(&mut self.scratch.asks))?;
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let event_time_ms = event_time_ms.ok_or_else(|| serde::de::Error::missing_field("E"))?;
+        let symbol = symbol.ok_or_else(|| serde::de::Error::missing_field("s"))?;
+        let first_update_id =
+            first_update_id.ok_or_else(|| serde::de::Error::missing_field("U"))?;
+        let last_update_id = last_update_id.ok_or_else(|| serde::de::Error::missing_field("u"))?;
+
+        Ok(DepthUpdateHeader {
+            event_time_ms,
+            symbol,
+            first_update_id,
+            last_update_id,
+        })
+    }
+}
+
+/// Header metadata of a combined stream depth update envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CombinedDepthHeader<'a> {
+    pub stream: &'a str,
+    pub depth: DepthUpdateHeader<'a>,
+}
+
+/// Zero-allocation deserializer seed for a combined stream depth envelope.
+pub struct CombinedDepthSeed<'buf> {
+    pub scratch: &'buf mut ConnectionScratchBuffers,
+}
+
+impl<'buf> CombinedDepthSeed<'buf> {
+    /// Creates a new `CombinedDepthSeed` targeting the given scratch buffers.
+    pub fn new(scratch: &'buf mut ConnectionScratchBuffers) -> Self {
+        Self { scratch }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for CombinedDepthSeed<'buf> {
+    type Value = CombinedDepthHeader<'de>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(CombinedDepthVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct CombinedDepthVisitor<'buf> {
+    scratch: &'buf mut ConnectionScratchBuffers,
+}
+
+impl<'de, 'buf> Visitor<'de> for CombinedDepthVisitor<'buf> {
+    type Value = CombinedDepthHeader<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Binance combined stream depth update envelope")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: serde::de::MapAccess<'de>,
+    {
+        let mut stream = None;
+        let mut depth = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "stream" => stream = Some(map.next_value::<&'de str>()?),
+                "data" => {
+                    depth = Some(map.next_value_seed(DepthUpdateSeed::new(self.scratch))?);
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let stream = stream.ok_or_else(|| serde::de::Error::missing_field("stream"))?;
+        let depth = depth.ok_or_else(|| serde::de::Error::missing_field("data"))?;
+
+        Ok(CombinedDepthHeader { stream, depth })
+    }
+}
+
 /// Zero-copy scratch buffer pair for price level deserialization.
 #[derive(Debug, Default)]
 pub struct ConnectionScratchBuffers {
