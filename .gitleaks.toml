@@ -1,0 +1,6 @@
+[allowlist]
+description = "Ignore build and git directories"
+paths = [
+    '''(^|/)target/''',
+    '''(^|/)\.git/''',
+]
