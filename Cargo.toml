@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mdc-core",
     "crates/mdc-providers",
+    "crates/mdc-testkit",
 ]
 
 [workspace.package]
@@ -64,3 +65,4 @@ allocation-counter = "0.8"
 
 # Internal crates
 mdc-core = { path = "crates/mdc-core" }
+mdc-testkit = { path = "crates/mdc-testkit" }

@@ -1,0 +1,20 @@
+[package]
+name = "mdc-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mdc-core.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+wiremock.workspace = true
+url.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
