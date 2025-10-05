@@ -6,6 +6,14 @@ use serde::de::{DeserializeSeed, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::fmt;
 
+/// Lightweight combined WebSocket stream envelope borrowing the raw data payload.
+#[derive(Debug, Deserialize)]
+pub struct StreamEnvelope<'a> {
+    pub stream: &'a str,
+    #[serde(borrow)]
+    pub data: &'a serde_json::value::RawValue,
+}
+
 /// Combined WebSocket stream envelope: `{"stream":"btcusdt@depth@100ms","data":{...}}`.
 #[derive(Debug, Deserialize)]
 pub struct CombinedStream<'a> {

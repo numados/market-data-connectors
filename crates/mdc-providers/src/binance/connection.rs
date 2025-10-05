@@ -17,12 +17,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use url::Url;
 
+use serde::de::DeserializeSeed;
+
 use crate::binance::config::BinanceConfig;
 use crate::binance::control::Command;
-use crate::binance::normalize::{
-    normalize_book_ticker, normalize_depth, normalize_snapshot, normalize_trade,
+use crate::binance::normalize::{normalize_book_ticker, normalize_snapshot, normalize_trade};
+use crate::binance::raw::{
+    ConnectionScratchBuffers, DepthUpdateSeed, RawBookTicker, RawDepthSnapshot, RawTrade,
+    StreamEnvelope,
 };
-use crate::binance::raw::{CombinedStream, ConnectionScratchBuffers, RawDepthSnapshot, RawPayload};
 use crate::binance::rest::{BinanceRestClient, RestError};
 
 /// Constructs the combined WebSocket subscription URL for a slice of symbols.
@@ -428,110 +431,72 @@ pub async fn run_connection_task<S: StreamingSink>(
                             let now = Instant::now();
                             watchdog.on_data_frame(now);
 
-                            let parsed: CombinedStream<'_> = match serde_json::from_str(&text) {
-                                Ok(p) => p,
+                            let env: StreamEnvelope<'_> = match serde_json::from_str(&text) {
+                                Ok(e) => e,
                                 Err(e) => {
-                                    warn!(connection_id, error = %e, "Failed to parse Binance combined stream message");
+                                    warn!(connection_id, error = %e, "Failed to parse Binance combined stream envelope");
                                     continue;
                                 }
                             };
 
-                            match parsed.data {
-                                RawPayload::BookTicker(raw_ticker) => {
-                                    let sym = Symbol::from(raw_ticker.symbol);
-                                    let tag = tag_map.get(&sym).copied().unwrap_or_default();
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Binance,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: None,
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(raw_ticker.update_id),
-                                    };
-                                    let ticker = normalize_book_ticker(&raw_ticker);
-                                    let _ = sink.book_ticker(&ctx, &ticker);
-                                }
-                                RawPayload::Trade(raw_trade) => {
-                                    let sym = Symbol::from(raw_trade.symbol);
-                                    let tag = tag_map.get(&sym).copied().unwrap_or_default();
-                                    if let Ok((exchange_ts, trade)) = normalize_trade(&raw_trade) {
-                                        delivery_ordinal += 1;
-                                        let ctx = EventContext {
-                                            venue: VenueId::Binance,
-                                            symbol: &sym,
-                                            tag,
-                                            exchange_ts: Some(exchange_ts),
-                                            received_ts,
-                                            connection_id,
-                                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                            source_sequence: Some(raw_trade.trade_id),
-                                        };
-                                        let _ = sink.trade(&ctx, &trade);
+                            if env.stream.ends_with("@depth@100ms") || env.stream.ends_with("@depth") {
+                                let mut de = serde_json::Deserializer::from_str(env.data.get());
+                                let header = match DepthUpdateSeed::new(&mut scratch).deserialize(&mut de) {
+                                    Ok(h) => h,
+                                    Err(e) => {
+                                        warn!(connection_id, error = %e, "Failed to parse Binance depth update");
+                                        continue;
                                     }
-                                }
-                                RawPayload::Depth(raw_depth) => {
-                                    let sym = Symbol::from(raw_depth.symbol);
-                                    let tag = tag_map.get(&sym).copied().unwrap_or_default();
-                                    let range = SequenceRange::new(raw_depth.first_update_id, raw_depth.last_update_id);
-                                    let exchange_ts = Some(UnixNanos::from_millis(raw_depth.event_time_ms));
+                                };
 
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Binance,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts,
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(raw_depth.last_update_id),
-                                    };
+                                let sym = Symbol::from(header.symbol);
+                                let tag = tag_map.get(&sym).copied().unwrap_or_default();
+                                let range = SequenceRange::new(header.first_update_id, header.last_update_id);
+                                let exchange_ts = Some(UnixNanos::from_millis(header.event_time_ms));
 
-                                    if let Some(ctrl) = controllers.get_mut(&sym) {
-                                        match ctrl.check_delta(range) {
-                                            DeltaDecision::Emit => {
-                                                scratch.fill_from_depth(&raw_depth);
-                                                let _ = sink.begin_book(&ctx, BookKind::Delta);
-                                                for level in &scratch.bids {
-                                                    let _ = sink.level(Side::Bid, level.price, level.volume);
-                                                }
-                                                for level in &scratch.asks {
-                                                    let _ = sink.level(Side::Ask, level.price, level.volume);
-                                                }
-                                                let _ = sink.end_book(&ctx, Some(range));
+                                delivery_ordinal += 1;
+                                let ctx = EventContext {
+                                    venue: VenueId::Binance,
+                                    symbol: &sym,
+                                    tag,
+                                    exchange_ts,
+                                    received_ts,
+                                    connection_id,
+                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                    source_sequence: Some(header.last_update_id),
+                                };
+
+                                if let Some(ctrl) = controllers.get_mut(&sym) {
+                                    match ctrl.check_delta(range) {
+                                        DeltaDecision::Emit => {
+                                            let _ = sink.begin_book(&ctx, BookKind::Delta);
+                                            for level in &scratch.bids {
+                                                let _ = sink.level(Side::Bid, level.price, level.volume);
                                             }
-                                            DeltaDecision::Drop => {}
-                                            DeltaDecision::Buffer => {
-                                                let (_, delta) = normalize_depth(&raw_depth);
-                                                let event = MarketEvent {
-                                                    exchange_ts,
-                                                    received_ts,
-                                                    venue: VenueId::Binance,
-                                                    symbol: sym.clone(),
-                                                    tag,
-                                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                    source_sequence: Some(raw_depth.last_update_id),
-                                                    kind: delta,
-                                                };
-                                                if let Err(e) = ctrl.buffer(event) {
-                                                    warn!(%sym, error = ?e, "Buffer overflow during delta buffering; requesting snapshot");
-                                                    let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
-                                                    policy.on_started(&sym, now);
-                                                    spawn_snapshot_request(
-                                                        sym,
-                                                        rest_client.clone(),
-                                                        Arc::clone(&snapshot_semaphore),
-                                                        snapshot_tx.clone(),
-                                                        cancel.clone(),
-                                                    );
-                                                }
+                                            for level in &scratch.asks {
+                                                let _ = sink.level(Side::Ask, level.price, level.volume);
                                             }
-                                            DeltaDecision::GapDetected { alert } => {
-                                                warn!(%sym, ?alert, "Sequence gap detected; starting resynchronization");
-                                                let _ = sink.alert(&ctx, alert);
+                                            let _ = sink.end_book(&ctx, Some(range));
+                                        }
+                                        DeltaDecision::Drop => {}
+                                        DeltaDecision::Buffer => {
+                                            let delta = mdc_core::L2Delta {
+                                                bids: scratch.bids.clone(),
+                                                asks: scratch.asks.clone(),
+                                                sequence: Some(range),
+                                            };
+                                            let event = MarketEvent {
+                                                exchange_ts,
+                                                received_ts,
+                                                venue: VenueId::Binance,
+                                                symbol: sym.clone(),
+                                                tag,
+                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                                source_sequence: Some(header.last_update_id),
+                                                kind: delta,
+                                            };
+                                            if let Err(e) = ctrl.buffer(event) {
+                                                warn!(%sym, error = ?e, "Buffer overflow during delta buffering; requesting snapshot");
                                                 let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
                                                 policy.on_started(&sym, now);
                                                 spawn_snapshot_request(
@@ -543,7 +508,67 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 );
                                             }
                                         }
+                                        DeltaDecision::GapDetected { alert } => {
+                                            warn!(%sym, ?alert, "Sequence gap detected; starting resynchronization");
+                                            let _ = sink.alert(&ctx, alert);
+                                            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                            policy.on_started(&sym, now);
+                                            spawn_snapshot_request(
+                                                sym,
+                                                rest_client.clone(),
+                                                Arc::clone(&snapshot_semaphore),
+                                                snapshot_tx.clone(),
+                                                cancel.clone(),
+                                            );
+                                        }
                                     }
+                                }
+                            } else if env.stream.ends_with("@bookTicker") {
+                                let raw_ticker: RawBookTicker<'_> = match serde_json::from_str(env.data.get()) {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        warn!(connection_id, error = %e, "Failed to parse Binance book ticker");
+                                        continue;
+                                    }
+                                };
+                                let sym = Symbol::from(raw_ticker.symbol);
+                                let tag = tag_map.get(&sym).copied().unwrap_or_default();
+                                delivery_ordinal += 1;
+                                let ctx = EventContext {
+                                    venue: VenueId::Binance,
+                                    symbol: &sym,
+                                    tag,
+                                    exchange_ts: None,
+                                    received_ts,
+                                    connection_id,
+                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                    source_sequence: Some(raw_ticker.update_id),
+                                };
+                                let ticker = normalize_book_ticker(&raw_ticker);
+                                let _ = sink.book_ticker(&ctx, &ticker);
+                            } else if env.stream.ends_with("@trade") {
+                                let raw_trade: RawTrade<'_> = match serde_json::from_str(env.data.get()) {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        warn!(connection_id, error = %e, "Failed to parse Binance trade");
+                                        continue;
+                                    }
+                                };
+                                let sym = Symbol::from(raw_trade.symbol);
+                                let tag = tag_map.get(&sym).copied().unwrap_or_default();
+                                if let Ok((exchange_ts, trade)) = normalize_trade(&raw_trade) {
+                                    delivery_ordinal += 1;
+                                    let ctx = EventContext {
+                                        venue: VenueId::Binance,
+                                        symbol: &sym,
+                                        tag,
+                                        exchange_ts: Some(exchange_ts),
+                                        received_ts,
+                                        connection_id,
+                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                        source_sequence: Some(raw_trade.trade_id),
+                                    };
+                                    let _ = sink.trade(&ctx, &trade);
                                 }
                             }
                         }

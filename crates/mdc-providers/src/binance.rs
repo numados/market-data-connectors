@@ -46,7 +46,8 @@ pub use connector::{BinanceConnector, BinanceConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use normalize::{normalize_book_ticker, normalize_depth, normalize_snapshot, normalize_trade};
 pub use raw::{
-    CombinedStream, ConnectionScratchBuffers, LevelsSeed, RawBookTicker, RawDepthSnapshot,
-    RawDepthUpdate, RawPayload, RawTrade,
+    CombinedDepthHeader, CombinedDepthSeed, CombinedStream, ConnectionScratchBuffers,
+    DepthUpdateHeader, DepthUpdateSeed, LevelsSeed, RawBookTicker, RawDepthSnapshot,
+    RawDepthUpdate, RawPayload, RawTrade, StreamEnvelope,
 };
 pub use rest::{BinanceRestClient, RestError};

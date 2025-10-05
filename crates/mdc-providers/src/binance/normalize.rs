@@ -37,6 +37,27 @@ pub fn normalize_book_ticker(raw: &RawBookTicker<'_>) -> BookTicker {
     BookTicker::new(best_bid, best_ask, Some(raw.update_id))
 }
 
+/// Formats a `u64` into an ASCII string buffer without heap allocation.
+fn format_u64_to_buf(mut n: u64, buf: &mut [u8; 20]) -> &str {
+    if n == 0 {
+        buf[0] = b'0';
+        return match std::str::from_utf8(&buf[..1]) {
+            Ok(s) => s,
+            Err(_) => "0",
+        };
+    }
+    let mut i = 20;
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    match std::str::from_utf8(&buf[i..]) {
+        Ok(s) => s,
+        Err(_) => "0",
+    }
+}
+
 /// Normalizes a raw public trade into canonical `Trade` and trade timestamp.
 ///
 /// Maps buyer-maker flag:
@@ -46,9 +67,10 @@ pub fn normalize_trade(raw: &RawTrade<'_>) -> Result<(UnixNanos, Trade), MdcErro
     let trade_ts = UnixNanos::from_millis(raw.trade_time_ms);
     let ns = TradeNamespace::new("binance:spot")
         .map_err(|e| MdcError::Protocol(format!("invalid trade namespace: {e}")))?;
-    let tid_str = raw.trade_id.to_string();
+    let mut tid_buf = [0u8; 20];
+    let tid_str = format_u64_to_buf(raw.trade_id, &mut tid_buf);
     let tid =
-        TradeId::new(&tid_str).map_err(|e| MdcError::Protocol(format!("invalid trade id: {e}")))?;
+        TradeId::new(tid_str).map_err(|e| MdcError::Protocol(format!("invalid trade id: {e}")))?;
 
     let identity = NativeTradeIdentity::new(ns, tid);
     let aggressor = Trade::aggressor_from_buyer_maker(raw.is_buyer_maker);
@@ -171,5 +193,18 @@ mod tests {
         assert_eq!(snap.asks.len(), 1);
         assert_eq!(snap.bids[0].price, d("50000"));
         assert_eq!(snap.bids[0].volume, d("10"));
+    }
+
+    #[test]
+    fn test_format_u64_to_buf() {
+        let mut buf = [0u8; 20];
+        assert_eq!(format_u64_to_buf(0, &mut buf), "0");
+        assert_eq!(format_u64_to_buf(7, &mut buf), "7");
+        assert_eq!(format_u64_to_buf(42, &mut buf), "42");
+        assert_eq!(format_u64_to_buf(123_456_789, &mut buf), "123456789");
+        assert_eq!(
+            format_u64_to_buf(u64::MAX, &mut buf),
+            "18446744073709551615"
+        );
     }
 }
