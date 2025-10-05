@@ -83,3 +83,9 @@ name = "kraken_checksum"
 harness = false
 required-features = ["kraken"]
 
+[[bench]]
+name = "coinbase_parse"
+harness = false
+required-features = ["coinbase"]
+
+

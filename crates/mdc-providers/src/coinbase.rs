@@ -33,6 +33,7 @@
 //! # }
 //! ```
 
+pub mod bench_support;
 pub mod config;
 pub mod connection;
 pub mod connector;
