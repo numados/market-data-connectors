@@ -1,0 +1,17 @@
+{
+  "type": "subscriptions",
+  "channels": [
+    {
+      "name": "level2_batch",
+      "product_ids": [
+        "BTC-USD"
+      ]
+    },
+    {
+      "name": "heartbeat",
+      "product_ids": [
+        "BTC-USD"
+      ]
+    }
+  ]
+}

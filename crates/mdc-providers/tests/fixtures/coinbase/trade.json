@@ -1,0 +1,12 @@
+{
+  "type": "match",
+  "trade_id": 10,
+  "sequence": 50,
+  "maker_order_id": "2da12345-6789-abcd-ef01-23456789abcd",
+  "taker_order_id": "3eb23456-789a-bcde-f012-3456789abcde",
+  "time": "2014-11-07T08:19:27.028459Z",
+  "product_id": "BTC-USD",
+  "size": "5.23512",
+  "price": "400.23",
+  "side": "sell"
+}

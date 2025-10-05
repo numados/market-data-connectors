@@ -1,0 +1,5 @@
+{
+  "type": "error",
+  "message": "Failed to subscribe",
+  "reason": "product_ids must be specified"
+}

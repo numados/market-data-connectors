@@ -5,3 +5,6 @@ pub mod binance;
 
 #[cfg(feature = "kraken")]
 pub mod kraken;
+
+#[cfg(feature = "coinbase")]
+pub mod coinbase;

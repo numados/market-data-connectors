@@ -29,7 +29,15 @@ kraken = [
     "dep:bytes",
     "dep:crc32fast",
 ]
-all = ["binance", "kraken"]
+coinbase = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+]
+all = ["binance", "kraken", "coinbase"]
 
 [dependencies]
 mdc-core.workspace = true
