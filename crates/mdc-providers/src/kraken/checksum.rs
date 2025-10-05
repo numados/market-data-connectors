@@ -44,6 +44,59 @@ pub struct RawLevelOwned {
     pub volume_raw: SmallString<[u8; 24]>,
 }
 
+struct RawLevelOwnedVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RawLevelOwnedVisitor {
+    type Value = RawLevelOwned;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a level map with price and qty numbers")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: serde::de::MapAccess<'de>,
+    {
+        let mut price_str: Option<&'de serde_json::value::RawValue> = None;
+        let mut qty_str: Option<&'de serde_json::value::RawValue> = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "price" => price_str = Some(map.next_value()?),
+                "qty" => qty_str = Some(map.next_value()?),
+                _ => {
+                    let _: serde::de::IgnoredAny = map.next_value()?;
+                }
+            }
+        }
+
+        let p_raw = price_str.ok_or_else(|| serde::de::Error::missing_field("price"))?;
+        let q_raw = qty_str.ok_or_else(|| serde::de::Error::missing_field("qty"))?;
+
+        let price_s = p_raw.get();
+        let qty_s = q_raw.get();
+
+        let price = Decimal::from_str_exact(price_s).map_err(serde::de::Error::custom)?;
+        let volume = Decimal::from_str_exact(qty_s).map_err(serde::de::Error::custom)?;
+
+        Ok(RawLevelOwned {
+            price,
+            volume,
+            price_raw: SmallString::from(price_s),
+            volume_raw: SmallString::from(qty_s),
+        })
+    }
+}
+
+impl<'de> serde::de::Deserialize<'de> for RawLevelOwned {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(RawLevelOwnedVisitor)
+    }
+}
+
 /// Verdict of a checksum verification against a received value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChecksumVerdict {
@@ -106,6 +159,31 @@ impl KrakenChecksumBook {
     /// Returns the number of ask levels currently in the book.
     pub fn asks_len(&self) -> usize {
         self.asks.len()
+    }
+
+    /// Applies pre-parsed `RawLevelOwned` updates to the shadow book with zero allocations when overwriting.
+    pub fn apply_owned(&mut self, asks: &[RawLevelOwned], bids: &[RawLevelOwned]) {
+        for raw in asks {
+            if raw.volume.is_zero() {
+                self.asks.remove(&raw.price);
+            } else {
+                self.asks.insert(raw.price, raw.clone());
+            }
+        }
+        while self.asks.len() > self.depth {
+            self.asks.pop_last();
+        }
+
+        for raw in bids {
+            if raw.volume.is_zero() {
+                self.bids.remove(&raw.price);
+            } else {
+                self.bids.insert(raw.price, raw.clone());
+            }
+        }
+        while self.bids.len() > self.depth {
+            self.bids.pop_first();
+        }
     }
 
     /// Applies one message's price level updates to the book.
@@ -195,23 +273,22 @@ impl KrakenChecksumBook {
 
     /// Computes the Kraken CRC32 checksum over the top 10 asks and top 10 bids.
     pub fn checksum(&self) -> u32 {
-        let top_asks: Vec<RawLevelRef<'_>> = self
-            .asks
-            .values()
-            .take(10)
-            .map(|l| RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw))
-            .collect();
+        let mut top_asks = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
+        let mut ask_count = 0;
+        for (i, l) in self.asks.values().take(10).enumerate() {
+            top_asks[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
+            ask_count += 1;
+        }
 
-        let top_bids: Vec<RawLevelRef<'_>> = self
-            .bids
-            .values()
-            .rev()
-            .take(10)
-            .map(|l| RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw))
-            .collect();
+        let mut top_bids = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
+        let mut bid_count = 0;
+        for (i, l) in self.bids.values().rev().take(10).enumerate() {
+            top_bids[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
+            bid_count += 1;
+        }
 
         let strategy = KrakenChecksum::new(10);
-        strategy.compute(&top_bids, &top_asks)
+        strategy.compute(&top_bids[..bid_count], &top_asks[..ask_count])
     }
 
     /// Compares the calculated checksum against an optional received value.

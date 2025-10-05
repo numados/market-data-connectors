@@ -108,31 +108,41 @@ impl KrakenChecksum {
     }
 }
 
+fn hash_token(hasher: &mut crc32fast::Hasher, s: &str) {
+    let mut seen_non_zero = false;
+    let mut pushed = false;
+    for b in s.bytes() {
+        if b == b'.' {
+            continue;
+        }
+        if !seen_non_zero {
+            if b == b'0' {
+                continue;
+            }
+            seen_non_zero = true;
+        }
+        hasher.update(&[b]);
+        pushed = true;
+    }
+    if !pushed {
+        hasher.update(b"0");
+    }
+}
+
 impl ChecksumStrategy for KrakenChecksum {
     fn compute(&self, bids: &[RawLevelRef<'_>], asks: &[RawLevelRef<'_>]) -> u32 {
         let mut hasher = crc32fast::Hasher::new();
-        let mut buf = String::with_capacity(64);
 
         // Top asks (low to high = best ask first)
         for ask in asks.iter().take(self.depth) {
-            buf.clear();
-            remove_decimal_and_leading_zeros(ask.price_raw, &mut buf);
-            hasher.update(buf.as_bytes());
-
-            buf.clear();
-            remove_decimal_and_leading_zeros(ask.volume_raw, &mut buf);
-            hasher.update(buf.as_bytes());
+            hash_token(&mut hasher, ask.price_raw);
+            hash_token(&mut hasher, ask.volume_raw);
         }
 
         // Top bids (high to low = best bid first)
         for bid in bids.iter().take(self.depth) {
-            buf.clear();
-            remove_decimal_and_leading_zeros(bid.price_raw, &mut buf);
-            hasher.update(buf.as_bytes());
-
-            buf.clear();
-            remove_decimal_and_leading_zeros(bid.volume_raw, &mut buf);
-            hasher.update(buf.as_bytes());
+            hash_token(&mut hasher, bid.price_raw);
+            hash_token(&mut hasher, bid.volume_raw);
         }
 
         hasher.finalize()

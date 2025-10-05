@@ -1,8 +1,11 @@
-//! Raw message schemas and borrowing deserialization for Kraken WebSocket v2.
+use std::fmt;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::value::RawValue;
+
+use crate::kraken::checksum::RawLevelOwned;
 
 /// Raw price level borrowing exact JSON number tokens for checksum computation.
 #[derive(Debug, Deserialize)]
@@ -164,6 +167,257 @@ pub struct RawAckResult<'a> {
     /// Symbol associated with subscription.
     #[serde(default)]
     pub symbol: Option<&'a str>,
+}
+
+/// Connection scratch buffers for Kraken depth parsing.
+#[derive(Debug, Default)]
+pub struct KrakenConnectionScratch {
+    /// Scratch buffer for bid price levels.
+    pub bids: Vec<RawLevelOwned>,
+    /// Scratch buffer for ask price levels.
+    pub asks: Vec<RawLevelOwned>,
+}
+
+impl KrakenConnectionScratch {
+    /// Creates a new `KrakenConnectionScratch` with pre-allocated capacity.
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            bids: Vec::with_capacity(cap),
+            asks: Vec::with_capacity(cap),
+        }
+    }
+
+    /// Clears all scratch buffers while retaining allocated capacity.
+    pub fn clear(&mut self) {
+        self.bids.clear();
+        self.asks.clear();
+    }
+}
+
+/// Deserializer seed that fills pre-allocated scratch vectors with `RawLevelOwned` entries.
+pub struct KrakenLevelsSeed<'buf> {
+    buf: &'buf mut Vec<RawLevelOwned>,
+}
+
+impl<'buf> KrakenLevelsSeed<'buf> {
+    /// Creates a new `KrakenLevelsSeed` targeting the given scratch vector.
+    pub fn new(buf: &'buf mut Vec<RawLevelOwned>) -> Self {
+        buf.clear();
+        Self { buf }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for KrakenLevelsSeed<'buf> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(KrakenLevelsVisitor(self.buf))
+    }
+}
+
+struct KrakenLevelsVisitor<'buf>(&'buf mut Vec<RawLevelOwned>);
+
+impl<'de, 'buf> Visitor<'de> for KrakenLevelsVisitor<'buf> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a sequence of price/qty level objects")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while let Some(level) = seq.next_element::<RawLevelOwned>()? {
+            self.0.push(level);
+        }
+        Ok(())
+    }
+}
+
+/// Header metadata of a Kraken order book update or snapshot message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KrakenBookDataHeader<'a> {
+    /// Message type: `"snapshot"` or `"update"`.
+    pub kind: &'a str,
+    /// Trading symbol, e.g. `"BTC/USD"`.
+    pub symbol: &'a str,
+    /// CRC32 checksum from venue.
+    pub checksum: Option<u32>,
+    /// RFC 3339 timestamp for updates.
+    pub timestamp: Option<&'a str>,
+}
+
+/// Zero-allocation deserializer seed for Kraken book frames targeting scratch buffers.
+pub struct KrakenDepthSeed<'buf> {
+    /// Reference to connection scratch buffers.
+    pub scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'buf> KrakenDepthSeed<'buf> {
+    /// Creates a new `KrakenDepthSeed` targeting the given scratch buffers.
+    pub fn new(scratch: &'buf mut KrakenConnectionScratch) -> Self {
+        scratch.clear();
+        Self { scratch }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for KrakenDepthSeed<'buf> {
+    type Value = KrakenBookDataHeader<'de>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(KrakenDepthOuterVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct KrakenDepthOuterVisitor<'buf> {
+    scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'de, 'buf> Visitor<'de> for KrakenDepthOuterVisitor<'buf> {
+    type Value = KrakenBookDataHeader<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Kraken book WebSocket frame object")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut kind = None;
+        let mut header = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "type" => kind = Some(map.next_value::<&'de str>()?),
+                "data" => {
+                    header = Some(map.next_value_seed(KrakenDataArraySeed {
+                        scratch: self.scratch,
+                    })?);
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let kind = kind.ok_or_else(|| serde::de::Error::missing_field("type"))?;
+        let (symbol, checksum, timestamp) =
+            header.ok_or_else(|| serde::de::Error::missing_field("data"))?;
+
+        Ok(KrakenBookDataHeader {
+            kind,
+            symbol,
+            checksum,
+            timestamp,
+        })
+    }
+}
+
+struct KrakenDataArraySeed<'buf> {
+    scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for KrakenDataArraySeed<'buf> {
+    type Value = (&'de str, Option<u32>, Option<&'de str>);
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(KrakenDataArrayVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct KrakenDataArrayVisitor<'buf> {
+    scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'de, 'buf> Visitor<'de> for KrakenDataArrayVisitor<'buf> {
+    type Value = (&'de str, Option<u32>, Option<&'de str>);
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a 1-element array containing order book data")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let res = seq.next_element_seed(KrakenSingleDataSeed {
+            scratch: self.scratch,
+        })?;
+        res.ok_or_else(|| serde::de::Error::custom("expected at least 1 element in data array"))
+    }
+}
+
+struct KrakenSingleDataSeed<'buf> {
+    scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for KrakenSingleDataSeed<'buf> {
+    type Value = (&'de str, Option<u32>, Option<&'de str>);
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(KrakenSingleDataVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct KrakenSingleDataVisitor<'buf> {
+    scratch: &'buf mut KrakenConnectionScratch,
+}
+
+impl<'de, 'buf> Visitor<'de> for KrakenSingleDataVisitor<'buf> {
+    type Value = (&'de str, Option<u32>, Option<&'de str>);
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an order book data object with bids, asks, symbol")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut symbol = None;
+        let mut checksum = None;
+        let mut timestamp = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "symbol" => symbol = Some(map.next_value::<&'de str>()?),
+                "checksum" => checksum = map.next_value::<Option<u32>>()?,
+                "timestamp" => timestamp = map.next_value::<Option<&'de str>>()?,
+                "bids" => {
+                    map.next_value_seed(KrakenLevelsSeed::new(&mut self.scratch.bids))?;
+                }
+                "asks" => {
+                    map.next_value_seed(KrakenLevelsSeed::new(&mut self.scratch.asks))?;
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let symbol = symbol.ok_or_else(|| serde::de::Error::missing_field("symbol"))?;
+        Ok((symbol, checksum, timestamp))
+    }
 }
 
 #[cfg(test)]

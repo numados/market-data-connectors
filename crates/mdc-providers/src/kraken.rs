@@ -30,6 +30,7 @@
 //! # }
 //! ```
 
+pub mod bench_support;
 pub mod checksum;
 pub mod config;
 pub mod connection;
@@ -48,4 +49,7 @@ pub use connector::{KrakenConnector, KrakenConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use fsm::{PollOutcome, SnapshotOutcome, SymbolFsm, SyncState, UpdateOutcome};
 pub use normalize::{normalize_delta, normalize_snapshot, normalize_trade, parse_rfc3339_nanos};
-pub use raw::{RawAckResult, RawBookData, RawLevel, RawMessage, RawMethodAck, RawTrade};
+pub use raw::{
+    KrakenBookDataHeader, KrakenConnectionScratch, KrakenDepthSeed, KrakenLevelsSeed, RawAckResult,
+    RawBookData, RawLevel, RawMessage, RawMethodAck, RawTrade,
+};

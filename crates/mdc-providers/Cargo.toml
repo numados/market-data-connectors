@@ -64,3 +64,14 @@ allocation-counter.workspace = true
 name = "binance_parse"
 harness = false
 required-features = ["binance"]
+
+[[bench]]
+name = "kraken_parse"
+harness = false
+required-features = ["kraken"]
+
+[[bench]]
+name = "kraken_checksum"
+harness = false
+required-features = ["kraken"]
+
