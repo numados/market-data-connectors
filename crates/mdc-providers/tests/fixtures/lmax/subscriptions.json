@@ -1,0 +1,9 @@
+{
+  "type": "SUBSCRIPTIONS",
+  "channels": [
+    {
+      "name": "ORDER_BOOK",
+      "instruments": ["btc-usd", "eth-usd"]
+    }
+  ]
+}

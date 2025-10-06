@@ -1,0 +1,5 @@
+{
+  "type": "ERROR",
+  "error_code": "TOO_MANY_REQUESTS",
+  "error_message": "The threshold for requests has been exceeded"
+}

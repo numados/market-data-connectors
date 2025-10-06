@@ -63,7 +63,15 @@ bitstamp = [
     "dep:url",
     "dep:bytes",
 ]
-all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp"]
+lmax = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "lmax"]
 
 [dependencies]
 mdc-core.workspace = true

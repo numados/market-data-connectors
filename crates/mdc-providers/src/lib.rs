@@ -17,3 +17,6 @@ pub mod gateio;
 
 #[cfg(feature = "bitstamp")]
 pub mod bitstamp;
+
+#[cfg(feature = "lmax")]
+pub mod lmax;
