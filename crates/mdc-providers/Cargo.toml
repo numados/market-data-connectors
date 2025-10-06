@@ -142,3 +142,9 @@ name = "bitstamp_parse"
 harness = false
 required-features = ["bitstamp"]
 
+[[bench]]
+name = "lmax_parse"
+harness = false
+required-features = ["lmax"]
+
+
