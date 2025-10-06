@@ -1,0 +1,14 @@
+{
+  "time": 1700000000,
+  "time_ms": 1700000000123,
+  "channel": "spot.trades",
+  "event": "update",
+  "result": {
+    "id": 987654321,
+    "create_time_ms": "1700000000123.456",
+    "side": "sell",
+    "currency_pair": "BTC_USDT",
+    "amount": "0.01",
+    "price": "50000"
+  }
+}

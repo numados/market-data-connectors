@@ -46,7 +46,15 @@ bitfinex = [
     "dep:bytes",
     "dep:crc32fast",
 ]
-all = ["binance", "kraken", "coinbase", "bitfinex"]
+gateio = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio"]
 
 [dependencies]
 mdc-core.workspace = true

@@ -1,0 +1,13 @@
+{
+  "time": 1700000000,
+  "time_ms": 1700000000000,
+  "channel": "spot.obu",
+  "event": "subscribe",
+  "result": {
+    "status": "fail"
+  },
+  "error": {
+    "code": 2,
+    "message": "invalid symbol"
+  }
+}

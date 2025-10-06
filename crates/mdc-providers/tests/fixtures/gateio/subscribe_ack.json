@@ -1,0 +1,9 @@
+{
+  "time": 1700000000,
+  "time_ms": 1700000000000,
+  "channel": "spot.obu",
+  "event": "subscribe",
+  "result": {
+    "status": "success"
+  }
+}

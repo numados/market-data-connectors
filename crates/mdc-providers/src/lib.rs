@@ -11,3 +11,6 @@ pub mod coinbase;
 
 #[cfg(feature = "bitfinex")]
 pub mod bitfinex;
+
+#[cfg(feature = "gateio")]
+pub mod gateio;
