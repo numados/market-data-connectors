@@ -8,3 +8,6 @@ pub mod kraken;
 
 #[cfg(feature = "coinbase")]
 pub mod coinbase;
+
+#[cfg(feature = "bitfinex")]
+pub mod bitfinex;

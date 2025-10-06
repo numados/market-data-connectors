@@ -37,7 +37,16 @@ coinbase = [
     "dep:url",
     "dep:bytes",
 ]
-all = ["binance", "kraken", "coinbase"]
+bitfinex = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+    "dep:crc32fast",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex"]
 
 [dependencies]
 mdc-core.workspace = true
@@ -87,5 +96,6 @@ required-features = ["kraken"]
 name = "coinbase_parse"
 harness = false
 required-features = ["coinbase"]
+
 
 

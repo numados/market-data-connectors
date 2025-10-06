@@ -1,0 +1,10 @@
+{
+  "event": "subscribed",
+  "channel": "book",
+  "chanId": 266343,
+  "symbol": "tBTCUSD",
+  "prec": "P0",
+  "freq": "F0",
+  "len": "250",
+  "pair": "BTCUSD"
+}

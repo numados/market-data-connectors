@@ -1,0 +1,5 @@
+{
+  "event": "error",
+  "msg": "subscribe: dup",
+  "code": 10300
+}
