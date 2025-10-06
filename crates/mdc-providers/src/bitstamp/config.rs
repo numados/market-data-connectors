@@ -61,6 +61,9 @@ pub enum ConfigError {
     /// Symbol list was empty.
     #[error("symbols list cannot be empty")]
     EmptySymbols,
+    /// Streaming or market data sink was not provided.
+    #[error("market data sink is required")]
+    MissingSink,
     /// Configured symbols per connection must be greater than zero.
     #[error("symbols_per_connection must be greater than zero")]
     ZeroSymbolsPerConnection,

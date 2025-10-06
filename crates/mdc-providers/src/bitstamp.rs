@@ -13,15 +13,47 @@
 //!   before a snapshot are dropped and trigger a snapshot; diffs with `microtimestamp <= T` are dropped.
 //! - **Keepalive**: Connection watchdog and venue `bts:request_reconnect` handling.
 //! - **Credentials**: None required (public market data feeds).
+//!
+//! # Example
+//! ```rust
+//! use std::sync::Arc;
+//! use mdc_core::{Symbol, VecSink};
+//! use mdc_providers::bitstamp::{BitstampConfig, BitstampConnectorBuilder};
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = BitstampConfig::default();
+//! let symbols = vec![Symbol::from("btcusd")];
+//! let sink = Arc::new(VecSink::new());
+//! let (connector, handle) = BitstampConnectorBuilder::new(config)
+//!     .symbols(symbols)
+//!     .sink(sink)
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
 
+pub mod bench_support;
 pub mod config;
+pub mod connection;
+pub mod connector;
+pub mod control;
+pub mod fsm;
 pub mod normalize;
 pub mod raw;
+pub mod rest;
 
 pub use config::{BitstampConfig, BitstampStreams, ConfigError};
+pub use connection::{
+    build_diff_order_book_channel, build_live_trades_channel, build_subscribe_frame,
+    run_connection_task,
+};
+pub use connector::{BitstampConnector, BitstampConnectorBuilder};
+pub use control::{Command, ConnectorHandle, ControlError};
+pub use fsm::{DiffDecision, SymbolFsm, SyncState};
 pub use normalize::{normalize_depth, normalize_snapshot, normalize_trade};
 pub use raw::{
     BitstampConnectionScratch, BitstampDiffFrameHeader, BitstampDiffFrameSeed, LevelsSeed,
     ParseTimestampError, RawDiffData, RawEnvelope, RawOrderBookSnapshot, RawTrade, SubscribeData,
     SubscribeMessage, extract_symbol, parse_microtimestamp, u64_from_str,
 };
+pub use rest::{BitstampRestClient, RestError};
