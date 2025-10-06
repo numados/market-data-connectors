@@ -355,6 +355,97 @@ impl<'de, 'buf> Visitor<'de> for ObuVisitor<'buf> {
     }
 }
 
+/// Header metadata for zero-allocation parsed Gate.io `spot.obu` depth frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateioDepthFrameHeader<'de> {
+    /// Channel name (`"spot.obu"`).
+    pub channel: &'de str,
+    /// Event name (`"update"` or `"subscribe"`).
+    pub event: Option<&'de str>,
+    /// Server timestamp in seconds.
+    pub time: u64,
+    /// Server timestamp in milliseconds if present.
+    pub time_ms: Option<u64>,
+    /// Obu order book header containing metadata (t, s, full, first_id, last_id).
+    pub obu: ObuHeader<'de>,
+}
+
+/// Zero-allocation deserializer seed for Gate.io `spot.obu` WebSocket frames targeting scratch buffers.
+pub struct GateioDepthFrameSeed<'buf> {
+    scratch: &'buf mut GateioConnectionScratch,
+}
+
+impl<'buf> GateioDepthFrameSeed<'buf> {
+    /// Creates a new seed targeting pre-allocated scratch buffers.
+    pub fn new(scratch: &'buf mut GateioConnectionScratch) -> Self {
+        scratch.clear();
+        Self { scratch }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for GateioDepthFrameSeed<'buf> {
+    type Value = GateioDepthFrameHeader<'de>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(GateioDepthFrameVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct GateioDepthFrameVisitor<'buf> {
+    scratch: &'buf mut GateioConnectionScratch,
+}
+
+impl<'de, 'buf> Visitor<'de> for GateioDepthFrameVisitor<'buf> {
+    type Value = GateioDepthFrameHeader<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Gate.io spot.obu WebSocket frame map")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut channel = None;
+        let mut event = None;
+        let mut time = 0;
+        let mut time_ms = None;
+        let mut obu = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "channel" => channel = Some(map.next_value::<&'de str>()?),
+                "event" => event = Some(map.next_value::<&'de str>()?),
+                "time" => time = map.next_value::<u64>()?,
+                "time_ms" => time_ms = Some(map.next_value::<u64>()?),
+                "result" => {
+                    let h = map.next_value_seed(ObuSeed::new(self.scratch))?;
+                    obu = Some(h);
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let channel = channel.unwrap_or("spot.obu");
+        let obu = obu.ok_or_else(|| serde::de::Error::missing_field("result"))?;
+
+        Ok(GateioDepthFrameHeader {
+            channel,
+            event,
+            time,
+            time_ms,
+            obu,
+        })
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

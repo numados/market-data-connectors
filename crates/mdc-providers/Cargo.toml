@@ -114,3 +114,9 @@ required-features = ["bitfinex"]
 name = "bitfinex_checksum"
 harness = false
 required-features = ["bitfinex"]
+
+[[bench]]
+name = "gateio_parse"
+harness = false
+required-features = ["gateio"]
+

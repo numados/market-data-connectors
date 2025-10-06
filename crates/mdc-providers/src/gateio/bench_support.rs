@@ -6,7 +6,7 @@ use mdc_core::{
 };
 use serde::de::DeserializeSeed;
 
-use crate::gateio::raw::{GateioConnectionScratch, ObuSeed, RawEnvelope, extract_symbol};
+use crate::gateio::raw::{GateioConnectionScratch, GateioDepthFrameSeed, extract_symbol};
 
 /// Harness connection maintaining pre-allocated scratch buffers for benchmarking.
 pub struct Connection<S> {
@@ -38,22 +38,14 @@ impl<S: StreamingSink> Connection<S> {
             Err(_) => return,
         };
 
-        let env: RawEnvelope<'_> = match serde_json::from_str(frame_str) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
+        let mut deserializer = serde_json::Deserializer::from_str(frame_str);
+        let header =
+            match GateioDepthFrameSeed::new(&mut self.scratch).deserialize(&mut deserializer) {
+                Ok(h) => h,
+                Err(_) => return,
+            };
 
-        let Some(res_val) = env.result else {
-            return;
-        };
-
-        let mut deserializer = serde_json::Deserializer::from_str(res_val.get());
-        let header = match ObuSeed::new(&mut self.scratch).deserialize(&mut deserializer) {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-
-        let sym_str = extract_symbol(header.s);
+        let sym_str = extract_symbol(header.obu.s);
         let sym = if sym_str == self.symbol.as_str() {
             &self.symbol
         } else {
@@ -65,14 +57,14 @@ impl<S: StreamingSink> Connection<S> {
             venue: VenueId::Gateio,
             symbol: sym,
             tag: self.tag,
-            exchange_ts: Some(UnixNanos::from_millis(header.t)),
+            exchange_ts: Some(UnixNanos::from_millis(header.obu.t)),
             received_ts: UnixNanos::now(),
             connection_id: 1,
             delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
-            source_sequence: Some(header.last_id),
+            source_sequence: Some(header.obu.last_id),
         };
 
-        let kind = if header.full {
+        let kind = if header.obu.full {
             BookKind::Snapshot
         } else {
             BookKind::Delta
@@ -84,11 +76,42 @@ impl<S: StreamingSink> Connection<S> {
         for level in &self.scratch.asks {
             let _ = self.sink.level(Side::Ask, level.price, level.volume);
         }
-        let seq = if header.full {
+        let seq = if header.obu.full {
             None
         } else {
-            Some(SequenceRange::new(header.first_id, header.last_id))
+            Some(SequenceRange::new(header.obu.first_id, header.obu.last_id))
         };
         let _ = self.sink.end_book(&ctx, seq);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use mdc_testkit::{NoopStreamingSink, load_fixture};
+
+    #[test]
+    fn test_handle_frame_zero_alloc() {
+        let snap_str =
+            load_fixture("crates/mdc-providers/tests/fixtures/gateio/order_book_snapshot.json")
+                .unwrap();
+        let upd_str =
+            load_fixture("crates/mdc-providers/tests/fixtures/gateio/depth_update.json").unwrap();
+        let snap_bytes = snap_str.as_bytes();
+        let upd_bytes = upd_str.as_bytes();
+
+        let mut conn = Connection::new(NoopStreamingSink);
+        // Warm-up: initialize scratch buffers
+        conn.handle_frame(snap_bytes);
+        conn.handle_frame(upd_bytes);
+
+        let allocs = allocation_counter::measure(|| {
+            conn.handle_frame(upd_bytes);
+        });
+        assert_eq!(
+            allocs.count_total, 0,
+            "streaming path must not allocate after warm-up"
+        );
     }
 }
