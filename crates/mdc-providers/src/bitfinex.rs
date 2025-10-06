@@ -34,6 +34,7 @@
 //! # }
 //! ```
 
+pub mod bench_support;
 pub mod checksum;
 pub mod config;
 pub mod connection;
@@ -54,4 +55,3 @@ pub use raw::{
     BitfinexConnectionScratch, RawBookLevel, RawBookLevelOwned, RawChannelFrame, RawEvent,
     RawFrame, RawPayload, RawTradeEntry, parse_decimal_token,
 };
-

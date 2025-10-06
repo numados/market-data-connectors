@@ -97,5 +97,12 @@ name = "coinbase_parse"
 harness = false
 required-features = ["coinbase"]
 
+[[bench]]
+name = "bitfinex_parse"
+harness = false
+required-features = ["bitfinex"]
 
-
+[[bench]]
+name = "bitfinex_checksum"
+harness = false
+required-features = ["bitfinex"]
