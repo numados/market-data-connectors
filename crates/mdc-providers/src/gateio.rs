@@ -13,12 +13,42 @@
 //!   `IntegrityAlert::GapDetected` followed by in-place resubscription (`unsubscribe` + `subscribe`).
 //! - **Keepalive**: Application-level `spot.ping` from Gate.io answered immediately with `spot.pong`.
 //! - **Credentials**: None required (public market data feeds).
+//!
+//! # Example
+//! ```rust
+//! use std::sync::Arc;
+//! use mdc_core::{Symbol, VecSink};
+//! use mdc_providers::gateio::{GateioConfig, GateioConnectorBuilder};
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let config = GateioConfig::default();
+//! let symbols = vec![Symbol::from("BTC_USDT")];
+//! let sink = Arc::new(VecSink::new());
+//! let (connector, handle) = GateioConnectorBuilder::new(config)
+//!     .symbols(symbols)
+//!     .sink(sink)
+//!     .build()?;
+//! # Ok(())
+//! # }
+//! ```
 
+pub mod bench_support;
 pub mod config;
+pub mod connection;
+pub mod connector;
+pub mod control;
+pub mod fsm;
 pub mod normalize;
 pub mod raw;
 
 pub use config::{ConfigError, GateioConfig, GateioStreams};
+pub use connection::{
+    build_obu_payload, build_obu_subscribe_frame, build_obu_unsubscribe_frame,
+    build_trades_subscribe_frame, current_unix_secs, run_connection_task,
+};
+pub use connector::{GateioConnector, GateioConnectorBuilder};
+pub use control::{Command, ConnectorHandle, ControlError};
+pub use fsm::SymbolFsm;
 pub use normalize::{normalize_depth, normalize_snapshot, normalize_trade};
 pub use raw::{
     GateioConnectionScratch, LevelsSeed, ObuHeader, ObuSeed, ParseTimestampError, RawEnvelope,
