@@ -14,3 +14,6 @@ pub mod bitfinex;
 
 #[cfg(feature = "gateio")]
 pub mod gateio;
+
+#[cfg(feature = "bitstamp")]
+pub mod bitstamp;

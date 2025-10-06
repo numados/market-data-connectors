@@ -54,7 +54,16 @@ gateio = [
     "dep:url",
     "dep:bytes",
 ]
-all = ["binance", "kraken", "coinbase", "bitfinex", "gateio"]
+bitstamp = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:url",
+    "dep:bytes",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp"]
 
 [dependencies]
 mdc-core.workspace = true
