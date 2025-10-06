@@ -129,3 +129,8 @@ name = "gateio_parse"
 harness = false
 required-features = ["gateio"]
 
+[[bench]]
+name = "bitstamp_parse"
+harness = false
+required-features = ["bitstamp"]
+
