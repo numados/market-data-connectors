@@ -10,10 +10,10 @@ pub mod sink;
 
 pub use error::MdcError;
 pub use integrity::{
-    ChecksumStrategy, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP,
-    EmbargoTracker, KrakenChecksum, NoChecksum, RawLevelRef, SequenceCheck, SequenceTracker,
-    SilenceWatchdog, SnapshotPermit, WatchdogAction, clean_token, parse_retry_after,
-    remove_decimal_and_leading_zeros,
+    BitfinexChecksum, ChecksumStrategy, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429,
+    EMBARGO_SAFETY_CAP, EmbargoTracker, KrakenChecksum, NoChecksum, RawLevelRef, SequenceCheck,
+    SequenceTracker, SilenceWatchdog, SnapshotPermit, WatchdogAction, clean_token,
+    parse_retry_after, remove_decimal_and_leading_zeros,
 };
 pub use model::*;
 pub use resync::{

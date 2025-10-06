@@ -153,6 +153,69 @@ impl ChecksumStrategy for KrakenChecksum {
     }
 }
 
+/// Bitfinex WebSocket v2 CRC32 checksum calculation strategy.
+///
+/// Computes CRC32 over the top 25 bids (descending) and asks (ascending) interleaved:
+/// `bid_0:price:amount:ask_0:price:amount:bid_1:price:amount:ask_1:price:amount...`
+/// with the ask amount token as sent (negative), joined by ':'.
+/// Missing side entries are skipped. The calculated CRC32 value is cast to signed `i32`
+/// when validating against venue `cs` messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BitfinexChecksum {
+    depth: usize,
+}
+
+impl Default for BitfinexChecksum {
+    fn default() -> Self {
+        Self { depth: 25 }
+    }
+}
+
+impl BitfinexChecksum {
+    /// Creates a new `BitfinexChecksum` with the specified level depth (default 25).
+    pub const fn new(depth: usize) -> Self {
+        Self { depth }
+    }
+}
+
+impl ChecksumStrategy for BitfinexChecksum {
+    fn compute(&self, bids: &[RawLevelRef<'_>], asks: &[RawLevelRef<'_>]) -> u32 {
+        let mut hasher = crc32fast::Hasher::new();
+        let max_len = bids.len().max(asks.len()).min(self.depth);
+        let mut first = true;
+
+        for i in 0..max_len {
+            if let Some(bid) = bids.get(i) {
+                if !first {
+                    hasher.update(b":");
+                } else {
+                    first = false;
+                }
+                hasher.update(bid.price_raw.as_bytes());
+                hasher.update(b":");
+                hasher.update(bid.volume_raw.as_bytes());
+            }
+
+            if let Some(ask) = asks.get(i) {
+                if !first {
+                    hasher.update(b":");
+                } else {
+                    first = false;
+                }
+                hasher.update(ask.price_raw.as_bytes());
+                hasher.update(b":");
+                hasher.update(ask.volume_raw.as_bytes());
+            }
+        }
+
+        hasher.finalize()
+    }
+
+    fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +268,40 @@ mod tests {
         let strategy = KrakenChecksum::default();
         let checksum = strategy.compute(&bids, &asks);
         assert_eq!(checksum, 3310070434);
+    }
+
+    #[test]
+    fn test_bitfinex_checksum_interleaving_and_signed_cast() {
+        let bids = [
+            RawLevelRef::new(dec("41698"), dec("0.71"), "41698", "0.71"),
+            RawLevelRef::new(dec("41697"), dec("0.2"), "41697", "0.2"),
+        ];
+        let asks = [
+            RawLevelRef::new(dec("41699"), dec("0.5"), "41699", "-0.5"),
+            RawLevelRef::new(dec("41700"), dec("1.2"), "41700", "-1.2"),
+        ];
+
+        let strategy = BitfinexChecksum::default();
+        let checksum = strategy.compute(&bids, &asks);
+        let expected_raw_str = "41698:0.71:41699:-0.5:41697:0.2:41700:-1.2";
+        let expected = crc32fast::hash(expected_raw_str.as_bytes());
+        assert_eq!(checksum, expected);
+        assert_eq!(checksum as i32, expected as i32);
+    }
+
+    #[test]
+    fn test_bitfinex_checksum_unequal_depths() {
+        let bids = [
+            RawLevelRef::new(dec("100"), dec("1.0"), "100", "1.0"),
+            RawLevelRef::new(dec("99"), dec("2.0"), "99", "2.0"),
+            RawLevelRef::new(dec("98"), dec("3.0"), "98", "3.0"),
+        ];
+        let asks = [RawLevelRef::new(dec("101"), dec("0.5"), "101", "-0.5")];
+
+        let strategy = BitfinexChecksum::default();
+        let checksum = strategy.compute(&bids, &asks);
+        let expected_raw_str = "100:1.0:101:-0.5:99:2.0:98:3.0";
+        let expected = crc32fast::hash(expected_raw_str.as_bytes());
+        assert_eq!(checksum, expected);
     }
 }

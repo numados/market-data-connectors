@@ -6,7 +6,7 @@ pub mod sequence;
 pub mod watchdog;
 
 pub use checksum::{
-    ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef, clean_token,
+    BitfinexChecksum, ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef, clean_token,
     remove_decimal_and_leading_zeros,
 };
 pub use embargo::{
