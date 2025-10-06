@@ -79,6 +79,10 @@ impl BitstampRestClient {
         }
 
         let mut url = self.base_url.clone();
+        if !url.path().ends_with('/') {
+            let p = format!("{}/", url.path());
+            url.set_path(&p);
+        }
         let path = format!("order_book/{pair}/");
         url = url
             .join(&path)

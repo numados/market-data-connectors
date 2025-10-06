@@ -25,7 +25,7 @@ impl Default for BitstampConfig {
         #[allow(clippy::expect_used)]
         let ws_url = Url::parse("wss://ws.bitstamp.net").expect("static URL parse");
         #[allow(clippy::expect_used)]
-        let rest_url = Url::parse("https://www.bitstamp.net/api/v2").expect("static URL parse");
+        let rest_url = Url::parse("https://www.bitstamp.net/api/v2/").expect("static URL parse");
         Self {
             ws_url,
             rest_url,
