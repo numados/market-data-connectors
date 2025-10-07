@@ -40,6 +40,113 @@ pub struct RawQuote<'a> {
     pub date_time: Option<&'a str>,
 }
 
+/// An owned quote record stored in reusable scratch buffer without heap allocations.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedVwdQuote {
+    /// Instrument key, e.g. `"EURUSD.XRATE.SPOT~X"`.
+    pub instrument_key: smallstr::SmallString<[u8; 32]>,
+    /// Best bid price.
+    pub bid_price: Option<rust_decimal::Decimal>,
+    /// Best bid timestamp string.
+    pub bid_time: Option<smallstr::SmallString<[u8; 36]>>,
+    /// Best ask price.
+    pub ask_price: Option<rust_decimal::Decimal>,
+    /// Best ask timestamp string.
+    pub ask_time: Option<smallstr::SmallString<[u8; 36]>>,
+}
+
+/// Pre-allocated scratch buffer for VWD SNAPQUOTE frames.
+#[derive(Debug, Default)]
+pub struct VwdScratch {
+    /// Reused vector of parsed quotes.
+    pub quotes: Vec<ParsedVwdQuote>,
+}
+
+impl VwdScratch {
+    /// Creates a new scratch buffer with pre-allocated capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            quotes: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Clears quotes while retaining buffer capacity.
+    pub fn clear(&mut self) {
+        self.quotes.clear();
+    }
+}
+
+/// Seed for deserializing an array of `RawRow`s into a `VwdScratch` without heap allocations.
+pub struct VwdScratchSeed<'a> {
+    scratch: &'a mut VwdScratch,
+}
+
+impl<'a> VwdScratchSeed<'a> {
+    /// Creates a new seed wrapping a pre-allocated scratch buffer.
+    pub fn new(scratch: &'a mut VwdScratch) -> Self {
+        Self { scratch }
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for VwdScratchSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(VwdScratchVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct VwdScratchVisitor<'a> {
+    scratch: &'a mut VwdScratch,
+}
+
+impl<'de> serde::de::Visitor<'de> for VwdScratchVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON array of VWD SNAPQUOTE rows")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        use std::str::FromStr;
+        self.scratch.clear();
+        while let Some(row) = seq.next_element::<RawRow<'de>>()? {
+            if let Some(q) = row.snap_quote {
+                let mut parsed = ParsedVwdQuote::default();
+                if let Some(key) = q.instrument_key {
+                    parsed.instrument_key = smallstr::SmallString::from(key);
+                }
+                if let Some(bid) = q.bid {
+                    if let Some(raw_p) = bid.price {
+                        parsed.bid_price = rust_decimal::Decimal::from_str(raw_p.get()).ok();
+                    }
+                    if let Some(dt) = bid.date_time {
+                        parsed.bid_time = Some(smallstr::SmallString::from(dt));
+                    }
+                }
+                if let Some(ask) = q.ask {
+                    if let Some(raw_p) = ask.price {
+                        parsed.ask_price = rust_decimal::Decimal::from_str(raw_p.get()).ok();
+                    }
+                    if let Some(dt) = ask.date_time {
+                        parsed.ask_time = Some(smallstr::SmallString::from(dt));
+                    }
+                }
+                self.scratch.quotes.push(parsed);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Deserializes a raw JSON slice into a list of borrowed `RawRow`s.
 pub fn parse_snap_quotes<'a>(payload: &'a str) -> Result<Vec<RawRow<'a>>, serde_json::Error> {
     serde_json::from_str(payload)

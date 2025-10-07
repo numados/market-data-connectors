@@ -23,19 +23,28 @@ pub struct NormalizedQuote {
     pub is_inverse: bool,
 }
 
+use smallstr::SmallString;
+
 /// Builds the direct VWD instrument key for a 6-letter FX symbol (e.g. `"EURUSD.XRATE.SPOT~X"`).
-pub fn build_instrument_key(symbol: &str) -> Option<String> {
+pub fn build_instrument_key(symbol: &str) -> Option<SmallString<[u8; 32]>> {
     if symbol.len() == 6 && symbol.is_ascii() {
-        Some(format!("{symbol}.XRATE.SPOT~X"))
+        let mut key = SmallString::new();
+        key.push_str(symbol);
+        key.push_str(".XRATE.SPOT~X");
+        Some(key)
     } else {
         None
     }
 }
 
 /// Builds the inverse VWD instrument key for a 6-letter FX symbol (e.g. `"USDEUR.XRATE.SPOT~X"`).
-pub fn build_inverse_instrument_key(symbol: &str) -> Option<String> {
+pub fn build_inverse_instrument_key(symbol: &str) -> Option<SmallString<[u8; 32]>> {
     if symbol.len() == 6 && symbol.is_ascii() {
-        Some(format!("{}{}.XRATE.SPOT~X", &symbol[3..6], &symbol[0..3]))
+        let mut key = SmallString::new();
+        key.push_str(&symbol[3..6]);
+        key.push_str(&symbol[0..3]);
+        key.push_str(".XRATE.SPOT~X");
+        Some(key)
     } else {
         None
     }
@@ -55,7 +64,7 @@ pub fn normalize_symbol_quote(
         r.snap_quote
             .as_ref()
             .and_then(|q| q.instrument_key)
-            .is_some_and(|k| k == direct_key)
+            .is_some_and(|k| k == direct_key.as_str())
     }) {
         let q = row
             .snap_quote
@@ -99,7 +108,7 @@ pub fn normalize_symbol_quote(
             r.snap_quote
                 .as_ref()
                 .and_then(|q| q.instrument_key)
-                .is_some_and(|k| k == inv_key)
+                .is_some_and(|k| k == inv_key.as_str())
         }) {
             let q = row
                 .snap_quote
@@ -145,6 +154,93 @@ pub fn normalize_symbol_quote(
             }
 
             let exchange_ts = extract_exchange_ts(raw_inv_bid.date_time, raw_inv_ask.date_time);
+
+            return Ok(NormalizedQuote {
+                symbol: vwd_sym.symbol.clone(),
+                bid,
+                ask,
+                exchange_ts,
+                is_inverse: true,
+            });
+        }
+    }
+
+    Err(SourceErrorKind::MissingQuote)
+}
+
+/// Normalizes a configured symbol from a parsed scratch buffer.
+pub fn normalize_symbol_from_scratch(
+    vwd_sym: &VwdSymbol,
+    scratch: &crate::vwd::raw::VwdScratch,
+    significant_digits: u32,
+) -> Result<NormalizedQuote, SourceErrorKind> {
+    let direct_key =
+        build_instrument_key(vwd_sym.symbol.as_str()).ok_or(SourceErrorKind::InvalidQuote)?;
+
+    // 1. Check for direct quote
+    if let Some(q) = scratch
+        .quotes
+        .iter()
+        .find(|q| q.instrument_key.as_str() == direct_key.as_str())
+    {
+        let mut bid = q.bid_price.ok_or(SourceErrorKind::InvalidQuote)?;
+        let mut ask = q.ask_price.ok_or(SourceErrorKind::InvalidQuote)?;
+
+        if bid <= Decimal::ZERO || ask <= Decimal::ZERO {
+            return Err(SourceErrorKind::InvalidQuote);
+        }
+
+        if let Some(scale) = vwd_sym.scale {
+            bid *= scale;
+            ask *= scale;
+        }
+
+        let exchange_ts = extract_exchange_ts(q.bid_time.as_deref(), q.ask_time.as_deref());
+
+        return Ok(NormalizedQuote {
+            symbol: vwd_sym.symbol.clone(),
+            bid,
+            ask,
+            exchange_ts,
+            is_inverse: false,
+        });
+    }
+
+    // 2. Check for inverse quote if allowed
+    if vwd_sym.allow_inverse {
+        let inv_key = build_inverse_instrument_key(vwd_sym.symbol.as_str())
+            .ok_or(SourceErrorKind::InvalidQuote)?;
+
+        if let Some(q) = scratch
+            .quotes
+            .iter()
+            .find(|q| q.instrument_key.as_str() == inv_key.as_str())
+        {
+            let inv_bid = q.bid_price.ok_or(SourceErrorKind::InvalidQuote)?;
+            let inv_ask = q.ask_price.ok_or(SourceErrorKind::InvalidQuote)?;
+
+            if inv_bid <= Decimal::ZERO || inv_ask <= Decimal::ZERO {
+                return Err(SourceErrorKind::InvalidQuote);
+            }
+
+            let inverted_bid = Decimal::ONE
+                .checked_div(inv_ask)
+                .ok_or(SourceErrorKind::InvalidQuote)?;
+            let inverted_ask = Decimal::ONE
+                .checked_div(inv_bid)
+                .ok_or(SourceErrorKind::InvalidQuote)?;
+
+            let mut bid = round_to_significant_digits(inverted_bid, significant_digits)
+                .map_err(|_| SourceErrorKind::InvalidQuote)?;
+            let mut ask = round_to_significant_digits(inverted_ask, significant_digits)
+                .map_err(|_| SourceErrorKind::InvalidQuote)?;
+
+            if let Some(scale) = vwd_sym.scale {
+                bid *= scale;
+                ask *= scale;
+            }
+
+            let exchange_ts = extract_exchange_ts(q.bid_time.as_deref(), q.ask_time.as_deref());
 
             return Ok(NormalizedQuote {
                 symbol: vwd_sym.symbol.clone(),

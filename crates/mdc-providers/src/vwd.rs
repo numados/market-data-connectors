@@ -37,17 +37,28 @@
 //!     .expect("valid configuration");
 //! ```
 
+pub mod bench_support;
 pub mod config;
+pub mod connection;
+pub mod connector;
+pub mod control;
 pub mod normalize;
 pub mod raw;
+pub mod rest;
 
 pub use config::{
     ConfigError, DEFAULT_INDICATIVE_SIZE, DEFAULT_POLL_INTERVAL, DEFAULT_REQUEST_TIMEOUT,
     DEFAULT_SIGNIFICANT_DIGITS, DEFAULT_VWD_BASE_URL, VwdConfig, VwdConfigBuilder, VwdCredentials,
     VwdSymbol,
 };
+pub use connector::{VwdConnector, VwdConnectorBuilder};
+pub use control::{Command, ConnectorHandle, ControlError};
 pub use normalize::{
-    NormalizedQuote, build_instrument_key, build_inverse_instrument_key, normalize_symbol_quote,
-    parse_rfc3339_nanos, round_to_significant_digits,
+    NormalizedQuote, build_instrument_key, build_inverse_instrument_key,
+    normalize_symbol_from_scratch, normalize_symbol_quote, parse_rfc3339_nanos,
+    round_to_significant_digits,
 };
-pub use raw::{RawQuote, RawRow, RawSnapQuote, parse_snap_quotes};
+pub use raw::{
+    ParsedVwdQuote, RawQuote, RawRow, RawSnapQuote, VwdScratch, VwdScratchSeed, parse_snap_quotes,
+};
+pub use rest::{VwdRestClient, build_snapquote_keys, build_snapquote_url};
