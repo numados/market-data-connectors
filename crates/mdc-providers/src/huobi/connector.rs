@@ -216,6 +216,11 @@ impl<S> HuobiConnectorBuilder<S> {
         }
     }
 
+    /// Configures the streaming sink for the connector (alias for [`sink`]).
+    pub fn streaming_sink<NewS>(self, sink: NewS) -> HuobiConnectorBuilder<NewS> {
+        self.sink(sink)
+    }
+
     /// Configures an owned [`MarketDataSink`] by wrapping it in an [`Owned`] adapter.
     pub fn owned_sink<O: MarketDataSink>(self, sink: O) -> HuobiConnectorBuilder<Owned<O>> {
         self.sink(Owned::new(sink))

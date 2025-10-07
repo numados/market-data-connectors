@@ -19,6 +19,8 @@ use url::Url;
 pub enum WsAction {
     /// Sends a JSON or text message to the client.
     SendText(String),
+    /// Sends a binary message to the client.
+    SendBinary(Vec<u8>),
     /// Sends a WebSocket ping frame with optional payload.
     SendPing(Vec<u8>),
     /// Closes the connection with an optional close code.
@@ -117,6 +119,11 @@ impl MockWsServer {
                                 match action {
                                     WsAction::SendText(text) => {
                                         if ws_stream.send(Message::Text(text)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    WsAction::SendBinary(bytes) => {
+                                        if ws_stream.send(Message::Binary(bytes)).await.is_err() {
                                             return;
                                         }
                                     }
@@ -235,6 +242,11 @@ impl MockWsServer {
     /// Broadcasts a text message to all currently connected clients.
     pub fn broadcast_text(&self, text: impl Into<String>) {
         let _ = self.broadcast_tx.send(Message::Text(text.into()));
+    }
+
+    /// Broadcasts a binary frame to all currently connected clients.
+    pub fn broadcast_binary(&self, data: impl Into<Vec<u8>>) {
+        let _ = self.broadcast_tx.send(Message::Binary(data.into()));
     }
 
     /// Broadcasts a close frame to all currently connected clients.
