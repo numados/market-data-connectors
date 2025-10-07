@@ -197,5 +197,10 @@ name = "huobi_parse"
 harness = false
 required-features = ["huobi"]
 
+[[bench]]
+name = "coinbase_advanced_parse"
+harness = false
+required-features = ["coinbase-advanced"]
+
 
 
