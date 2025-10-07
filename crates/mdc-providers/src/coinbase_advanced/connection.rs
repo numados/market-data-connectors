@@ -99,32 +99,33 @@ pub async fn run_connection_task<S: StreamingSink>(
             "Connecting to Coinbase Advanced Trade WebSocket"
         );
 
-        let ws_stream = match tokio::time::timeout(
-            config.connection_timeout,
-            connect_async(config.ws_url.as_str()),
-        )
-        .await
-        {
-            Ok(Ok((stream, _response))) => {
-                reconnect_attempt = 0;
-                stream
-            }
-            Ok(Err(e)) => {
-                warn!(
-                    connection_id,
-                    error = %e,
-                    "Failed to connect to Coinbase Advanced WebSocket"
-                );
-                reconnect_attempt += 1;
-                continue 'reconnect_loop;
-            }
-            Err(_) => {
-                warn!(
-                    connection_id,
-                    "Connection attempt to Coinbase Advanced timed out"
-                );
-                reconnect_attempt += 1;
-                continue 'reconnect_loop;
+        let ws_stream = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = tokio::time::timeout(
+                config.connection_timeout,
+                connect_async(config.ws_url.as_str()),
+            ) => match res {
+                Ok(Ok((stream, _response))) => {
+                    reconnect_attempt = 0;
+                    stream
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        connection_id,
+                        error = %e,
+                        "Failed to connect to Coinbase Advanced WebSocket"
+                    );
+                    reconnect_attempt += 1;
+                    continue 'reconnect_loop;
+                }
+                Err(_) => {
+                    warn!(
+                        connection_id,
+                        "Connection attempt to Coinbase Advanced timed out"
+                    );
+                    reconnect_attempt += 1;
+                    continue 'reconnect_loop;
+                }
             }
         };
 
@@ -184,25 +185,6 @@ pub async fn run_connection_task<S: StreamingSink>(
         'frame_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    for (sym, tag) in &symbols {
-                        delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::CoinbaseAdvanced,
-                            symbol: sym,
-                            tag: *tag,
-                            exchange_ts: None,
-                            received_ts: UnixNanos::now(),
-                            connection_id,
-                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                            source_sequence: None,
-                        };
-                        let _ = sink.alert(
-                            &ctx,
-                            IntegrityAlert::ConnectionLost {
-                                reason: DisconnectKind::Shutdown,
-                            },
-                        );
-                    }
                     break 'reconnect_loop;
                 }
 
@@ -560,5 +542,27 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         reconnect_attempt += 1;
+    }
+
+    if cancel.is_cancelled() {
+        for (sym, tag) in &symbols {
+            delivery_ordinal += 1;
+            let ctx = EventContext {
+                venue: VenueId::CoinbaseAdvanced,
+                symbol: sym,
+                tag: *tag,
+                exchange_ts: None,
+                received_ts: UnixNanos::now(),
+                connection_id,
+                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                source_sequence: None,
+            };
+            let _ = sink.alert(
+                &ctx,
+                IntegrityAlert::ConnectionLost {
+                    reason: DisconnectKind::Shutdown,
+                },
+            );
+        }
     }
 }

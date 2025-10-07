@@ -174,8 +174,10 @@ mod tests {
 
     #[test]
     fn test_zero_symbols_per_connection() {
-        let mut config = CoinbaseAdvancedConfig::default();
-        config.symbols_per_connection = 0;
+        let config = CoinbaseAdvancedConfig {
+            symbols_per_connection: 0,
+            ..Default::default()
+        };
         assert_eq!(
             config.validate(),
             Err(ConfigError::ZeroSymbolsPerConnection)

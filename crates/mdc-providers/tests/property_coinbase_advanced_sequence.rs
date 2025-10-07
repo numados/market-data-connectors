@@ -1,0 +1,153 @@
+#![cfg(feature = "coinbase-advanced")]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
+
+//! Level 3 Property tests for Coinbase Advanced Trade connection-wide sequence tracking and FSM.
+
+use std::time::{Duration, Instant};
+
+use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+use mdc_core::{IntegrityAlert, Symbol, SymbolTag};
+use mdc_providers::coinbase_advanced::fsm::CoinbaseAdvancedFsm;
+use proptest::prelude::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    #[test]
+    fn property_tracker_contiguous_sequence(
+        start_seq in 0u64..10_000,
+        len in 1usize..50,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new();
+
+        // First message
+        let first_check = tracker.check(start_seq);
+        prop_assert_eq!(first_check, GlobalSequenceCheck::First);
+        prop_assert_eq!(tracker.next(), Some(start_seq + 1));
+
+        // Subsequent contiguous messages
+        for i in 1..=len {
+            let seq = start_seq + i as u64;
+            let check = tracker.check(seq);
+            prop_assert_eq!(check, GlobalSequenceCheck::Valid);
+            prop_assert_eq!(tracker.next(), Some(seq + 1));
+        }
+    }
+
+    #[test]
+    fn property_tracker_old_and_duplicate_dropped(
+        start_seq in 10u64..10_000,
+        older_offset in 1u64..10,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new();
+        tracker.check(start_seq);
+
+        let next = tracker.next().unwrap();
+
+        // Duplicate of current
+        let dup = tracker.check(start_seq);
+        prop_assert_eq!(dup, GlobalSequenceCheck::OldDataIgnored);
+        prop_assert_eq!(tracker.next(), Some(next));
+
+        // Older sequence
+        let old = tracker.check(start_seq.saturating_sub(older_offset));
+        prop_assert_eq!(old, GlobalSequenceCheck::OldDataIgnored);
+        prop_assert_eq!(tracker.next(), Some(next));
+    }
+
+    #[test]
+    fn property_tracker_gap_and_reanchor(
+        start_seq in 0u64..10_000,
+        gap in 1u64..100,
+        subsequent_len in 1usize..20,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new();
+        tracker.check(start_seq);
+
+        let expected = start_seq + 1;
+        let jumped_seq = expected + gap;
+
+        // Gap check
+        let gap_check = tracker.check(jumped_seq);
+        prop_assert_eq!(
+            gap_check,
+            GlobalSequenceCheck::GapDetected {
+                expected,
+                received: jumped_seq,
+            }
+        );
+        // Tracker must re-anchor to jumped_seq + 1
+        prop_assert_eq!(tracker.next(), Some(jumped_seq + 1));
+
+        // Subsequent contiguous sequence must now be Valid
+        for i in 1..=subsequent_len {
+            let seq = jumped_seq + i as u64;
+            let check = tracker.check(seq);
+            prop_assert_eq!(check, GlobalSequenceCheck::Valid);
+            prop_assert_eq!(tracker.next(), Some(seq + 1));
+        }
+    }
+
+    #[test]
+    fn property_fsm_gap_invalidates_all_products(
+        num_products in 1usize..10,
+        start_seq in 0u64..1_000,
+        gap in 2u64..50,
+    ) {
+        let symbols: Vec<(Symbol, SymbolTag)> = (0..num_products)
+            .map(|i| (Symbol::from(format!("PROD-{i}")), i as SymbolTag))
+            .collect();
+
+        let mut fsm = CoinbaseAdvancedFsm::new(symbols.clone(), Duration::from_secs(5));
+
+        // All products initially awaiting snapshot
+        for (sym, _) in &symbols {
+            prop_assert!(!fsm.is_in_sync(sym));
+        }
+
+        // Complete snapshot for each
+        for (sym, _) in &symbols {
+            let alert = fsm.on_snapshot(sym);
+            prop_assert_eq!(
+                alert,
+                Some(IntegrityAlert::ResyncCompleted {
+                    last_update_id: None,
+                })
+            );
+            prop_assert!(fsm.is_in_sync(sym));
+        }
+
+        // Anchor sequence
+        fsm.check_sequence(start_seq);
+
+        // Gap injection
+        let expected = start_seq + 1;
+        let jumped = expected + gap;
+        let now = Instant::now();
+        let (should_resub, alerts) = fsm.on_gap(expected, jumped, now);
+
+        prop_assert!(should_resub);
+        prop_assert_eq!(alerts.len(), num_products);
+
+        // All products must be invalidated (AwaitingSnapshot)
+        for (sym, _) in &symbols {
+            prop_assert!(!fsm.is_in_sync(sym));
+        }
+
+        for (sym, tag, [gap_alert, start_alert]) in alerts {
+            prop_assert!(symbols.iter().any(|(s, t)| s == &sym && t == &tag));
+            prop_assert_eq!(
+                gap_alert,
+                IntegrityAlert::GapDetected {
+                    expected,
+                    received: jumped,
+                }
+            );
+            prop_assert_eq!(start_alert, IntegrityAlert::ResyncStarted);
+        }
+    }
+}
