@@ -216,7 +216,7 @@ impl<S> HuobiConnectorBuilder<S> {
         }
     }
 
-    /// Configures the streaming sink for the connector (alias for [`sink`]).
+    /// Configures the streaming sink for the connector (alias for [`Self::sink`]).
     pub fn streaming_sink<NewS>(self, sink: NewS) -> HuobiConnectorBuilder<NewS> {
         self.sink(sink)
     }

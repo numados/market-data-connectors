@@ -64,6 +64,11 @@ impl<S: StreamingSink> Connection<S> {
         );
     }
 
+    /// Handles an uncompressed JSON frame slice (alias for [`Self::handle_raw_frame`]).
+    pub fn handle_frame(&mut self, frame: &[u8]) {
+        self.handle_raw_frame(frame);
+    }
+
     fn dispatch_frame(
         scratch: &mut HuobiConnectionScratch,
         sink: &mut S,

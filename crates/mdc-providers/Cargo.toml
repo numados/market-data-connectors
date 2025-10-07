@@ -173,5 +173,10 @@ name = "vwd_parse"
 harness = false
 required-features = ["vwd"]
 
+[[bench]]
+name = "huobi_parse"
+harness = false
+required-features = ["huobi"]
+
 
 

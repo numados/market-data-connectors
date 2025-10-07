@@ -5,7 +5,7 @@ pub mod rest;
 pub mod sink;
 pub mod ws;
 
-pub use fixture::load_fixture;
+pub use fixture::{load_fixture, load_fixture_bytes};
 pub use rest::MockRest;
 pub use sink::{NoopStreamingSink, RecordedEvent, RecordingSink};
 pub use ws::{MockWsServer, WsAction};

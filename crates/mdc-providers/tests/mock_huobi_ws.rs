@@ -12,16 +12,13 @@ use std::time::Duration;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use mdc_core::{
-    BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, Symbol,
-};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, Symbol};
 use mdc_providers::huobi::{HuobiConfig, HuobiConnectorBuilder, HuobiStreams};
 use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, load_fixture};
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
-const SNAPSHOT_FIXTURE: &str =
-    "crates/mdc-providers/tests/fixtures/huobi/order_book_snapshot.json";
+const SNAPSHOT_FIXTURE: &str = "crates/mdc-providers/tests/fixtures/huobi/order_book_snapshot.json";
 const UPDATE_FIXTURE: &str = "crates/mdc-providers/tests/fixtures/huobi/depth_update.json";
 const PING_FIXTURE: &str = "crates/mdc-providers/tests/fixtures/huobi/heartbeat_or_ping.json";
 const TRADE_FIXTURE: &str = "crates/mdc-providers/tests/fixtures/huobi/trade.json";
@@ -189,8 +186,7 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
 
     // Send snapshot response with matching ID
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
@@ -199,8 +195,7 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
 
     // Send contiguous incremental delta (prevSeqNum: 100, seqNum: 101)
     let delta_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    let mut delta_val: serde_json::Value =
-        serde_json::from_str(&delta_raw).expect("parse update");
+    let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
@@ -235,13 +230,9 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
 
     // Verify Snapshot EndBook
     assert!(
-        events.iter().any(|ev| matches!(
-            ev,
-            RecordedEvent::EndBook {
-                seq: None,
-                ..
-            }
-        )),
+        events
+            .iter()
+            .any(|ev| matches!(ev, RecordedEvent::EndBook { seq: None, .. })),
         "Expected EndBook Snapshot"
     );
 
@@ -327,8 +318,7 @@ async fn test_ws_delta_buffering_before_snapshot() {
 
     // First send delta: seqNum = 101, prevSeqNum = 100 -> must be buffered
     let delta_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    let mut delta_val: serde_json::Value =
-        serde_json::from_str(&delta_raw).expect("parse update");
+    let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
@@ -338,17 +328,15 @@ async fn test_ws_delta_buffering_before_snapshot() {
     // At this point, no books should have been emitted
     let events_before_snap = sink.events();
     assert!(
-        !events_before_snap.iter().any(|ev| matches!(
-            ev,
-            RecordedEvent::BeginBook { .. }
-        )),
+        !events_before_snap
+            .iter()
+            .any(|ev| matches!(ev, RecordedEvent::BeginBook { .. })),
         "No book should be emitted while buffering diffs"
     );
 
     // Now send snapshot: seqNum = 100
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
@@ -423,8 +411,7 @@ async fn test_ws_gap_detected_triggers_resync() {
 
     // Establish snapshot at seqNum 100
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
@@ -435,8 +422,7 @@ async fn test_ws_gap_detected_triggers_resync() {
 
     // Send gapped delta: prevSeqNum 105 != expected 100 + 1 (101)
     let delta_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    let mut delta_val: serde_json::Value =
-        serde_json::from_str(&delta_raw).expect("parse update");
+    let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(105);
     delta_val["tick"]["seqNum"] = serde_json::json!(106);
     ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
@@ -513,8 +499,7 @@ async fn test_ws_stale_snapshot_handling() {
 
     // First buffer delta starting at seqNum 101 (prevSeqNum 100)
     let delta_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    let mut delta_val: serde_json::Value =
-        serde_json::from_str(&delta_raw).expect("parse update");
+    let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
@@ -523,8 +508,7 @@ async fn test_ws_stale_snapshot_handling() {
 
     // Snapshot arrives with seqNum 90 (older than buffered delta's first sequence 101) -> stale
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(90);
     ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
@@ -596,8 +580,7 @@ async fn test_ws_multi_symbol_snapshot_serialization() {
 
     // Reply to the first snapshot request
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(active_id);
     snap_val["rep"] = serde_json::Value::String(active_ch.to_string());
     snap_val["data"]["seqNum"] = serde_json::json!(100);
@@ -717,8 +700,7 @@ async fn test_ws_manual_resync_command() {
 
     // Reply to initial snapshot
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    let mut snap_val: serde_json::Value =
-        serde_json::from_str(&snap_raw).expect("parse snapshot");
+    let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
