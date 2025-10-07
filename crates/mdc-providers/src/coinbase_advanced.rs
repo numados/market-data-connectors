@@ -15,13 +15,30 @@
 //!
 //! # Example
 //! ```rust
-//! use mdc_providers::coinbase_advanced::{CoinbaseAdvancedConfig, CoinbaseAdvancedConfigBuilder};
+//! use std::sync::Arc;
+//! use mdc_core::{Symbol, VecSink};
+//! use mdc_providers::coinbase_advanced::{
+//!     CoinbaseAdvancedConfig, CoinbaseAdvancedConnectorBuilder,
+//! };
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = CoinbaseAdvancedConfig::default();
-//! assert_eq!(config.symbols_per_connection, 25);
+//! let symbols = vec![Symbol::from("BTC-USD")];
+//! let sink = Arc::new(VecSink::new());
+//! let (connector, handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+//!     .symbols(symbols)
+//!     .sink(sink)
+//!     .build()?;
+//! # Ok(())
+//! # }
 //! ```
 
+pub mod bench_support;
 pub mod config;
+pub mod connection;
+pub mod connector;
+pub mod control;
+pub mod fsm;
 pub mod normalize;
 pub mod raw;
 
@@ -29,6 +46,10 @@ pub use config::{
     CoinbaseAdvancedConfig, CoinbaseAdvancedConfigBuilder, CoinbaseAdvancedStreams, ConfigError,
     DEFAULT_WS_URL,
 };
+pub use connection::run_connection_task;
+pub use connector::{CoinbaseAdvancedConnector, CoinbaseAdvancedConnectorBuilder};
+pub use control::{Command, ConnectorHandle, ControlError};
+pub use fsm::{CoinbaseAdvancedFsm, ProductSyncState};
 pub use normalize::{
     normalize_delta_from_scratch, normalize_snapshot_from_event, normalize_snapshot_from_scratch,
     normalize_trade, parse_rfc3339_nanos,
