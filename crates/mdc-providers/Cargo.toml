@@ -157,4 +157,10 @@ name = "lmax_parse"
 harness = false
 required-features = ["lmax"]
 
+[[bench]]
+name = "vwd_parse"
+harness = false
+required-features = ["vwd"]
+
+
 
