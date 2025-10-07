@@ -20,3 +20,6 @@ pub mod bitstamp;
 
 #[cfg(feature = "lmax")]
 pub mod lmax;
+
+#[cfg(feature = "vwd")]
+pub mod vwd;

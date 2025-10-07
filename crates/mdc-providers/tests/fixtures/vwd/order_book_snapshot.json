@@ -1,0 +1,52 @@
+[
+  {
+    "snapQuote": {
+      "instrumentKey": "EURUSD.XRATE.SPOT~X",
+      "bid": {
+        "price": 1.0842,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:00.000+02:00"
+      },
+      "ask": {
+        "price": 1.0844,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:01.000+02:00"
+      },
+      "last": {
+        "price": 1.0843,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:00.500+02:00"
+      }
+    },
+    "meta": {
+      "elapsedTime": 0.01,
+      "totalRowCount": 2,
+      "rowCount": 1
+    }
+  },
+  {
+    "snapQuote": {
+      "instrumentKey": "GBPUSD.XRATE.SPOT~X",
+      "bid": {
+        "price": 1.2950,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:02.000+02:00"
+      },
+      "ask": {
+        "price": 1.2955,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:03.000+02:00"
+      },
+      "last": {
+        "price": 1.2952,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:02.500+02:00"
+      }
+    },
+    "meta": {
+      "elapsedTime": 0.01,
+      "totalRowCount": 2,
+      "rowCount": 1
+    }
+  }
+]

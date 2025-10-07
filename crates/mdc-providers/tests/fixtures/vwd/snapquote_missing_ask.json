@@ -1,0 +1,23 @@
+[
+  {
+    "snapQuote": {
+      "instrumentKey": "EURUSD.XRATE.SPOT~X",
+      "bid": {
+        "price": 1.0842,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:00.000+02:00"
+      },
+      "ask": null,
+      "last": {
+        "price": 1.0843,
+        "size": null,
+        "dateTime": "2026-09-29T10:00:00.500+02:00"
+      }
+    },
+    "meta": {
+      "elapsedTime": 0.01,
+      "totalRowCount": 1,
+      "rowCount": 1
+    }
+  }
+]

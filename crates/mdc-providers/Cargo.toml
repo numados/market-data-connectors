@@ -71,7 +71,15 @@ lmax = [
     "dep:url",
     "dep:bytes",
 ]
-all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "lmax"]
+vwd = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:reqwest",
+    "dep:url",
+    "dep:bytes",
+    "dep:secrecy",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "lmax", "vwd"]
 
 [dependencies]
 mdc-core.workspace = true
@@ -92,6 +100,8 @@ url = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 simd-json = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true }
+
 
 [dev-dependencies]
 mdc-testkit.workspace = true
