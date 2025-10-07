@@ -23,3 +23,6 @@ pub mod lmax;
 
 #[cfg(feature = "vwd")]
 pub mod vwd;
+
+#[cfg(feature = "huobi")]
+pub mod huobi;

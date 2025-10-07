@@ -1,0 +1,7 @@
+{
+  "status": "error",
+  "err-code": "bad-request",
+  "err-msg": "Invalid topic",
+  "id": "id1",
+  "ts": 1700000000000
+}

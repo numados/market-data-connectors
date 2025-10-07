@@ -79,7 +79,16 @@ vwd = [
     "dep:bytes",
     "dep:secrecy",
 ]
-all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "lmax", "vwd"]
+huobi = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:url",
+    "dep:bytes",
+    "dep:flate2",
+]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "lmax", "vwd", "huobi"]
 
 [dependencies]
 mdc-core.workspace = true
@@ -101,6 +110,8 @@ bytes = { workspace = true, optional = true }
 simd-json = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+
 
 
 [dev-dependencies]
