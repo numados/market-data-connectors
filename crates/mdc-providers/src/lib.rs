@@ -26,3 +26,6 @@ pub mod vwd;
 
 #[cfg(feature = "huobi")]
 pub mod huobi;
+
+#[cfg(feature = "coinbase-advanced")]
+pub mod coinbase_advanced;

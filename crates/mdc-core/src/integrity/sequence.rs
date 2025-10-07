@@ -83,6 +83,79 @@ impl SequenceTracker {
     }
 }
 
+/// Outcome of checking a sequence number against a connection-wide sequence tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalSequenceCheck {
+    /// First sequence number received; tracker anchored at `received + 1`.
+    First,
+    /// Contiguous sequence number received; tracker advanced to `received + 1`.
+    Valid,
+    /// Sequence number is older than expected (`received < expected`); envelope dropped silently.
+    OldDataIgnored,
+    /// Gap detected (`received > expected`); envelopes were lost. Re-anchors tracker to `received + 1`.
+    GapDetected {
+        /// Expected sequence number.
+        expected: u64,
+        /// Actual sequence number received.
+        received: u64,
+    },
+}
+
+/// Tracks connection-wide monotonic sequence numbers (e.g. Coinbase Advanced Trade).
+///
+/// Pure state machine with zero heap allocations and no I/O.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalSequenceTracker {
+    next: Option<u64>,
+}
+
+impl GlobalSequenceTracker {
+    /// Creates an uninitialized global sequence tracker.
+    pub const fn new() -> Self {
+        Self { next: None }
+    }
+
+    /// Resets the tracker to an uninitialized state.
+    pub fn reset(&mut self) {
+        self.next = None;
+    }
+
+    /// Returns the expected next sequence number, if initialized.
+    pub fn next(&self) -> Option<u64> {
+        self.next
+    }
+
+    /// Checks an incoming sequence number and advances the tracker accordingly.
+    ///
+    /// Rules:
+    /// - Uninitialized (`next == None`) -> returns [`GlobalSequenceCheck::First`], setting `next = n + 1`.
+    /// - `n == next` -> returns [`GlobalSequenceCheck::Valid`], setting `next = n + 1`.
+    /// - `n < next` -> returns [`GlobalSequenceCheck::OldDataIgnored`], leaving `next` unchanged.
+    /// - `n > next` -> returns [`GlobalSequenceCheck::GapDetected`], re-anchoring `next = n + 1`.
+    pub fn check(&mut self, n: u64) -> GlobalSequenceCheck {
+        match self.next {
+            None => {
+                self.next = Some(n.saturating_add(1));
+                GlobalSequenceCheck::First
+            }
+            Some(expected) => match n.cmp(&expected) {
+                std::cmp::Ordering::Equal => {
+                    self.next = Some(expected.saturating_add(1));
+                    GlobalSequenceCheck::Valid
+                }
+                std::cmp::Ordering::Less => GlobalSequenceCheck::OldDataIgnored,
+                std::cmp::Ordering::Greater => {
+                    self.next = Some(n.saturating_add(1));
+                    GlobalSequenceCheck::GapDetected {
+                        expected,
+                        received: n,
+                    }
+                }
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -188,5 +261,48 @@ mod tests {
             }
         );
         assert_eq!(tracker.current(), Some(100));
+    }
+
+    #[test]
+    fn global_sequence_tracker_lifecycle() {
+        let mut tracker = GlobalSequenceTracker::new();
+        assert_eq!(tracker.next(), None);
+
+        // First message with sequence 0
+        assert_eq!(tracker.check(0), GlobalSequenceCheck::First);
+        assert_eq!(tracker.next(), Some(1));
+
+        // Contiguous message with sequence 1
+        assert_eq!(tracker.check(1), GlobalSequenceCheck::Valid);
+        assert_eq!(tracker.next(), Some(2));
+
+        // Duplicate/old message with sequence 1
+        assert_eq!(tracker.check(1), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(tracker.next(), Some(2));
+
+        // Duplicate/old message with sequence 0
+        assert_eq!(tracker.check(0), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(tracker.next(), Some(2));
+
+        // Gap message with sequence 5 (expected 2)
+        assert_eq!(
+            tracker.check(5),
+            GlobalSequenceCheck::GapDetected {
+                expected: 2,
+                received: 5,
+            }
+        );
+        // Tracker re-anchors to 5 + 1 = 6
+        assert_eq!(tracker.next(), Some(6));
+
+        // Contiguous message after re-anchor
+        assert_eq!(tracker.check(6), GlobalSequenceCheck::Valid);
+        assert_eq!(tracker.next(), Some(7));
+
+        // Reset clears back to uninitialized
+        tracker.reset();
+        assert_eq!(tracker.next(), None);
+        assert_eq!(tracker.check(42), GlobalSequenceCheck::First);
+        assert_eq!(tracker.next(), Some(43));
     }
 }
