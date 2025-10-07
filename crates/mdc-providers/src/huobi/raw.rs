@@ -431,7 +431,7 @@ impl<'de, 'buf> Visitor<'de> for MbpVisitor<'buf> {
                     map.next_value_seed(LevelsSeed::new(&mut self.scratch.asks))?;
                 }
                 _ => {
-                    let _ = map.next_value::<serde_json::Value>()?;
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
                 }
             }
         }
@@ -441,6 +441,96 @@ impl<'de, 'buf> Visitor<'de> for MbpVisitor<'buf> {
         Ok(MbpHeader {
             seq_num,
             prev_seq_num,
+        })
+    }
+}
+
+/// Parsed metadata for a zero-allocation MBP WebSocket frame (tick or snapshot reply).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HuobiDepthFrameHeader<'de> {
+    pub ch: Option<&'de str>,
+    pub rep: Option<&'de str>,
+    pub ts: Option<u64>,
+    pub id: Option<&'de str>,
+    pub mbp: MbpHeader,
+}
+
+/// Zero-allocation deserializer seed for top-level Huobi MBP frames targeting scratch buffers.
+pub struct HuobiDepthFrameSeed<'buf> {
+    scratch: &'buf mut HuobiConnectionScratch,
+}
+
+impl<'buf> HuobiDepthFrameSeed<'buf> {
+    /// Creates a new `HuobiDepthFrameSeed` targeting pre-allocated scratch buffers.
+    pub fn new(scratch: &'buf mut HuobiConnectionScratch) -> Self {
+        scratch.clear();
+        Self { scratch }
+    }
+}
+
+impl<'de, 'buf> DeserializeSeed<'de> for HuobiDepthFrameSeed<'buf> {
+    type Value = HuobiDepthFrameHeader<'de>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_map(HuobiDepthFrameVisitor {
+            scratch: self.scratch,
+        })
+    }
+}
+
+struct HuobiDepthFrameVisitor<'buf> {
+    scratch: &'buf mut HuobiConnectionScratch,
+}
+
+impl<'de, 'buf> Visitor<'de> for HuobiDepthFrameVisitor<'buf> {
+    type Value = HuobiDepthFrameHeader<'de>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Huobi MBP WebSocket frame object")
+    }
+
+    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    where
+        M: MapAccess<'de>,
+    {
+        let mut ch = None;
+        let mut rep = None;
+        let mut ts = None;
+        let mut id = None;
+        let mut mbp = None;
+
+        while let Some(key) = map.next_key::<&'de str>()? {
+            match key {
+                "ch" => ch = Some(map.next_value::<&'de str>()?),
+                "rep" => rep = Some(map.next_value::<&'de str>()?),
+                "ts" => ts = Some(map.next_value::<u64>()?),
+                "id" => id = Some(map.next_value::<&'de str>()?),
+                "tick" => {
+                    let h = map.next_value_seed(MbpSeed::new(self.scratch))?;
+                    mbp = Some(h);
+                }
+                "data" => {
+                    let h = map.next_value_seed(MbpSeed::new(self.scratch))?;
+                    mbp = Some(h);
+                }
+                _ => {
+                    let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+        }
+
+        let mbp =
+            mbp.ok_or_else(|| serde::de::Error::custom("missing tick or data field in MBP frame"))?;
+
+        Ok(HuobiDepthFrameHeader {
+            ch,
+            rep,
+            ts,
+            id,
+            mbp,
         })
     }
 }

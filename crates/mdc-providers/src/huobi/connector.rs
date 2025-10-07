@@ -1,0 +1,247 @@
+//! Main Huobi (HTX) WebSocket market data connector and builder.
+
+use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use crate::huobi::config::{ConfigError, HuobiConfig, HuobiStreams};
+use crate::huobi::connection::run_connection_task;
+use crate::huobi::control::{Command, ConnectorHandle};
+
+/// Huobi (HTX) Market-By-Price WebSocket market data connector.
+pub struct HuobiConnector<S> {
+    config: HuobiConfig,
+    symbols: Vec<(Symbol, SymbolTag)>,
+    sink: S,
+    command_tx: mpsc::Sender<Command>,
+    command_rx: mpsc::Receiver<Command>,
+}
+
+impl HuobiConnector<()> {
+    /// Creates a builder initialized with the given `HuobiConfig`.
+    pub fn builder(config: HuobiConfig) -> HuobiConnectorBuilder<()> {
+        HuobiConnectorBuilder::new(config)
+    }
+}
+
+impl<S: StreamingSink + Clone> HuobiConnector<S> {
+    /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
+    pub fn handle(&self) -> ConnectorHandle {
+        ConnectorHandle::new(self.command_tx.clone())
+    }
+
+    /// Returns the venue identifier for Huobi.
+    pub fn venue(&self) -> VenueId {
+        VenueId::Huobi
+    }
+
+    /// Spawns the connector on the tokio runtime in a background task.
+    pub fn spawn(
+        self,
+        cancel: CancellationToken,
+    ) -> (
+        ConnectorHandle,
+        tokio::task::JoinHandle<Result<(), MdcError>>,
+    ) {
+        let handle = self.handle();
+        let join = tokio::spawn(async move { self.run(cancel).await });
+        (handle, join)
+    }
+
+    /// Runs the connector until cancelled.
+    pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let mut join_set = JoinSet::new();
+        let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
+            .symbols
+            .chunks(self.config.symbols_per_connection)
+            .map(<[(Symbol, SymbolTag)]>::to_vec)
+            .collect();
+
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Command>(32);
+        let mut command_rx = self.command_rx;
+        let cmd_broadcast = broadcast_tx.clone();
+        let cancel_cmd = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel_cmd.cancelled() => break,
+                    cmd_opt = command_rx.recv() => {
+                        match cmd_opt {
+                            Some(cmd) => {
+                                let _ = cmd_broadcast.send(cmd);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            let connection_id = (i + 1) as u32;
+            let sink = self.sink.clone();
+            let config = self.config.clone();
+            let cancel_conn = cancel.clone();
+
+            let mut b_rx = broadcast_tx.subscribe();
+            let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
+
+            let cancel_forward = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = cancel_forward.cancelled() => break,
+                        cmd = b_rx.recv() => {
+                            if let Ok(c) = cmd {
+                                if task_cmd_tx.send(c).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            join_set.spawn(async move {
+                run_connection_task(connection_id, chunk, config, sink, task_cmd_rx, cancel_conn)
+                    .await;
+            });
+        }
+
+        while let Some(res) = join_set.join_next().await {
+            if let Err(e) = res {
+                if !e.is_cancelled() {
+                    return Err(MdcError::Protocol(format!(
+                        "connection worker task panicked: {e}"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Fluent builder for constructing a [`HuobiConnector`].
+pub struct HuobiConnectorBuilder<S = ()> {
+    config: HuobiConfig,
+    symbols: Vec<(Symbol, SymbolTag)>,
+    sink: Option<S>,
+}
+
+impl HuobiConnectorBuilder<()> {
+    /// Creates a new builder with the given configuration.
+    pub fn new(config: HuobiConfig) -> Self {
+        Self {
+            config,
+            symbols: Vec::new(),
+            sink: None,
+        }
+    }
+}
+
+impl<S> HuobiConnectorBuilder<S> {
+    /// Adds a single symbol to subscribe to (with default tag 0).
+    pub fn symbol(mut self, symbol: impl Into<Symbol>) -> Self {
+        self.symbols.push((symbol.into(), SymbolTag::default()));
+        self
+    }
+
+    /// Sets the symbols to subscribe to (with default tag 0).
+    pub fn symbols<I, T>(mut self, symbols: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<Symbol>,
+    {
+        for s in symbols {
+            self.symbols.push((s.into(), SymbolTag::default()));
+        }
+        self
+    }
+
+    /// Adds a symbol with an associated consumer tag.
+    pub fn symbol_with_tag(mut self, symbol: impl Into<Symbol>, tag: SymbolTag) -> Self {
+        self.symbols.push((symbol.into(), tag));
+        self
+    }
+
+    /// Overrides the WebSocket base URL.
+    pub fn ws_url(mut self, url: Url) -> Self {
+        self.config.ws_url = url;
+        self
+    }
+
+    /// Sets the MBP depth levels (150 or 400).
+    pub fn mbp_levels(mut self, levels: u32) -> Result<Self, ConfigError> {
+        if levels != 150 && levels != 400 {
+            return Err(ConfigError::InvalidMbpLevels(levels));
+        }
+        self.config.mbp_levels = levels;
+        Ok(self)
+    }
+
+    /// Configures stream subscriptions.
+    pub fn streams(mut self, streams: HuobiStreams) -> Self {
+        self.config.streams = streams;
+        self
+    }
+
+    /// Enables or disables the incremental MBP order book stream.
+    pub fn mbp(mut self, enabled: bool) -> Self {
+        self.config.streams.mbp = enabled;
+        self
+    }
+
+    /// Enables or disables the public trades stream.
+    pub fn trades(mut self, enabled: bool) -> Self {
+        self.config.streams.trades = enabled;
+        self
+    }
+
+    /// Sets the maximum number of symbols per WebSocket connection.
+    pub fn symbols_per_connection(mut self, n: usize) -> Self {
+        self.config.symbols_per_connection = n;
+        self
+    }
+
+    /// Configures the streaming sink for the connector.
+    pub fn sink<NewS>(self, sink: NewS) -> HuobiConnectorBuilder<NewS> {
+        HuobiConnectorBuilder {
+            config: self.config,
+            symbols: self.symbols,
+            sink: Some(sink),
+        }
+    }
+
+    /// Configures an owned [`MarketDataSink`] by wrapping it in an [`Owned`] adapter.
+    pub fn owned_sink<O: MarketDataSink>(self, sink: O) -> HuobiConnectorBuilder<Owned<O>> {
+        self.sink(Owned::new(sink))
+    }
+
+    /// Builds the `HuobiConnector` and its operator `ConnectorHandle`.
+    pub fn build(self) -> Result<(HuobiConnector<S>, ConnectorHandle), ConfigError> {
+        self.config.validate()?;
+        if self.symbols.is_empty() {
+            return Err(ConfigError::EmptySymbols);
+        }
+        let sink = self
+            .sink
+            .ok_or_else(|| ConfigError::InvalidUrl("sink must be configured".to_string()))?;
+
+        let (command_tx, command_rx) = mpsc::channel(32);
+        let handle = ConnectorHandle::new(command_tx.clone());
+
+        let connector = HuobiConnector {
+            config: self.config,
+            symbols: self.symbols,
+            sink,
+            command_tx,
+            command_rx,
+        };
+
+        Ok((connector, handle))
+    }
+}
