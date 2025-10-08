@@ -2,6 +2,7 @@
 
 pub mod alert;
 pub mod book;
+pub mod capabilities;
 pub mod delivery;
 pub mod event;
 pub mod price_level;
@@ -16,6 +17,11 @@ pub mod venue;
 
 pub use alert::{DisconnectKind, IntegrityAlert, SourceErrorKind};
 pub use book::{L2Delta, L2Snapshot};
+pub use capabilities::{
+    CapabilityBounds, CapabilityError, ConsumerRequirements, IdentityScope, IntegrityCapability,
+    ProviderCapabilities, QuoteMode, ReplayCapability, SideSemantics, TimestampCapability,
+    TradeCapability,
+};
 pub use delivery::{DeliveryStamp, RunId};
 pub use event::{MarketDataKind, MarketEvent};
 pub use price_level::PriceLevel;
