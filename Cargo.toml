@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mdc-core",
     "crates/mdc-providers",
+    "crates/mdc-sinks",
     "crates/mdc-testkit",
 ]
 
@@ -65,4 +66,5 @@ allocation-counter = "0.8"
 
 # Internal crates
 mdc-core = { path = "crates/mdc-core" }
+mdc-sinks = { path = "crates/mdc-sinks" }
 mdc-testkit = { path = "crates/mdc-testkit" }

@@ -1,0 +1,26 @@
+[package]
+name = "mdc-sinks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+tokio = ["dep:tokio", "dep:futures-util"]
+
+[dependencies]
+mdc-core.workspace = true
+rust_decimal.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+tokio = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+mdc-testkit.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

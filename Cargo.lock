@@ -1004,6 +1004,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mdc-sinks"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "mdc-core",
+ "mdc-testkit",
+ "rust_decimal",
+ "serde",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mdc-testkit"
 version = "0.1.0"
 dependencies = [
