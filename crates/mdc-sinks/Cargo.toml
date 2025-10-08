@@ -9,8 +9,8 @@ license.workspace = true
 workspace = true
 
 [features]
-default = []
-tokio = ["dep:tokio", "dep:futures-util"]
+default = ["tokio"]
+tokio = ["dep:tokio", "dep:tokio-util", "dep:futures-util"]
 
 [dependencies]
 mdc-core.workspace = true
@@ -19,6 +19,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 [dev-dependencies]
