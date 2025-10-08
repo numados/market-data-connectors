@@ -1,6 +1,8 @@
-//! Main LMAX Digital WebSocket market data connector and builder.
-
-use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use mdc_core::{
+    CapabilityBounds, ConsumerRequirements, IntegrityCapability, MarketDataSink, MdcError, Owned,
+    ProviderCapabilities, QuoteMode, ReplayCapability, StreamingSink, Symbol, SymbolTag,
+    TimestampCapability, TradeCapability, VenueId,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -9,6 +11,27 @@ use url::Url;
 use crate::lmax::config::{ConfigError, ControlPacing, LmaxConfig, LmaxStreams};
 use crate::lmax::connection::run_connection_task;
 use crate::lmax::control::{Command, ConnectorHandle};
+
+/// Static capability declaration for LMAX Digital.
+pub static LMAX_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> = std::sync::LazyLock::new(
+    || {
+        ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Unverified {
+            reason: "LMAX public streams lack stable native trade identity and verified aggressor side semantics".to_string(),
+        },
+        timestamps: TimestampCapability::ExchangeMilliseconds,
+        integrity: IntegrityCapability::HeartbeatWatchdog,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(20),
+            max_symbols_per_connection: 26,
+        },
+        discovery: false,
+        rest_quote: false,
+    }
+    },
+);
 
 /// LMAX Digital WebSocket market data connector.
 pub struct LmaxConnector<S> {
@@ -33,6 +56,11 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
     /// Returns the venue identifier for LMAX Digital.
     pub fn venue(&self) -> VenueId {
         VenueId::Lmax
+    }
+
+    /// Returns the capability declaration for LMAX Digital.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &LMAX_CAPABILITIES
     }
 
     /// Spawns the connector on the tokio runtime in a background task.
@@ -180,6 +208,17 @@ impl<S> LmaxConnectorBuilder<S> {
     pub fn streaming_sink(mut self, sink: S) -> Self {
         self.sink = Some(sink);
         self
+    }
+
+    /// Returns the provider capability declaration for LMAX Digital.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &LMAX_CAPABILITIES
+    }
+
+    /// Evaluates and enforces consumer requirements against LMAX capabilities.
+    pub fn requirements(self, req: &ConsumerRequirements) -> Result<Self, MdcError> {
+        LMAX_CAPABILITIES.check_requirements(req)?;
+        Ok(self)
     }
 }
 

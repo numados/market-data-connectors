@@ -39,6 +39,10 @@ pub enum MdcError {
     /// Connector task or operation was cancelled via cancellation token.
     #[error("connector cancelled")]
     Cancelled,
+
+    /// Consumer requirements not supported by provider capabilities.
+    #[error("capability error: {0}")]
+    Capability(#[from] crate::model::CapabilityError),
 }
 
 #[cfg(test)]

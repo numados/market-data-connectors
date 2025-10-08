@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use mdc_core::{
-    EmbargoTracker, MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId,
+    CapabilityBounds, ConsumerRequirements, EmbargoTracker, IdentityScope, IntegrityCapability,
+    MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode, ReplayCapability,
+    SideSemantics, StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability, VenueId,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -13,6 +15,26 @@ use crate::binance::config::BinanceConfig;
 use crate::binance::connection::run_connection_task;
 use crate::binance::control::{Command, ConnectorHandle};
 use crate::binance::rest::BinanceRestClient;
+
+/// Static capability declaration for Binance Spot.
+pub static BINANCE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::NativeTicker, QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "binance.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeMilliseconds,
+        integrity: IntegrityCapability::SequenceNumbers,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(5000),
+            max_symbols_per_connection: 25,
+        },
+        discovery: false,
+        rest_quote: false,
+    });
 
 /// Binance Spot market data connector.
 pub struct BinanceConnector<S> {
@@ -38,6 +60,11 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
     /// Returns the venue identifier for Binance.
     pub fn venue(&self) -> VenueId {
         VenueId::Binance
+    }
+
+    /// Returns the capability declaration for Binance Spot.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BINANCE_CAPABILITIES
     }
 
     /// Runs the connector until cancelled.
@@ -172,6 +199,17 @@ impl<S> BinanceConnectorBuilder<S> {
     pub fn streaming_sink(mut self, sink: S) -> Self {
         self.sink = Some(sink);
         self
+    }
+
+    /// Returns the provider capability declaration for Binance Spot.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BINANCE_CAPABILITIES
+    }
+
+    /// Evaluates and enforces consumer requirements against Binance capabilities.
+    pub fn requirements(self, req: &ConsumerRequirements) -> Result<Self, MdcError> {
+        BINANCE_CAPABILITIES.check_requirements(req)?;
+        Ok(self)
     }
 }
 

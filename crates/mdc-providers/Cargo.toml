@@ -9,7 +9,9 @@ license.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["native-tls"]
+native-tls = ["tokio-tungstenite/native-tls", "reqwest?/default-tls"]
+rustls = ["tokio-tungstenite/rustls-tls-webpki-roots", "reqwest?/rustls-tls"]
 binance = [
     "dep:tokio",
     "dep:tokio-util",
@@ -135,6 +137,7 @@ flate2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 mdc-testkit.workspace = true
+mdc-sinks.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true

@@ -101,7 +101,7 @@ impl TopOfBookProjector {
         }
     }
 
-    /// Creates a new [`TopOfBookProjector`] driven by native venue [`BookTicker`] events.
+    /// Creates a new [`TopOfBookProjector`] driven by native venue [`mdc_core::BookTicker`] events.
     pub fn new_ticker(symbol: Symbol, tag: SymbolTag) -> Self {
         Self {
             mode: QuoteMode::NativeTicker,

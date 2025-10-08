@@ -360,18 +360,48 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                             // 2. Replay buffered deltas
                                             for delta in replay {
-                                                let _ = sink.begin_book(&ctx, BookKind::Delta);
+                                                delivery_ordinal += 1;
+                                                let delta_ctx = EventContext {
+                                                    venue: VenueId::Binance,
+                                                    symbol: &sym,
+                                                    tag,
+                                                    exchange_ts: delta.exchange_ts,
+                                                    received_ts: delta.received_ts,
+                                                    connection_id,
+                                                    delivery: DeliveryStamp::new(
+                                                        run_id,
+                                                        connection_id as u64,
+                                                        delivery_ordinal,
+                                                    ),
+                                                    source_sequence: delta.source_sequence,
+                                                };
+                                                let _ = sink.begin_book(&delta_ctx, BookKind::Delta);
                                                 for level in &delta.kind.bids {
                                                     let _ = sink.level(Side::Bid, level.price, level.volume);
                                                 }
                                                 for level in &delta.kind.asks {
                                                     let _ = sink.level(Side::Ask, level.price, level.volume);
                                                 }
-                                                let _ = sink.end_book(&ctx, delta.kind.sequence);
+                                                let _ = sink.end_book(&delta_ctx, delta.kind.sequence);
                                             }
 
                                             // 3. Emit ResyncCompleted
-                                            let _ = sink.alert(&ctx, IntegrityAlert::ResyncCompleted { last_update_id: Some(last_id) });
+                                            delivery_ordinal += 1;
+                                            let alert_ctx = EventContext {
+                                                venue: VenueId::Binance,
+                                                symbol: &sym,
+                                                tag,
+                                                exchange_ts: None,
+                                                received_ts: UnixNanos::now(),
+                                                connection_id,
+                                                delivery: DeliveryStamp::new(
+                                                    run_id,
+                                                    connection_id as u64,
+                                                    delivery_ordinal,
+                                                ),
+                                                source_sequence: None,
+                                            };
+                                            let _ = sink.alert(&alert_ctx, IntegrityAlert::ResyncCompleted { last_update_id: Some(last_id) });
                                         }
                                         Ok(SnapshotOutcome::StaleSnapshot { .. }) => {
                                             debug!(%sym, "Stale REST snapshot received; scheduling refetch");
