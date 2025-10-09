@@ -773,7 +773,7 @@ async fn test_ws_cancellation_emits_connection_lost() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(40)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Cancel token
     cancel.cancel();

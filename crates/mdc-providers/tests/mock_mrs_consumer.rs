@@ -212,3 +212,47 @@ async fn test_mrs_delivery_fault_overflow_halts_connector() {
 
     let _ = runner.await;
 }
+
+#[cfg(feature = "frankfurter")]
+#[tokio::test]
+async fn test_frankfurter_capabilities_and_requirements_gate() {
+    use mdc_providers::frankfurter::FRANKFURTER_CAPABILITIES;
+
+    // Valid MRS reference profile requirements
+    let ref_req = ConsumerRequirements {
+        quote_mode: QuoteMode::ReferenceRate,
+        require_stable_trades: false,
+        require_verified_side: false,
+    };
+    assert!(
+        FRANKFURTER_CAPABILITIES
+            .check_requirements(&ref_req)
+            .is_ok()
+    );
+
+    // Fails if stable trades required
+    let trade_req = ConsumerRequirements {
+        quote_mode: QuoteMode::ReferenceRate,
+        require_stable_trades: true,
+        require_verified_side: false,
+    };
+    assert!(matches!(
+        FRANKFURTER_CAPABILITIES
+            .check_requirements(&trade_req)
+            .unwrap_err(),
+        CapabilityError::UnstableTrades { .. }
+    ));
+
+    // Fails if unsupported quote mode required (e.g. NativeTicker)
+    let ticker_req = ConsumerRequirements {
+        quote_mode: QuoteMode::NativeTicker,
+        require_stable_trades: false,
+        require_verified_side: false,
+    };
+    assert!(matches!(
+        FRANKFURTER_CAPABILITIES
+            .check_requirements(&ticker_req)
+            .unwrap_err(),
+        CapabilityError::UnsupportedQuoteMode { .. }
+    ));
+}

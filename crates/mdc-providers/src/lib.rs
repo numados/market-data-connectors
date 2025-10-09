@@ -29,3 +29,6 @@ pub mod huobi;
 
 #[cfg(feature = "coinbase-advanced")]
 pub mod coinbase_advanced;
+
+#[cfg(feature = "frankfurter")]
+pub mod frankfurter;

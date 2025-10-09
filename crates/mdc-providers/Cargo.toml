@@ -98,6 +98,13 @@ coinbase-advanced = [
     "dep:url",
     "dep:bytes",
 ]
+frankfurter = [
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:reqwest",
+    "dep:url",
+    "dep:bytes",
+]
 all = [
     "binance",
     "kraken",
@@ -109,6 +116,7 @@ all = [
     "vwd",
     "huobi",
     "coinbase-advanced",
+    "frankfurter",
 ]
 
 [dependencies]
@@ -204,6 +212,11 @@ required-features = ["huobi"]
 name = "coinbase_advanced_parse"
 harness = false
 required-features = ["coinbase-advanced"]
+
+[[bench]]
+name = "frankfurter_parse"
+harness = false
+required-features = ["frankfurter"]
 
 
 
