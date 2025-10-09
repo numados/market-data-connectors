@@ -1,0 +1,26 @@
+{
+  "error": [],
+  "result": {
+    "XXBTZUSD": {
+      "altname": "XBTUSD",
+      "wsname": "XBT/USD",
+      "base": "XXBT",
+      "quote": "ZUSD",
+      "status": "online"
+    },
+    "XETHZUSD": {
+      "altname": "ETHUSD",
+      "wsname": "ETH/USD",
+      "base": "XETH",
+      "quote": "ZUSD",
+      "status": "online"
+    },
+    "SOLUSD": {
+      "altname": "SOLUSD",
+      "wsname": "SOL/USD",
+      "base": "SOL",
+      "quote": "ZUSD",
+      "status": "online"
+    }
+  }
+}

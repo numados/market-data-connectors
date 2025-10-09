@@ -33,7 +33,13 @@ pub static BINANCE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             max_depth: Some(5000),
             max_symbols_per_connection: 25,
         },
-        discovery: DiscoveryCapability::unsupported("Binance discovery pending"),
+        discovery: DiscoveryCapability::CompleteCatalog {
+            scopes: vec![mdc_core::catalog::CatalogScope::spot(
+                mdc_core::catalog::ProviderKind::Binance,
+            )],
+            pagination: false,
+            default_endpoint: crate::binance::catalog::DEFAULT_BINANCE_CATALOG_ENDPOINT.to_string(),
+        },
         rest_quote: false,
     });
 

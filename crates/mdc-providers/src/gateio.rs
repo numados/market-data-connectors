@@ -33,6 +33,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod config;
 pub mod connection;
 pub mod connector;
@@ -41,12 +42,13 @@ pub mod fsm;
 pub mod normalize;
 pub mod raw;
 
+pub use catalog::{DEFAULT_GATEIO_CATALOG_ENDPOINT, gateio_catalog_client, parse_gateio_catalog};
 pub use config::{ConfigError, GateioConfig, GateioStreams};
 pub use connection::{
     build_obu_payload, build_obu_subscribe_frame, build_obu_unsubscribe_frame,
     build_trades_subscribe_frame, current_unix_secs, run_connection_task,
 };
-pub use connector::{GateioConnector, GateioConnectorBuilder};
+pub use connector::{GATEIO_CAPABILITIES, GateioConnector, GateioConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use fsm::SymbolFsm;
 pub use normalize::{normalize_depth, normalize_snapshot, normalize_trade};

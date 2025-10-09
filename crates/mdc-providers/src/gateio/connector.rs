@@ -1,14 +1,41 @@
-//! Main Gate.io WebSocket market data connector and builder.
-
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::gateio::catalog::DEFAULT_GATEIO_CATALOG_ENDPOINT;
 use crate::gateio::config::{ConfigError, GateioConfig, GateioStreams};
 use crate::gateio::connection::run_connection_task;
 use crate::gateio::control::{Command, ConnectorHandle};
+
+/// Static capability declaration for Gate.io Spot.
+pub static GATEIO_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "gateio.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeNanoseconds,
+        integrity: IntegrityCapability::SequenceNumbers,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(100),
+            max_symbols_per_connection: 25,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Gateio,
+            DEFAULT_GATEIO_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Gate.io WebSocket v4 market data connector.
 pub struct GateioConnector<S> {
@@ -23,6 +50,11 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
     /// Creates a builder initialized with the given `GateioConfig`.
     pub fn builder(config: GateioConfig) -> GateioConnectorBuilder<S> {
         GateioConnectorBuilder::new(config)
+    }
+
+    /// Returns the provider capabilities for Gate.io.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &GATEIO_CAPABILITIES
     }
 
     /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
@@ -138,6 +170,11 @@ impl<S> GateioConnectorBuilder<S> {
             symbols: Vec::new(),
             sink: None,
         }
+    }
+
+    /// Returns the provider capabilities for Gate.io.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &GATEIO_CAPABILITIES
     }
 
     /// Adds a single symbol to subscribe to (with default tag 0).

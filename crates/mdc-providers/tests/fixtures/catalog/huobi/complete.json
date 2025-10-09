@@ -1,0 +1,23 @@
+{
+  "status": "ok",
+  "data": [
+    {
+      "symbol": "btcusdt",
+      "base-currency": "btc",
+      "quote-currency": "usdt",
+      "state": "online"
+    },
+    {
+      "symbol": "ethusdt",
+      "base-currency": "eth",
+      "quote-currency": "usdt",
+      "state": "online"
+    },
+    {
+      "symbol": "solusdt",
+      "base-currency": "sol",
+      "quote-currency": "usdt",
+      "state": "online"
+    }
+  ]
+}

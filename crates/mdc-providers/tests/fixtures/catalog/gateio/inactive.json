@@ -1,0 +1,14 @@
+[
+  {
+    "id": "XAR_USDT",
+    "base": "XAR",
+    "quote": "USDT",
+    "trade_status": "untradable"
+  },
+  {
+    "id": "SUSPENDED_USDT",
+    "base": "SUSPENDED",
+    "quote": "USDT",
+    "trade_status": "buyable"
+  }
+]

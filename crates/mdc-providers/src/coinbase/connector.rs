@@ -1,13 +1,40 @@
-//! Main Coinbase Exchange WebSocket connector and fluent builder.
-
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::coinbase::catalog::DEFAULT_COINBASE_CATALOG_ENDPOINT;
 use crate::coinbase::config::CoinbaseConfig;
 use crate::coinbase::connection::run_connection_task;
 use crate::coinbase::control::{Command, ConnectorHandle};
+
+/// Static capability declaration for Coinbase Exchange Spot.
+pub static COINBASE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "coinbase.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeNanoseconds,
+        integrity: IntegrityCapability::HeartbeatWatchdog,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(1000),
+            max_symbols_per_connection: 25,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Coinbase,
+            DEFAULT_COINBASE_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Coinbase Exchange WebSocket market data connector.
 pub struct CoinbaseConnector<S> {
@@ -22,6 +49,11 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
     /// Creates a builder initialized with the given `CoinbaseConfig`.
     pub fn builder(config: CoinbaseConfig) -> CoinbaseConnectorBuilder<S> {
         CoinbaseConnectorBuilder::new(config)
+    }
+
+    /// Returns the provider capabilities for Coinbase Exchange.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &COINBASE_CAPABILITIES
     }
 
     /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
@@ -125,6 +157,11 @@ impl<S> CoinbaseConnectorBuilder<S> {
             symbols: Vec::new(),
             sink: None,
         }
+    }
+
+    /// Returns the provider capabilities for Coinbase Exchange.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &COINBASE_CAPABILITIES
     }
 
     /// Sets the symbols to subscribe to (with default tag 0).

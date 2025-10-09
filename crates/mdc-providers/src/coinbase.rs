@@ -34,6 +34,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod config;
 pub mod connection;
 pub mod connector;
@@ -43,12 +44,15 @@ pub mod heartbeat;
 pub mod normalize;
 pub mod raw;
 
+pub use catalog::{
+    DEFAULT_COINBASE_CATALOG_ENDPOINT, coinbase_catalog_client, parse_coinbase_catalog,
+};
 pub use config::{CoinbaseConfig, CoinbaseStreams};
 pub use connection::{
     build_single_subscribe_payload, build_subscribe_payload, build_unsubscribe_payload,
     run_connection_task,
 };
-pub use connector::{CoinbaseConnector, CoinbaseConnectorBuilder};
+pub use connector::{COINBASE_CAPABILITIES, CoinbaseConnector, CoinbaseConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use fsm::{PollOutcome, SnapshotOutcome, SymbolFsm, SyncState, UpdateOutcome};
 pub use heartbeat::{HeartbeatMonitor, HeartbeatVerdict};

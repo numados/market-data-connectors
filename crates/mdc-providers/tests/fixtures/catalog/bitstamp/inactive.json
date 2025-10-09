@@ -1,0 +1,18 @@
+[
+  {
+    "name": "TEST/USD",
+    "market_symbol": "testusd",
+    "base_currency": "TEST",
+    "counter_currency": "USD",
+    "market_type": "SPOT",
+    "trading": "Disabled"
+  },
+  {
+    "name": "BTC/USD-FUT",
+    "market_symbol": "btcusd_fut",
+    "base_currency": "BTC",
+    "counter_currency": "USD",
+    "market_type": "FUTURES",
+    "trading": "Enabled"
+  }
+]

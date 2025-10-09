@@ -1,0 +1,20 @@
+[
+  {
+    "id": "BTC_USDT",
+    "base": "BTC",
+    "quote": "USDT",
+    "trade_status": "tradable"
+  },
+  {
+    "id": "ETH_USDT",
+    "base": "ETH",
+    "quote": "USDT",
+    "trade_status": "tradable"
+  },
+  {
+    "id": "SOL_USDT",
+    "base": "SOL",
+    "quote": "USDT",
+    "trade_status": "tradable"
+  }
+]

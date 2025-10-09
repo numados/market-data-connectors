@@ -35,6 +35,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod checksum;
 pub mod config;
 pub mod connection;
@@ -44,10 +45,13 @@ pub mod fsm;
 pub mod normalize;
 pub mod raw;
 
+pub use catalog::{
+    DEFAULT_BITFINEX_CATALOG_ENDPOINT, bitfinex_catalog_client, parse_bitfinex_catalog,
+};
 pub use checksum::{BitfinexChecksumBook, ChecksumVerdict};
 pub use config::{BitfinexConfig, BitfinexStreams, ConfigError};
 pub use connection::run_connection_loop;
-pub use connector::{BitfinexConnector, BitfinexConnectorBuilder};
+pub use connector::{BITFINEX_CAPABILITIES, BitfinexConnector, BitfinexConnectorBuilder};
 pub use control::{BitfinexHandle, Command};
 pub use fsm::{ChannelFsm, PollOutcome, SnapshotOutcome, SyncState, UpdateOutcome};
 pub use normalize::{normalize_book_level, normalize_trade};

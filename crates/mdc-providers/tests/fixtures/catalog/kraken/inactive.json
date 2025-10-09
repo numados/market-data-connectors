@@ -1,0 +1,19 @@
+{
+  "error": [],
+  "result": {
+    "AI16ZEUR": {
+      "altname": "AI16ZEUR",
+      "wsname": "AI16Z/EUR",
+      "base": "AI16Z",
+      "quote": "ZEUR",
+      "status": "cancel_only"
+    },
+    "OLDCOINUSD": {
+      "altname": "OLDUSD",
+      "wsname": "OLD/USD",
+      "base": "OLD",
+      "quote": "ZUSD",
+      "status": "maintenance"
+    }
+  }
+}

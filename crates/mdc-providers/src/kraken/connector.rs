@@ -1,13 +1,40 @@
-//! Main Kraken WebSocket v2 connector and fluent builder.
-
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+use crate::kraken::catalog::DEFAULT_KRAKEN_CATALOG_ENDPOINT;
 use crate::kraken::config::KrakenConfig;
 use crate::kraken::connection::run_connection_task;
 use crate::kraken::control::{Command, ConnectorHandle};
+
+/// Static capability declaration for Kraken Spot.
+pub static KRAKEN_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "kraken.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeNanoseconds,
+        integrity: IntegrityCapability::ChecksumCrc32,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(1000),
+            max_symbols_per_connection: 300,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Kraken,
+            DEFAULT_KRAKEN_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Kraken WebSocket v2 market data connector.
 pub struct KrakenConnector<S> {
@@ -22,6 +49,11 @@ impl<S: StreamingSink + Clone> KrakenConnector<S> {
     /// Creates a builder initialized with the given `KrakenConfig`.
     pub fn builder(config: KrakenConfig) -> KrakenConnectorBuilder<S> {
         KrakenConnectorBuilder::new(config)
+    }
+
+    /// Returns the provider capabilities for Kraken.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &KRAKEN_CAPABILITIES
     }
 
     /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
@@ -125,6 +157,11 @@ impl<S> KrakenConnectorBuilder<S> {
             symbols: Vec::new(),
             sink: None,
         }
+    }
+
+    /// Returns the provider capabilities for Kraken.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &KRAKEN_CAPABILITIES
     }
 
     /// Sets the symbols to subscribe to (with default tag 0).

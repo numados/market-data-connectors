@@ -4,14 +4,43 @@ use std::future::Future;
 use std::time::Duration;
 
 use mdc_core::MdcError;
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::model::{Symbol, SymbolTag};
 use mdc_core::sink::StreamingSink;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::bitfinex::catalog::DEFAULT_BITFINEX_CATALOG_ENDPOINT;
 use crate::bitfinex::config::{BitfinexConfig, ConfigError};
 use crate::bitfinex::connection::run_connection_loop;
 use crate::bitfinex::control::BitfinexHandle;
+
+/// Static capability declaration for Bitfinex Spot.
+pub static BITFINEX_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "bitfinex.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeMilliseconds,
+        integrity: IntegrityCapability::ChecksumCrc32,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(250),
+            max_symbols_per_connection: 12,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Bitfinex,
+            DEFAULT_BITFINEX_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Builder for constructing a configured [`BitfinexConnector`].
 #[derive(Debug, Clone, Default)]
@@ -25,6 +54,11 @@ impl BitfinexConnectorBuilder {
         Self {
             config: BitfinexConfig::default(),
         }
+    }
+
+    /// Returns the provider capabilities for Bitfinex.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BITFINEX_CAPABILITIES
     }
 
     /// Sets the WebSocket endpoint URL.
@@ -132,6 +166,11 @@ impl BitfinexConnector {
     /// Returns a reference to the active connector configuration.
     pub fn config(&self) -> &BitfinexConfig {
         &self.config
+    }
+
+    /// Returns the provider capabilities for Bitfinex.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BITFINEX_CAPABILITIES
     }
 
     /// Spawns the connector on the active Tokio runtime.

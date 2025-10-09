@@ -1,0 +1,9 @@
+{
+  "timezone": "UTC",
+  "symbols": [
+    {
+      "status": "TRADING",
+      "baseAsset": "BTC"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "timezone": "UTC",
+  "serverTime": 1776432358408,
+  "symbols": [
+    {
+      "symbol": "QTUMETH",
+      "status": "BREAK",
+      "baseAsset": "QTUM",
+      "quoteAsset": "ETH"
+    },
+    {
+      "symbol": "BCHSVUSDT",
+      "status": "HALT",
+      "baseAsset": "BCHSV",
+      "quoteAsset": "USDT"
+    }
+  ]
+}

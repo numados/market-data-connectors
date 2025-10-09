@@ -32,6 +32,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod config;
 pub mod connection;
 pub mod connector;
@@ -40,9 +41,12 @@ pub mod normalize;
 pub mod raw;
 pub mod rest;
 
+pub use catalog::{
+    DEFAULT_BINANCE_CATALOG_ENDPOINT, binance_catalog_client, parse_binance_catalog,
+};
 pub use config::{BinanceConfig, BinanceStreams};
 pub use connection::{build_combined_stream_url, run_connection_task};
-pub use connector::{BinanceConnector, BinanceConnectorBuilder};
+pub use connector::{BINANCE_CAPABILITIES, BinanceConnector, BinanceConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use normalize::{normalize_book_ticker, normalize_depth, normalize_snapshot, normalize_trade};
 pub use raw::{

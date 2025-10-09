@@ -1,18 +1,45 @@
-//! Main Bitstamp WebSocket market data connector and builder.
-
 use std::sync::{Arc, Mutex};
 
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
 use mdc_core::integrity::EmbargoTracker;
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::bitstamp::catalog::DEFAULT_BITSTAMP_CATALOG_ENDPOINT;
 use crate::bitstamp::config::{BitstampConfig, BitstampStreams, ConfigError};
 use crate::bitstamp::connection::run_connection_task;
 use crate::bitstamp::control::{Command, ConnectorHandle};
 use crate::bitstamp::rest::BitstampRestClient;
+
+/// Static capability declaration for Bitstamp Spot.
+pub static BITSTAMP_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "bitstamp.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeNanoseconds,
+        integrity: IntegrityCapability::TimeGated,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(100),
+            max_symbols_per_connection: 25,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Bitstamp,
+            DEFAULT_BITSTAMP_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Bitstamp WebSocket v2 and REST market data connector.
 pub struct BitstampConnector<S> {
@@ -28,6 +55,11 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
     /// Creates a builder initialized with the given `BitstampConfig`.
     pub fn builder(config: BitstampConfig) -> BitstampConnectorBuilder<S> {
         BitstampConnectorBuilder::new(config)
+    }
+
+    /// Returns the provider capabilities for Bitstamp.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BITSTAMP_CAPABILITIES
     }
 
     /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
@@ -161,6 +193,11 @@ impl<S> BitstampConnectorBuilder<S> {
             embargo: None,
             sink: None,
         }
+    }
+
+    /// Returns the provider capabilities for Bitstamp.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &BITSTAMP_CAPABILITIES
     }
 
     /// Sets the list of symbols to ingest.

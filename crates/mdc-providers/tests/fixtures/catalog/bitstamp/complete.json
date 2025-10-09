@@ -1,0 +1,26 @@
+[
+  {
+    "name": "BTC/USD",
+    "market_symbol": "btcusd",
+    "base_currency": "BTC",
+    "counter_currency": "USD",
+    "market_type": "SPOT",
+    "trading": "Enabled"
+  },
+  {
+    "name": "ETH/USD",
+    "market_symbol": "ethusd",
+    "base_currency": "ETH",
+    "counter_currency": "USD",
+    "market_type": "SPOT",
+    "trading": "Enabled"
+  },
+  {
+    "name": "SOL/USD",
+    "market_symbol": "solusd",
+    "base_currency": "SOL",
+    "counter_currency": "USD",
+    "market_type": "SPOT",
+    "trading": "Enabled"
+  }
+]

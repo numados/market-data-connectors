@@ -34,6 +34,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod config;
 pub mod connection;
 pub mod connector;
@@ -43,9 +44,10 @@ pub mod gzip;
 pub mod normalize;
 pub mod raw;
 
+pub use catalog::{DEFAULT_HUOBI_CATALOG_ENDPOINT, huobi_catalog_client, parse_huobi_catalog};
 pub use config::{ConfigError, HuobiConfig, HuobiConfigBuilder, HuobiStreams};
 pub use connection::run_connection_task;
-pub use connector::{HuobiConnector, HuobiConnectorBuilder};
+pub use connector::{HUOBI_CAPABILITIES, HuobiConnector, HuobiConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use fsm::SymbolFsm;
 pub use gzip::{GzipDecoder, GzipError};

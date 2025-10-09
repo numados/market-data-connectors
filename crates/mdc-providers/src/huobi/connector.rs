@@ -1,14 +1,41 @@
-//! Main Huobi (HTX) WebSocket market data connector and builder.
-
+use mdc_core::catalog::{DiscoveryCapability, ProviderKind};
+use mdc_core::model::capabilities::{
+    CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
+};
 use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::huobi::catalog::DEFAULT_HUOBI_CATALOG_ENDPOINT;
 use crate::huobi::config::{ConfigError, HuobiConfig, HuobiStreams};
 use crate::huobi::connection::run_connection_task;
 use crate::huobi::control::{Command, ConnectorHandle};
+
+/// Static capability declaration for Huobi Spot.
+pub static HUOBI_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
+    std::sync::LazyLock::new(|| ProviderCapabilities {
+        quote_modes: vec![QuoteMode::L2Projection],
+        trades: TradeCapability::Verified {
+            identity_scope: IdentityScope::PerMarket,
+            namespace_scheme: "huobi.spot.trade".to_string(),
+            side_semantics: SideSemantics::AggressorTaker,
+        },
+        timestamps: TimestampCapability::ExchangeMilliseconds,
+        integrity: IntegrityCapability::SequenceNumbers,
+        replay: ReplayCapability::None,
+        bounds: CapabilityBounds {
+            max_depth: Some(150),
+            max_symbols_per_connection: 25,
+        },
+        discovery: DiscoveryCapability::complete(
+            ProviderKind::Huobi,
+            DEFAULT_HUOBI_CATALOG_ENDPOINT,
+        ),
+        rest_quote: false,
+    });
 
 /// Huobi (HTX) Market-By-Price WebSocket market data connector.
 pub struct HuobiConnector<S> {
@@ -27,6 +54,11 @@ impl HuobiConnector<()> {
 }
 
 impl<S: StreamingSink + Clone> HuobiConnector<S> {
+    /// Returns the provider capabilities for Huobi.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &HUOBI_CAPABILITIES
+    }
+
     /// Returns a new cloneable `ConnectorHandle` for controlling this connector.
     pub fn handle(&self) -> ConnectorHandle {
         ConnectorHandle::new(self.command_tx.clone())
@@ -144,6 +176,11 @@ impl HuobiConnectorBuilder<()> {
 }
 
 impl<S> HuobiConnectorBuilder<S> {
+    /// Returns the provider capabilities for Huobi.
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &HUOBI_CAPABILITIES
+    }
+
     /// Adds a single symbol to subscribe to (with default tag 0).
     pub fn symbol(mut self, symbol: impl Into<Symbol>) -> Self {
         self.symbols.push((symbol.into(), SymbolTag::default()));

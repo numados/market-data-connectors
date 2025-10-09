@@ -1,0 +1,17 @@
+{
+  "status": "ok",
+  "data": [
+    {
+      "symbol": "wnxmbtc",
+      "base-currency": "wnxm",
+      "quote-currency": "btc",
+      "state": "offline"
+    },
+    {
+      "symbol": "suspendedpair",
+      "base-currency": "susp",
+      "quote-currency": "usdt",
+      "state": "suspend"
+    }
+  ]
+}

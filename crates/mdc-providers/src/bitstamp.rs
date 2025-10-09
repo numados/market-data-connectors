@@ -33,6 +33,7 @@
 //! ```
 
 pub mod bench_support;
+pub mod catalog;
 pub mod config;
 pub mod connection;
 pub mod connector;
@@ -42,12 +43,15 @@ pub mod normalize;
 pub mod raw;
 pub mod rest;
 
+pub use catalog::{
+    DEFAULT_BITSTAMP_CATALOG_ENDPOINT, bitstamp_catalog_client, parse_bitstamp_catalog,
+};
 pub use config::{BitstampConfig, BitstampStreams, ConfigError};
 pub use connection::{
     build_diff_order_book_channel, build_live_trades_channel, build_subscribe_frame,
     run_connection_task,
 };
-pub use connector::{BitstampConnector, BitstampConnectorBuilder};
+pub use connector::{BITSTAMP_CAPABILITIES, BitstampConnector, BitstampConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
 pub use fsm::{DiffDecision, SymbolFsm, SyncState};
 pub use normalize::{normalize_depth, normalize_snapshot, normalize_trade};

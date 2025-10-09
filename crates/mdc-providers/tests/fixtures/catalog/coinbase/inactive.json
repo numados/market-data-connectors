@@ -1,0 +1,16 @@
+[
+  {
+    "id": "NKN-GBP",
+    "base_currency": "NKN",
+    "quote_currency": "GBP",
+    "status": "delisted",
+    "trading_disabled": true
+  },
+  {
+    "id": "OLD-USD",
+    "base_currency": "OLD",
+    "quote_currency": "USD",
+    "status": "online",
+    "trading_disabled": true
+  }
+]
