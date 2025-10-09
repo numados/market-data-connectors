@@ -40,6 +40,7 @@ pub mod control;
 pub mod fsm;
 pub mod normalize;
 pub mod raw;
+pub mod rest_quote;
 
 pub use catalog::{DEFAULT_KRAKEN_CATALOG_ENDPOINT, kraken_catalog_client, parse_kraken_catalog};
 pub use checksum::{ChecksumVerdict, KrakenChecksumBook, LevelParseError, RawLevelOwned};
@@ -54,4 +55,7 @@ pub use normalize::{normalize_delta, normalize_snapshot, normalize_trade, parse_
 pub use raw::{
     KrakenBookDataHeader, KrakenConnectionScratch, KrakenDepthSeed, KrakenLevelsSeed, RawAckResult,
     RawBookData, RawLevel, RawMessage, RawMethodAck, RawTrade,
+};
+pub use rest_quote::{
+    DEFAULT_KRAKEN_QUOTE_ENDPOINT, kraken_quote_url, kraken_rest_quote_client, parse_kraken_quote,
 };

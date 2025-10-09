@@ -30,7 +30,7 @@ pub static LMAX_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> = std::s
         discovery: DiscoveryCapability::unsupported(
             "LMAX does not support public REST symbol discovery",
         ),
-        rest_quote: false,
+        rest_quote: false.into(),
     }
     },
 );

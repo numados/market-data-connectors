@@ -33,7 +33,11 @@ pub static COINBASE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Coinbase,
             DEFAULT_COINBASE_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            true,
+            TimestampCapability::ExchangeNanoseconds,
+            crate::coinbase::rest_quote::DEFAULT_COINBASE_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Coinbase Exchange WebSocket market data connector.

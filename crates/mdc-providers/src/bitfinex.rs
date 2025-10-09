@@ -44,6 +44,7 @@ pub mod control;
 pub mod fsm;
 pub mod normalize;
 pub mod raw;
+pub mod rest_quote;
 
 pub use catalog::{
     DEFAULT_BITFINEX_CATALOG_ENDPOINT, bitfinex_catalog_client, parse_bitfinex_catalog,
@@ -58,4 +59,8 @@ pub use normalize::{normalize_book_level, normalize_trade};
 pub use raw::{
     BitfinexConnectionScratch, RawBookLevel, RawBookLevelOwned, RawChannelFrame, RawEvent,
     RawFrame, RawPayload, RawTradeEntry, parse_decimal_token,
+};
+pub use rest_quote::{
+    DEFAULT_BITFINEX_QUOTE_ENDPOINT, bitfinex_quote_url, bitfinex_rest_quote_client,
+    parse_bitfinex_quote,
 };

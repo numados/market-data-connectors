@@ -40,7 +40,11 @@ pub static BINANCE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             pagination: false,
             default_endpoint: crate::binance::catalog::DEFAULT_BINANCE_CATALOG_ENDPOINT.to_string(),
         },
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            true,
+            TimestampCapability::ReceiptOnly,
+            crate::binance::rest_quote::DEFAULT_BINANCE_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Binance Spot market data connector.

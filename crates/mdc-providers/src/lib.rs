@@ -10,10 +10,32 @@ pub(crate) mod catalog_util;
     feature = "gateio",
     feature = "bitstamp",
     feature = "huobi",
+))]
+pub(crate) mod rest_quote_util;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
     feature = "frankfurter",
     feature = "vwd",
 ))]
 pub mod catalog_client;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
+))]
+pub mod rest_quote_client;
 
 #[cfg(feature = "binance")]
 pub mod binance;

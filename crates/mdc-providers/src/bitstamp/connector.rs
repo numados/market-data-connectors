@@ -38,7 +38,11 @@ pub static BITSTAMP_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Bitstamp,
             DEFAULT_BITSTAMP_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            false,
+            TimestampCapability::ExchangeMilliseconds,
+            crate::bitstamp::rest_quote::DEFAULT_BITSTAMP_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Bitstamp WebSocket v2 and REST market data connector.

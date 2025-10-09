@@ -43,6 +43,7 @@ pub mod fsm;
 pub mod gzip;
 pub mod normalize;
 pub mod raw;
+pub mod rest_quote;
 
 pub use catalog::{DEFAULT_HUOBI_CATALOG_ENDPOINT, huobi_catalog_client, parse_huobi_catalog};
 pub use config::{ConfigError, HuobiConfig, HuobiConfigBuilder, HuobiStreams};
@@ -57,4 +58,7 @@ pub use raw::{
     LevelsSeed, MbpHeader, MbpSeed, RawEnvelope, RawMbp, RawTradeId, RawTradeItem, RawTradeTick,
     build_pong_frame, build_req_snapshot_frame, build_sub_mbp_frame, build_sub_trades_frame,
     build_unsub_mbp_frame, extract_levels_from_channel, extract_symbol_from_channel,
+};
+pub use rest_quote::{
+    DEFAULT_HUOBI_QUOTE_ENDPOINT, huobi_quote_url, huobi_rest_quote_client, parse_huobi_quote,
 };

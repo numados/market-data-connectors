@@ -33,7 +33,11 @@ pub static KRAKEN_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Kraken,
             DEFAULT_KRAKEN_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            true,
+            TimestampCapability::ReceiptOnly,
+            crate::kraken::rest_quote::DEFAULT_KRAKEN_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Kraken WebSocket v2 market data connector.

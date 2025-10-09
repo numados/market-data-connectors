@@ -40,6 +40,7 @@ pub mod control;
 pub mod normalize;
 pub mod raw;
 pub mod rest;
+pub mod rest_quote;
 
 pub use catalog::{
     DEFAULT_BINANCE_CATALOG_ENDPOINT, binance_catalog_client, parse_binance_catalog,
@@ -55,3 +56,7 @@ pub use raw::{
     RawDepthUpdate, RawPayload, RawTrade, StreamEnvelope,
 };
 pub use rest::{BinanceRestClient, RestError};
+pub use rest_quote::{
+    DEFAULT_BINANCE_QUOTE_ENDPOINT, binance_quote_url, binance_rest_quote_client,
+    parse_binance_quote,
+};

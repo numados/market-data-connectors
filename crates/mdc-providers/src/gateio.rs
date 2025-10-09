@@ -41,6 +41,7 @@ pub mod control;
 pub mod fsm;
 pub mod normalize;
 pub mod raw;
+pub mod rest_quote;
 
 pub use catalog::{DEFAULT_GATEIO_CATALOG_ENDPOINT, gateio_catalog_client, parse_gateio_catalog};
 pub use config::{ConfigError, GateioConfig, GateioStreams};
@@ -56,4 +57,7 @@ pub use raw::{
     GateioConnectionScratch, LevelsSeed, ObuHeader, ObuSeed, ParseTimestampError, RawEnvelope,
     RawObu, RawSubAckError, RawSubAckResult, RawTrade, RawTradeId, SpotPong, SubscribeRequest,
     extract_symbol, parse_create_time_ms,
+};
+pub use rest_quote::{
+    DEFAULT_GATEIO_QUOTE_ENDPOINT, gateio_quote_url, gateio_rest_quote_client, parse_gateio_quote,
 };

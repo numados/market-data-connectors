@@ -39,7 +39,12 @@ pub static BITFINEX_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Bitfinex,
             DEFAULT_BITFINEX_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::batch(
+            100,
+            true,
+            TimestampCapability::ReceiptOnly,
+            crate::bitfinex::rest_quote::DEFAULT_BITFINEX_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Builder for constructing a configured [`BitfinexConnector`].

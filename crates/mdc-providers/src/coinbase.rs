@@ -43,6 +43,7 @@ pub mod fsm;
 pub mod heartbeat;
 pub mod normalize;
 pub mod raw;
+pub mod rest_quote;
 
 pub use catalog::{
     DEFAULT_COINBASE_CATALOG_ENDPOINT, coinbase_catalog_client, parse_coinbase_catalog,
@@ -60,4 +61,8 @@ pub use normalize::{normalize_delta, normalize_snapshot, normalize_trade, parse_
 pub use raw::{
     CoinbaseChangesSeed, CoinbaseConnectionScratch, CoinbaseFrameHeader, CoinbaseFrameSeed,
     CoinbaseLevelsSeed, RawChannelSubscription, RawMessage,
+};
+pub use rest_quote::{
+    DEFAULT_COINBASE_QUOTE_ENDPOINT, coinbase_quote_url, coinbase_rest_quote_client,
+    parse_coinbase_quote,
 };

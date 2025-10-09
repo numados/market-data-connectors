@@ -1,0 +1,13 @@
+[
+  {
+    "currency_pair": "BTC_USDT",
+    "last": "50000.5",
+    "lowest_ask": "50001.0",
+    "highest_bid": "50000.0",
+    "change_percentage": "1.23",
+    "base_volume": "1234.5",
+    "quote_volume": "61725000",
+    "highest_size": "1.5",
+    "lowest_size": "2.0"
+  }
+]

@@ -34,7 +34,11 @@ pub static GATEIO_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Gateio,
             DEFAULT_GATEIO_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            true,
+            TimestampCapability::ReceiptOnly,
+            crate::gateio::rest_quote::DEFAULT_GATEIO_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Gate.io WebSocket v4 market data connector.

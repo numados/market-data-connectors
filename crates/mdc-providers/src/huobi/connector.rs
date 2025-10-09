@@ -34,7 +34,11 @@ pub static HUOBI_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             ProviderKind::Huobi,
             DEFAULT_HUOBI_CATALOG_ENDPOINT,
         ),
-        rest_quote: false,
+        rest_quote: mdc_core::rest_quote::RestQuoteCapability::single(
+            true,
+            TimestampCapability::ExchangeMilliseconds,
+            crate::huobi::rest_quote::DEFAULT_HUOBI_QUOTE_ENDPOINT,
+        ),
     });
 
 /// Huobi (HTX) Market-By-Price WebSocket market data connector.

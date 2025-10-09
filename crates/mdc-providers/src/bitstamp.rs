@@ -42,6 +42,7 @@ pub mod fsm;
 pub mod normalize;
 pub mod raw;
 pub mod rest;
+pub mod rest_quote;
 
 pub use catalog::{
     DEFAULT_BITSTAMP_CATALOG_ENDPOINT, bitstamp_catalog_client, parse_bitstamp_catalog,
@@ -61,3 +62,7 @@ pub use raw::{
     SubscribeMessage, extract_symbol, parse_microtimestamp, u64_from_str,
 };
 pub use rest::{BitstampRestClient, RestError};
+pub use rest_quote::{
+    DEFAULT_BITSTAMP_QUOTE_ENDPOINT, bitstamp_quote_url, bitstamp_rest_quote_client,
+    parse_bitstamp_quote,
+};

@@ -86,5 +86,5 @@ pub static FRANKFURTER_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         discovery: DiscoveryCapability::unsupported(
             "Frankfurter does not support variable instrument catalog discovery",
         ),
-        rest_quote: true,
+        rest_quote: true.into(),
     });
