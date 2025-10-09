@@ -1,6 +1,7 @@
 //! Provider capabilities and consumer requirement contracts.
 
 pub use crate::catalog::DiscoveryCapability;
+pub use crate::rest_quote::RestQuoteCapability;
 use serde::{Deserialize, Serialize};
 
 /// Mode of top-of-book market quote representation.
@@ -136,7 +137,7 @@ pub struct ProviderCapabilities {
     /// Discovery capability profile.
     pub discovery: DiscoveryCapability,
     /// Supports REST quote snapshot polling.
-    pub rest_quote: bool,
+    pub rest_quote: RestQuoteCapability,
 }
 
 /// Consumer requirements evaluated before connector startup.
@@ -179,6 +180,11 @@ impl ProviderCapabilities {
     /// Returns `true` if complete instrument catalog discovery is supported.
     pub fn is_discovery_supported(&self) -> bool {
         self.discovery.is_supported()
+    }
+
+    /// Returns `true` if REST quote snapshots are supported.
+    pub fn is_rest_quote_supported(&self) -> bool {
+        self.rest_quote.is_supported()
     }
 
     /// Evaluates `requirements` against this capability declaration.
@@ -243,7 +249,7 @@ mod tests {
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
             discovery: DiscoveryCapability::from(false),
-            rest_quote: false,
+            rest_quote: false.into(),
         };
 
         let req = ConsumerRequirements {
@@ -265,7 +271,7 @@ mod tests {
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
             discovery: DiscoveryCapability::from(false),
-            rest_quote: false,
+            rest_quote: false.into(),
         };
 
         let req = ConsumerRequirements {
@@ -290,7 +296,7 @@ mod tests {
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
             discovery: DiscoveryCapability::from(false),
-            rest_quote: false,
+            rest_quote: false.into(),
         };
 
         let req = ConsumerRequirements {

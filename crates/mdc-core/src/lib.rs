@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod error;
 pub mod integrity;
 pub mod model;
+pub mod rest_quote;
 pub mod resync;
 pub mod sink;
 
@@ -18,6 +19,7 @@ pub use integrity::{
     WatchdogAction, clean_token, parse_retry_after, remove_decimal_and_leading_zeros,
 };
 pub use model::*;
+pub use rest_quote::*;
 pub use resync::{
     BufferOverflow, CooldownPolicy, DeltaDecision, ResyncController, ResyncDecision, ResyncError,
     ResyncFailure, ResyncPolicy, SnapshotOutcome, SyncState, TimeoutQuarantinePolicy,

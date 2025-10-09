@@ -166,7 +166,7 @@ proptest! {
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
             discovery: DiscoveryCapability::from(true),
-            rest_quote: true,
+            rest_quote: true.into(),
         };
 
         let req = ConsumerRequirements {
@@ -186,7 +186,7 @@ proptest! {
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
             discovery: DiscoveryCapability::from(false),
-            rest_quote: false,
+            rest_quote: false.into(),
         };
 
         if require_trades {

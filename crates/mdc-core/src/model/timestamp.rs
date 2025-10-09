@@ -17,6 +17,11 @@ impl UnixNanos {
         Self(duration.as_nanos().min(u64::MAX as u128) as u64)
     }
 
+    /// Creates a `UnixNanos` from seconds since the Unix epoch.
+    pub const fn from_secs(secs: u64) -> Self {
+        Self(secs.saturating_mul(1_000_000_000))
+    }
+
     /// Creates a `UnixNanos` from milliseconds since the Unix epoch.
     pub const fn from_millis(ms: u64) -> Self {
         Self(ms.saturating_mul(1_000_000))
