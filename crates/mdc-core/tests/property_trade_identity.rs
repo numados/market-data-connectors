@@ -7,9 +7,9 @@
 //! Property tests for NativeTradeIdentity, TradeNamespace, TradeId, DeliveryStamp, and capabilities.
 
 use mdc_core::model::{
-    CapabilityBounds, CapabilityError, ConsumerRequirements, DeliveryStamp, IdentityScope,
-    IntegrityCapability, MarketEvent, NativeTradeIdentity, ProviderCapabilities, QuoteMode,
-    ReplayCapability, RunId, Side, SideSemantics, Symbol, TimestampCapability, Trade,
+    CapabilityBounds, CapabilityError, ConsumerRequirements, DeliveryStamp, DiscoveryCapability,
+    IdentityScope, IntegrityCapability, MarketEvent, NativeTradeIdentity, ProviderCapabilities,
+    QuoteMode, ReplayCapability, RunId, Side, SideSemantics, Symbol, TimestampCapability, Trade,
     TradeCapability, TradeId, TradeIdentityError, TradeNamespace, UnixNanos, VenueId,
 };
 use proptest::prelude::*;
@@ -165,7 +165,7 @@ proptest! {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: true,
+            discovery: DiscoveryCapability::from(true),
             rest_quote: true,
         };
 
@@ -185,7 +185,7 @@ proptest! {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: false,
+            discovery: DiscoveryCapability::from(false),
             rest_quote: false,
         };
 

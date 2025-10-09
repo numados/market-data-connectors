@@ -1,5 +1,6 @@
 //! Provider capabilities and consumer requirement contracts.
 
+pub use crate::catalog::DiscoveryCapability;
 use serde::{Deserialize, Serialize};
 
 /// Mode of top-of-book market quote representation.
@@ -132,8 +133,8 @@ pub struct ProviderCapabilities {
     pub replay: ReplayCapability,
     /// Operational capacity limits.
     pub bounds: CapabilityBounds,
-    /// Supports dynamic instrument discovery.
-    pub discovery: bool,
+    /// Discovery capability profile.
+    pub discovery: DiscoveryCapability,
     /// Supports REST quote snapshot polling.
     pub rest_quote: bool,
 }
@@ -175,6 +176,11 @@ pub enum CapabilityError {
 }
 
 impl ProviderCapabilities {
+    /// Returns `true` if complete instrument catalog discovery is supported.
+    pub fn is_discovery_supported(&self) -> bool {
+        self.discovery.is_supported()
+    }
+
     /// Evaluates `requirements` against this capability declaration.
     ///
     /// Fails closed with [`CapabilityError`] if any requirement cannot be satisfied.
@@ -236,7 +242,7 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: false,
+            discovery: DiscoveryCapability::from(false),
             rest_quote: false,
         };
 
@@ -258,7 +264,7 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: false,
+            discovery: DiscoveryCapability::from(false),
             rest_quote: false,
         };
 
@@ -283,7 +289,7 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: false,
+            discovery: DiscoveryCapability::from(false),
             rest_quote: false,
         };
 

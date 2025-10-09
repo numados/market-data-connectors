@@ -2,12 +2,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod catalog;
 pub mod error;
 pub mod integrity;
 pub mod model;
 pub mod resync;
 pub mod sink;
 
+pub use catalog::*;
 pub use error::MdcError;
 pub use integrity::{
     BitfinexChecksum, ChecksumStrategy, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429,

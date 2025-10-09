@@ -3,9 +3,10 @@
 use std::sync::{Arc, Mutex};
 
 use mdc_core::{
-    CapabilityBounds, ConsumerRequirements, EmbargoTracker, IdentityScope, IntegrityCapability,
-    MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode, ReplayCapability,
-    SideSemantics, StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability, VenueId,
+    CapabilityBounds, ConsumerRequirements, DiscoveryCapability, EmbargoTracker, IdentityScope,
+    IntegrityCapability, MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode,
+    ReplayCapability, SideSemantics, StreamingSink, Symbol, SymbolTag, TimestampCapability,
+    TradeCapability, VenueId,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -32,7 +33,7 @@ pub static BINANCE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             max_depth: Some(5000),
             max_symbols_per_connection: 25,
         },
-        discovery: false,
+        discovery: DiscoveryCapability::unsupported("Binance discovery pending"),
         rest_quote: false,
     });
 

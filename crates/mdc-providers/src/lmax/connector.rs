@@ -1,7 +1,7 @@
 use mdc_core::{
-    CapabilityBounds, ConsumerRequirements, IntegrityCapability, MarketDataSink, MdcError, Owned,
-    ProviderCapabilities, QuoteMode, ReplayCapability, StreamingSink, Symbol, SymbolTag,
-    TimestampCapability, TradeCapability, VenueId,
+    CapabilityBounds, ConsumerRequirements, DiscoveryCapability, IntegrityCapability,
+    MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode, ReplayCapability,
+    StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability, VenueId,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -27,7 +27,9 @@ pub static LMAX_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> = std::s
             max_depth: Some(20),
             max_symbols_per_connection: 26,
         },
-        discovery: false,
+        discovery: DiscoveryCapability::unsupported(
+            "LMAX does not support public REST symbol discovery",
+        ),
         rest_quote: false,
     }
     },

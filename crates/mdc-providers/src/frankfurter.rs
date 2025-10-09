@@ -67,8 +67,8 @@ pub use raw::{
 pub use rest::{FrankfurterRestClient, HttpPollError, PollResponse, build_rates_url};
 
 use mdc_core::{
-    CapabilityBounds, IntegrityCapability, ProviderCapabilities, QuoteMode, ReplayCapability,
-    TimestampCapability, TradeCapability,
+    CapabilityBounds, DiscoveryCapability, IntegrityCapability, ProviderCapabilities, QuoteMode,
+    ReplayCapability, TimestampCapability, TradeCapability,
 };
 
 /// Static capability declaration for Frankfurter ECB reference rate provider.
@@ -83,6 +83,8 @@ pub static FRANKFURTER_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
             max_depth: None,
             max_symbols_per_connection: 100,
         },
-        discovery: false,
+        discovery: DiscoveryCapability::unsupported(
+            "Frankfurter does not support variable instrument catalog discovery",
+        ),
         rest_quote: true,
     });
