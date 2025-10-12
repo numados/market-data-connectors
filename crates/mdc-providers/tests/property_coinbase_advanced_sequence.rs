@@ -150,4 +150,37 @@ proptest! {
             prop_assert_eq!(start_alert, IntegrityAlert::ResyncStarted);
         }
     }
+
+    #[test]
+    fn property_tracker_exhaustion(
+        start_seq in (u64::MAX - 20)..=u64::MAX,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new();
+        let check = tracker.check(start_seq);
+        if start_seq == u64::MAX {
+            prop_assert_eq!(check, GlobalSequenceCheck::First);
+            prop_assert!(tracker.is_exhausted());
+            prop_assert_eq!(tracker.check(u64::MAX), GlobalSequenceCheck::SequenceExhausted);
+            prop_assert_eq!(tracker.check(0), GlobalSequenceCheck::SequenceExhausted);
+        } else {
+            prop_assert_eq!(check, GlobalSequenceCheck::First);
+            prop_assert!(!tracker.is_exhausted());
+
+            // Advance to u64::MAX
+            let mut curr = start_seq + 1;
+            while curr < u64::MAX {
+                prop_assert_eq!(tracker.check(curr), GlobalSequenceCheck::Valid);
+                prop_assert!(!tracker.is_exhausted());
+                curr += 1;
+            }
+            // Final sequence u64::MAX
+            prop_assert_eq!(tracker.check(u64::MAX), GlobalSequenceCheck::Valid);
+            prop_assert!(tracker.is_exhausted());
+
+            // After u64::MAX, all further checks return SequenceExhausted
+            prop_assert_eq!(tracker.check(u64::MAX), GlobalSequenceCheck::SequenceExhausted);
+            prop_assert_eq!(tracker.check(0), GlobalSequenceCheck::SequenceExhausted);
+            prop_assert_eq!(tracker.check(curr), GlobalSequenceCheck::SequenceExhausted);
+        }
+    }
 }

@@ -306,9 +306,20 @@ fn test_discovery_capability_behavior() {
     };
     assert!(complete.is_supported());
 
-    // From<bool> conversion
-    assert!(!DiscoveryCapability::from(false).is_supported());
-    assert!(DiscoveryCapability::from(true).is_supported());
+    // Empty endpoint or zero scopes must never report is_supported() == true
+    let empty_endpoint = DiscoveryCapability::CompleteCatalog {
+        scopes: vec![CatalogScope::spot(ProviderKind::Kraken)],
+        pagination: false,
+        default_endpoint: String::new(),
+    };
+    assert!(!empty_endpoint.is_supported());
+
+    let empty_scopes = DiscoveryCapability::CompleteCatalog {
+        scopes: vec![],
+        pagination: false,
+        default_endpoint: "https://api.kraken.com".to_string(),
+    };
+    assert!(!empty_scopes.is_supported());
 }
 
 /// Verification that `InstrumentCatalog` trait compiles and executes

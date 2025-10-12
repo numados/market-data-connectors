@@ -5,9 +5,11 @@ pub mod embargo;
 pub mod sequence;
 pub mod watchdog;
 
+#[cfg(test)]
+pub use checksum::clean_token;
 pub use checksum::{
-    BitfinexChecksum, ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef, clean_token,
-    remove_decimal_and_leading_zeros,
+    BitfinexChecksum, ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef,
+    for_each_cleaned_byte, remove_decimal_and_leading_zeros,
 };
 pub use embargo::{
     EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP, EmbargoTracker, SnapshotPermit,

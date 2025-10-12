@@ -12,11 +12,13 @@ pub mod sink;
 
 pub use catalog::*;
 pub use error::MdcError;
+#[cfg(test)]
+pub use integrity::clean_token;
 pub use integrity::{
     BitfinexChecksum, ChecksumStrategy, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429,
     EMBARGO_SAFETY_CAP, EmbargoTracker, GlobalSequenceCheck, GlobalSequenceTracker, KrakenChecksum,
     NoChecksum, RawLevelRef, SequenceCheck, SequenceTracker, SilenceWatchdog, SnapshotPermit,
-    WatchdogAction, clean_token, parse_retry_after, remove_decimal_and_leading_zeros,
+    WatchdogAction, for_each_cleaned_byte, parse_retry_after, remove_decimal_and_leading_zeros,
 };
 pub use model::*;
 pub use rest_quote::*;

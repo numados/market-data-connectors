@@ -146,6 +146,17 @@ impl ResyncController {
                         alert: IntegrityAlert::GapDetected { expected, received },
                     }
                 }
+                SequenceCheck::SequenceExhausted => {
+                    self.state = SyncState::BufferingDiffs;
+                    self.tracker.clear();
+                    self.buffer.clear();
+                    DeltaDecision::GapDetected {
+                        alert: IntegrityAlert::GapDetected {
+                            expected: u64::MAX,
+                            received: range.first,
+                        },
+                    }
+                }
                 SequenceCheck::NotSynchronized => {
                     self.state = SyncState::BufferingDiffs;
                     DeltaDecision::Buffer
@@ -246,7 +257,9 @@ impl ResyncController {
             match self.tracker.check(seq) {
                 SequenceCheck::Valid => replay.push(delta),
                 SequenceCheck::OldDataIgnored => {}
-                SequenceCheck::GapDetected { .. } | SequenceCheck::NotSynchronized => {
+                SequenceCheck::GapDetected { .. }
+                | SequenceCheck::NotSynchronized
+                | SequenceCheck::SequenceExhausted => {
                     // Continuity broken in buffered deltas. Discard older deltas prior to gap,
                     // keep this delta and subsequent deltas, clear tracker, and request fresh snapshot.
                     self.buffer.push_front(delta);

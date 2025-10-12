@@ -7,7 +7,6 @@ use mdc_core::catalog::{
     MarketFamily, ProviderKind,
 };
 use mdc_core::integrity::embargo::parse_retry_after;
-use mdc_core::model::UnixNanos;
 use url::Url;
 
 /// Function signature for pure provider catalog payload decoders.
@@ -226,7 +225,7 @@ impl InstrumentCatalog for HttpCatalogClient {
                 });
             }
 
-            let received_ts = UnixNanos::now();
+            let received_ts = crate::now_nanos();
 
             let payload_str =
                 std::str::from_utf8(&body_bytes).map_err(|e| CatalogError::InvalidEnvelope {

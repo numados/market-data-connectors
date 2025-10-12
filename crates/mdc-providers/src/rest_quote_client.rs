@@ -128,7 +128,7 @@ impl RestQuoteSource for HttpRestQuoteClient {
             if request.symbols.is_empty() {
                 return Ok(RestQuoteSnapshot {
                     configuration_generation: request.configuration_generation,
-                    received_ts: UnixNanos::now(),
+                    received_ts: crate::now_nanos(),
                     results: Vec::new(),
                 });
             }
@@ -246,7 +246,7 @@ impl RestQuoteSource for HttpRestQuoteClient {
                 });
             }
 
-            let received_ts = UnixNanos::now();
+            let received_ts = crate::now_nanos();
 
             let payload_str =
                 std::str::from_utf8(&body_bytes).map_err(|e| RestQuoteError::InvalidEnvelope {

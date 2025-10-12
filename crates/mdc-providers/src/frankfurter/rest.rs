@@ -126,7 +126,7 @@ impl FrankfurterRestClient {
                 }
             })?;
 
-        let received_ts = UnixNanos::now();
+        let received_ts = crate::now_nanos();
         let status = response.status();
 
         if !status.is_success() {

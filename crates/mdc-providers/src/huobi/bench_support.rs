@@ -107,7 +107,7 @@ impl<S: StreamingSink> Connection<S> {
             symbol,
             tag,
             exchange_ts: header.ts.map(UnixNanos::from_millis),
-            received_ts: UnixNanos::now(),
+            received_ts: crate::now_nanos(),
             connection_id: 1,
             delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
             source_sequence: Some(header.mbp.seq_num),

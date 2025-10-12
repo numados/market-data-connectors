@@ -94,7 +94,7 @@ impl VwdRestClient {
             .await
             .map_err(|_| SourceErrorKind::Transport)?;
 
-        let received_ts = UnixNanos::now();
+        let received_ts = crate::now_nanos();
 
         Ok(PollResponse { body, received_ts })
     }

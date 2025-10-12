@@ -154,7 +154,7 @@ async fn execute_poll_cycle<S: StreamingSink>(
                     symbol: &sym.symbol,
                     tag: SymbolTag::default(),
                     exchange_ts: None,
-                    received_ts: mdc_core::UnixNanos::now(),
+                    received_ts: crate::now_nanos(),
                     connection_id: 1,
                     delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
                     source_sequence: None,

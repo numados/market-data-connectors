@@ -2,7 +2,7 @@
 
 use mdc_core::{
     BookKind, DeliveryStamp, EventContext, RawLevelText, RunId, Side, StreamingSink, Symbol,
-    SymbolTag, UnixNanos, VenueId,
+    SymbolTag, VenueId,
 };
 
 use crate::kraken::checksum::KrakenChecksumBook;
@@ -56,7 +56,7 @@ impl<S: StreamingSink> Connection<S> {
             symbol: &self.symbol,
             tag: self.tag,
             exchange_ts,
-            received_ts: UnixNanos::now(),
+            received_ts: crate::now_nanos(),
             connection_id: 1,
             delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
             source_sequence: None,

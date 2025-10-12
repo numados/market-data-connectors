@@ -203,15 +203,13 @@ fn test_quote_snapshot_deserialize_validation() {
     assert_eq!(q.ask_price(), d("101"));
 
     // Crossed book JSON rejected
-    let crossed_json = format!(
-        r#"{{"quality":"firm","bid_price":"105","ask_price":"100","received_ts":{recv}}}"#
-    );
+    let crossed_json =
+        format!(r#"{{"quality":"firm","bid_price":"105","ask_price":"100","received_ts":{recv}}}"#);
     assert!(serde_json::from_str::<QuoteSnapshot>(&crossed_json).is_err());
 
     // Non-positive price JSON rejected
-    let non_pos_json = format!(
-        r#"{{"quality":"firm","bid_price":"0","ask_price":"100","received_ts":{recv}}}"#
-    );
+    let non_pos_json =
+        format!(r#"{{"quality":"firm","bid_price":"0","ask_price":"100","received_ts":{recv}}}"#);
     assert!(serde_json::from_str::<QuoteSnapshot>(&non_pos_json).is_err());
 
     // Negative size JSON rejected
@@ -330,9 +328,9 @@ fn test_rest_quote_capability() {
         _ => panic!("expected snapshot capability"),
     }
 
-    // From<bool>
-    assert!(!RestQuoteCapability::from(false).is_supported());
-    assert!(RestQuoteCapability::from(true).is_supported());
+    // Empty endpoint must never report is_supported() == true
+    let empty_endpoint = RestQuoteCapability::single(true, TimestampCapability::ReceiptOnly, "");
+    assert!(!empty_endpoint.is_supported());
 }
 
 #[test]

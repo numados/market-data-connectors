@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use mdc_core::PriceLevel;
-use mdc_core::model::{DeliveryStamp, RunId, SequenceRange, Symbol, SymbolTag, UnixNanos};
+use mdc_core::model::{DeliveryStamp, RunId, SequenceRange, Symbol, SymbolTag};
 use mdc_core::resync::{DeltaDecision, SnapshotOutcome, SyncState};
 use mdc_providers::gateio::GateioConfig;
 use mdc_providers::gateio::fsm::SymbolFsm;
@@ -45,7 +45,7 @@ proptest! {
 
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
-        let outcome = fsm.on_snapshot(&snap_header, &scratch, delivery, UnixNanos::now(), now).unwrap();
+        let outcome = fsm.on_snapshot(&snap_header, &scratch, delivery, mdc_providers::now_nanos(), now).unwrap();
         let is_sync = matches!(outcome, SnapshotOutcome::Synchronized { .. });
         prop_assert!(is_sync);
         prop_assert_eq!(fsm.state(), SyncState::InSync);
@@ -84,7 +84,7 @@ proptest! {
 
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
-        let outcome = fsm.on_snapshot(&snap_header, &scratch, delivery, UnixNanos::now(), now).unwrap();
+        let outcome = fsm.on_snapshot(&snap_header, &scratch, delivery, mdc_providers::now_nanos(), now).unwrap();
         let is_sync = matches!(outcome, SnapshotOutcome::Synchronized { .. });
         prop_assert!(is_sync);
 
@@ -110,7 +110,7 @@ proptest! {
             first_id: 0,
             last_id: snap_id + gap_size + 4,
         };
-        let resync_outcome = fsm.on_snapshot(&fresh_snap_header, &scratch, delivery, UnixNanos::now(), now).unwrap();
+        let resync_outcome = fsm.on_snapshot(&fresh_snap_header, &scratch, delivery, mdc_providers::now_nanos(), now).unwrap();
         let is_resync_ok = matches!(resync_outcome, SnapshotOutcome::Synchronized { .. });
         prop_assert!(is_resync_ok);
         prop_assert_eq!(fsm.state(), SyncState::InSync);
@@ -139,7 +139,7 @@ proptest! {
 
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
-        fsm.on_snapshot(&snap_header, &scratch, delivery, UnixNanos::now(), now).unwrap();
+        fsm.on_snapshot(&snap_header, &scratch, delivery, mdc_providers::now_nanos(), now).unwrap();
 
         let mut curr_seq = snap_id;
         for i in 0..steps {

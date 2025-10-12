@@ -12,6 +12,7 @@ use mdc_core::model::{
     QuoteMode, ReplayCapability, RunId, Side, SideSemantics, Symbol, TimestampCapability, Trade,
     TradeCapability, TradeId, TradeIdentityError, TradeNamespace, UnixNanos, VenueId,
 };
+use mdc_core::{ProviderKind, RestQuoteCapability};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 
@@ -165,8 +166,8 @@ proptest! {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: DiscoveryCapability::from(true),
-            rest_quote: true.into(),
+            discovery: DiscoveryCapability::complete(ProviderKind::Binance, "https://api.binance.com"),
+            rest_quote: RestQuoteCapability::single(true, TimestampCapability::ReceiptOnly, "https://api.binance.com"),
         };
 
         let req = ConsumerRequirements {
@@ -185,8 +186,8 @@ proptest! {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: DiscoveryCapability::from(false),
-            rest_quote: false.into(),
+            discovery: DiscoveryCapability::unsupported("unsupported in test"),
+            rest_quote: RestQuoteCapability::unsupported("unsupported in test"),
         };
 
         if require_trades {

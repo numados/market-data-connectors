@@ -1,7 +1,7 @@
 //! Benchmark support harness demonstrating hot-path zero-heap frame processing for Frankfurter.
 
 use mdc_core::{
-    DeliveryStamp, EventContext, ReferenceRate, RunId, StreamingSink, SymbolTag, UnixNanos, VenueId,
+    DeliveryStamp, EventContext, ReferenceRate, RunId, StreamingSink, SymbolTag, VenueId,
 };
 use serde::de::DeserializeSeed;
 
@@ -60,7 +60,7 @@ impl<S: StreamingSink> Connection<S> {
             return;
         }
 
-        let now = UnixNanos::now();
+        let now = crate::now_nanos();
 
         for item in &self.normalized_buf {
             self.delivery_ordinal += 1;

@@ -49,7 +49,7 @@ mod tests {
 
         let event = MarketEvent {
             exchange_ts: None,
-            received_ts: UnixNanos::now(),
+            received_ts: UnixNanos(1_000_000_000),
             venue: VenueId::Binance,
             symbol: Symbol::from("BTCUSDT"),
             tag: 1,
@@ -72,7 +72,7 @@ mod tests {
 
         let event = MarketEvent {
             exchange_ts: None,
-            received_ts: UnixNanos::now(),
+            received_ts: UnixNanos(1_000_000_000),
             venue: VenueId::Kraken,
             symbol: Symbol::from("ETHUSD"),
             tag: 2,

@@ -1,8 +1,7 @@
 //! Benchmark support harness demonstrating hot-path zero-heap frame processing for VWD.
 
 use mdc_core::{
-    BookKind, DeliveryStamp, EventContext, RunId, Side, StreamingSink, SymbolTag, UnixNanos,
-    VenueId,
+    BookKind, DeliveryStamp, EventContext, RunId, Side, StreamingSink, SymbolTag, VenueId,
 };
 use serde::de::DeserializeSeed;
 
@@ -56,7 +55,7 @@ impl<S: StreamingSink> Connection<S> {
             return;
         }
 
-        let now = UnixNanos::now();
+        let now = crate::now_nanos();
 
         for sym in &self.config.symbols {
             self.delivery_ordinal += 1;

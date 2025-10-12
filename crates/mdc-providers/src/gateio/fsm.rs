@@ -162,7 +162,7 @@ mod tests {
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
         let outcome = fsm
-            .on_snapshot(&snap_header, &scratch, delivery, UnixNanos::now(), now)
+            .on_snapshot(&snap_header, &scratch, delivery, crate::now_nanos(), now)
             .unwrap();
         assert!(matches!(outcome, SnapshotOutcome::Synchronized { .. }));
         assert_eq!(fsm.state(), SyncState::InSync);

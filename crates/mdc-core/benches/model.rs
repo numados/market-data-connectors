@@ -13,10 +13,10 @@ fn bench_symbol_creation(c: &mut Criterion) {
     });
 }
 
-fn bench_unix_nanos_now(c: &mut Criterion) {
-    c.bench_function("unix_nanos_now", |b| {
+fn bench_unix_nanos_conversion(c: &mut Criterion) {
+    c.bench_function("unix_nanos_from_millis", |b| {
         b.iter(|| {
-            let ts = UnixNanos::now();
+            let ts = UnixNanos::from_millis(black_box(1_670_000_000_000));
             black_box(ts);
         })
     });
@@ -51,7 +51,7 @@ fn bench_snapshot_serialization(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_symbol_creation,
-    bench_unix_nanos_now,
+    bench_unix_nanos_conversion,
     bench_snapshot_serialization
 );
 criterion_main!(benches);

@@ -1,7 +1,7 @@
 //! Wall-clock timestamps in nanoseconds since Unix epoch.
 
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// Nanoseconds since the Unix epoch (wall clock).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -9,14 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct UnixNanos(pub u64);
 
 impl UnixNanos {
-    /// Captures the current wall-clock time as `UnixNanos`.
-    pub fn now() -> Self {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO);
-        Self(duration.as_nanos().min(u64::MAX as u128) as u64)
-    }
-
     /// Creates a `UnixNanos` from seconds since the Unix epoch.
     pub const fn from_secs(secs: u64) -> Self {
         Self(secs.saturating_mul(1_000_000_000))
@@ -68,12 +60,5 @@ mod tests {
             Duration::from_nanos(500_000_000)
         );
         assert_eq!(t1.saturating_elapsed_since(t2), Duration::ZERO);
-    }
-
-    #[test]
-    fn now_is_non_decreasing() {
-        let t1 = UnixNanos::now();
-        let t2 = UnixNanos::now();
-        assert!(t2 >= t1);
     }
 }

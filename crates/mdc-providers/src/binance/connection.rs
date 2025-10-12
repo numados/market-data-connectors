@@ -158,7 +158,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 symbol: sym,
                 tag: *tag,
                 exchange_ts: None,
-                received_ts: UnixNanos::now(),
+                received_ts: crate::now_nanos(),
                 connection_id,
                 delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                 source_sequence: None,
@@ -195,7 +195,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             symbol: sym,
                             tag: *tag,
                             exchange_ts: None,
-                            received_ts: UnixNanos::now(),
+                            received_ts: crate::now_nanos(),
                             connection_id,
                             delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                             source_sequence: None,
@@ -224,7 +224,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         symbol: &sym,
                                         tag,
                                         exchange_ts: None,
-                                        received_ts: UnixNanos::now(),
+                                        received_ts: crate::now_nanos(),
                                         connection_id,
                                         delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                         source_sequence: None,
@@ -251,7 +251,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         symbol: sym,
                                         tag: *tag,
                                         exchange_ts: None,
-                                        received_ts: UnixNanos::now(),
+                                        received_ts: crate::now_nanos(),
                                         connection_id,
                                         delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                         source_sequence: None,
@@ -281,7 +281,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: sym,
                                     tag: *tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                     source_sequence: None,
@@ -323,7 +323,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             symbol: &sym,
                             tag,
                             exchange_ts: None,
-                            received_ts: UnixNanos::now(),
+                            received_ts: crate::now_nanos(),
                             connection_id,
                             delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                             source_sequence: None,
@@ -334,7 +334,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 let snapshot = normalize_snapshot(&raw_snapshot);
                                 let snapshot_event = MarketEvent {
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     venue: VenueId::Binance,
                                     symbol: sym.clone(),
                                     tag,
@@ -392,7 +392,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 symbol: &sym,
                                                 tag,
                                                 exchange_ts: None,
-                                                received_ts: UnixNanos::now(),
+                                                received_ts: crate::now_nanos(),
                                                 connection_id,
                                                 delivery: DeliveryStamp::new(
                                                     run_id,
@@ -442,7 +442,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                 // Incoming WebSocket messages
                 ws_msg_opt = ws_stream.next() => {
-                    let received_ts = UnixNanos::now();
+                    let received_ts = crate::now_nanos();
 
                     let msg = match ws_msg_opt {
                         Some(Ok(m)) => m,
@@ -621,7 +621,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 symbol: sym,
                 tag: *tag,
                 exchange_ts: None,
-                received_ts: UnixNanos::now(),
+                received_ts: crate::now_nanos(),
                 connection_id,
                 delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                 source_sequence: None,

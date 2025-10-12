@@ -1,8 +1,7 @@
 //! Benchmark support harness demonstrating hot-path zero-heap frame processing for Coinbase Advanced.
 
 use mdc_core::{
-    BookKind, DeliveryStamp, EventContext, RunId, Side, StreamingSink, Symbol, SymbolTag,
-    UnixNanos, VenueId,
+    BookKind, DeliveryStamp, EventContext, RunId, Side, StreamingSink, Symbol, SymbolTag, VenueId,
 };
 use serde::de::DeserializeSeed;
 
@@ -59,7 +58,7 @@ impl<S: StreamingSink> Connection<S> {
             symbol: &self.symbol,
             tag: self.tag,
             exchange_ts: header.timestamp.and_then(|ts| parse_rfc3339_nanos(ts).ok()),
-            received_ts: UnixNanos::now(),
+            received_ts: crate::now_nanos(),
             connection_id: 1,
             delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
             source_sequence: header.sequence_num,

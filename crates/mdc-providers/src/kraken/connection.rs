@@ -185,7 +185,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 symbol: sym,
                 tag,
                 exchange_ts: None,
-                received_ts: UnixNanos::now(),
+                received_ts: crate::now_nanos(),
                 connection_id,
                 delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
                 source_sequence: None,
@@ -234,7 +234,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: sym,
                                     tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(
                                         run_id,
@@ -312,7 +312,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: sym,
                                     tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(
                                         run_id,
@@ -336,7 +336,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: sym,
                                     tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(
                                         run_id,
@@ -385,7 +385,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                     match msg {
                         Message::Text(text) => {
-                            let received_ts = UnixNanos::now();
+                            let received_ts = crate::now_nanos();
                             watchdog.on_data_frame(Instant::now());
 
                             handle_frame_text(
@@ -404,7 +404,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             );
                         }
                         Message::Binary(bin) => {
-                            let received_ts = UnixNanos::now();
+                            let received_ts = crate::now_nanos();
                             watchdog.on_data_frame(Instant::now());
 
                             if let Ok(text) = std::str::from_utf8(&bin) {
@@ -449,7 +449,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 symbol: sym,
                 tag,
                 exchange_ts: None,
-                received_ts: UnixNanos::now(),
+                received_ts: crate::now_nanos(),
                 connection_id,
                 delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
                 source_sequence: None,

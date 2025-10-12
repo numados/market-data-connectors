@@ -51,7 +51,7 @@ impl<S: StreamingSink> Connection<S> {
             symbol: &self.symbol,
             tag: self.tag,
             exchange_ts: Some(UnixNanos::from_millis(header.depth.event_time_ms)),
-            received_ts: UnixNanos::now(),
+            received_ts: crate::now_nanos(),
             connection_id: 1,
             delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
             source_sequence: Some(header.depth.last_update_id),

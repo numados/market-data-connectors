@@ -128,7 +128,7 @@ impl<S: StreamingSink> ConnectionTask<S> {
                                         symbol: &sym,
                                         tag: SymbolTag::default(),
                                         exchange_ts: None,
-                                        received_ts: mdc_core::UnixNanos::now(),
+                                        received_ts: crate::now_nanos(),
                                         connection_id: 1,
                                         delivery: DeliveryStamp::new(self.run_id, self.connection_gen, self.delivery_ordinal),
                                         source_sequence: None,
@@ -292,7 +292,7 @@ impl<S: StreamingSink> ConnectionTask<S> {
     }
 
     fn emit_resync_started(&mut self) {
-        let now = mdc_core::UnixNanos::now();
+        let now = crate::now_nanos();
         for quote in &self.active_quotes {
             if let Some(sym) = build_pair_symbol(&self.config.base_currency, quote) {
                 self.delivery_ordinal += 1;
@@ -316,7 +316,7 @@ impl<S: StreamingSink> ConnectionTask<S> {
     }
 
     fn emit_source_error(&mut self, kind: SourceErrorKind) {
-        let now = mdc_core::UnixNanos::now();
+        let now = crate::now_nanos();
         for quote in &self.active_quotes {
             if let Some(sym) = build_pair_symbol(&self.config.base_currency, quote) {
                 self.delivery_ordinal += 1;
@@ -340,7 +340,7 @@ impl<S: StreamingSink> ConnectionTask<S> {
     }
 
     fn emit_connection_lost(&mut self, reason: DisconnectKind) {
-        let now = mdc_core::UnixNanos::now();
+        let now = crate::now_nanos();
         for quote in &self.active_quotes {
             if let Some(sym) = build_pair_symbol(&self.config.base_currency, quote) {
                 self.delivery_ordinal += 1;

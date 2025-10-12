@@ -55,11 +55,13 @@ impl ChecksumStrategy for NoChecksum {
     }
 }
 
-/// Formats a raw number token for Kraken CRC32 checksum calculation:
-/// removes the decimal point and leading zeros. If the result is empty, outputs "0".
-pub fn remove_decimal_and_leading_zeros(s: &str, out: &mut String) {
-    let start_len = out.len();
+/// Iterates over the bytes of a raw numeric string representation,
+/// stripping any decimal point (`'.'`) and leading zeros, and invoking `f` on each remaining byte.
+/// If the stripped output is empty (e.g. `"0"`, `"0.0"`, `"0.000"`), emits a single `b'0'`.
+#[inline]
+pub fn for_each_cleaned_byte<F: FnMut(u8)>(s: &str, mut f: F) {
     let mut seen_non_zero = false;
+    let mut pushed = false;
     for b in s.bytes() {
         if b == b'.' {
             continue;
@@ -70,13 +72,21 @@ pub fn remove_decimal_and_leading_zeros(s: &str, out: &mut String) {
             }
             seen_non_zero = true;
         }
-        out.push(b as char);
+        f(b);
+        pushed = true;
     }
-    if out.len() == start_len {
-        out.push('0');
+    if !pushed {
+        f(b'0');
     }
 }
 
+/// Formats a raw number token for Kraken CRC32 checksum calculation:
+/// removes the decimal point and leading zeros. If the result is empty, outputs "0".
+pub fn remove_decimal_and_leading_zeros(s: &str, out: &mut String) {
+    for_each_cleaned_byte(s, |b| out.push(b as char));
+}
+
+#[cfg(test)]
 /// Helper returning the formatted token string.
 pub fn clean_token(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -109,24 +119,7 @@ impl KrakenChecksum {
 }
 
 fn hash_token(hasher: &mut crc32fast::Hasher, s: &str) {
-    let mut seen_non_zero = false;
-    let mut pushed = false;
-    for b in s.bytes() {
-        if b == b'.' {
-            continue;
-        }
-        if !seen_non_zero {
-            if b == b'0' {
-                continue;
-            }
-            seen_non_zero = true;
-        }
-        hasher.update(&[b]);
-        pushed = true;
-    }
-    if !pushed {
-        hasher.update(b"0");
-    }
+    for_each_cleaned_byte(s, |b| hasher.update(&[b]));
 }
 
 impl ChecksumStrategy for KrakenChecksum {

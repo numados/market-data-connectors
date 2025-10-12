@@ -68,7 +68,7 @@ pub use rest::{FrankfurterRestClient, HttpPollError, PollResponse, build_rates_u
 
 use mdc_core::{
     CapabilityBounds, DiscoveryCapability, IntegrityCapability, ProviderCapabilities, QuoteMode,
-    ReplayCapability, TimestampCapability, TradeCapability,
+    ReplayCapability, RestQuoteCapability, TimestampCapability, TradeCapability,
 };
 
 /// Static capability declaration for Frankfurter ECB reference rate provider.
@@ -86,5 +86,7 @@ pub static FRANKFURTER_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         discovery: DiscoveryCapability::unsupported(
             "Frankfurter does not support variable instrument catalog discovery",
         ),
-        rest_quote: true.into(),
+        rest_quote: RestQuoteCapability::unsupported(
+            "Frankfurter reference rate provider does not support on-demand REST quote snapshots",
+        ),
     });

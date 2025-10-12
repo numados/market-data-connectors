@@ -1,5 +1,13 @@
 //! Provider implementations for market data connectors.
 
+/// Returns the current wall-clock timestamp in nanoseconds since Unix epoch.
+pub fn now_nanos() -> mdc_core::UnixNanos {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO);
+    mdc_core::UnixNanos(duration.as_nanos().min(u64::MAX as u128) as u64)
+}
+
 pub(crate) mod catalog_util;
 
 #[cfg(any(

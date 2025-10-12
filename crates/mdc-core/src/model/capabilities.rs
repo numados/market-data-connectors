@@ -248,8 +248,8 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: DiscoveryCapability::from(false),
-            rest_quote: false.into(),
+            discovery: DiscoveryCapability::unsupported("discovery unsupported in test"),
+            rest_quote: RestQuoteCapability::unsupported("rest quote unsupported in test"),
         };
 
         let req = ConsumerRequirements {
@@ -270,8 +270,8 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: DiscoveryCapability::from(false),
-            rest_quote: false.into(),
+            discovery: DiscoveryCapability::unsupported("discovery unsupported in test"),
+            rest_quote: RestQuoteCapability::unsupported("rest quote unsupported in test"),
         };
 
         let req = ConsumerRequirements {
@@ -295,8 +295,8 @@ mod tests {
             integrity: IntegrityCapability::SequenceNumbers,
             replay: ReplayCapability::None,
             bounds: CapabilityBounds::default(),
-            discovery: DiscoveryCapability::from(false),
-            rest_quote: false.into(),
+            discovery: DiscoveryCapability::unsupported("discovery unsupported in test"),
+            rest_quote: RestQuoteCapability::unsupported("rest quote unsupported in test"),
         };
 
         let req = ConsumerRequirements {

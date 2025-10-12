@@ -18,6 +18,8 @@ pub enum SequenceCheck {
     },
     /// No authoritative snapshot has been applied yet; data must be buffered and snapshot requested.
     NotSynchronized,
+    /// Sequence space exhausted after `u64::MAX`; no further sequence updates are valid.
+    SequenceExhausted,
 }
 
 /// Tracks the latest applied sequence or update ID and validates incoming update ranges.
@@ -50,21 +52,31 @@ impl SequenceTracker {
         self.last
     }
 
+    /// Returns `true` if the sequence tracker is exhausted after `u64::MAX`.
+    pub const fn is_exhausted(&self) -> bool {
+        matches!(self.last, Some(u64::MAX))
+    }
+
     /// Classifies an incoming sequence range and advances the tracker if valid.
     ///
     /// Classification rules:
     /// 1. `current == None` -> [`SequenceCheck::NotSynchronized`]
-    /// 2. `range.last <= current` -> [`SequenceCheck::OldDataIgnored`]
-    /// 3. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
-    /// 4. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last`.
+    /// 2. `current == u64::MAX` -> [`SequenceCheck::SequenceExhausted`]
+    /// 3. `range.last <= current` -> [`SequenceCheck::OldDataIgnored`]
+    /// 4. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
+    /// 5. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last`.
     ///
-    /// Rule 4 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
+    /// Rule 5 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
     /// which is required by exchange snapshot-reconciliation contracts (e.g. Binance)
     /// where the first delta after snapshot application overlaps with the snapshot's `last_update_id`.
     pub fn check(&mut self, range: SequenceRange) -> SequenceCheck {
         let Some(current) = self.last else {
             return SequenceCheck::NotSynchronized;
         };
+
+        if current == u64::MAX {
+            return SequenceCheck::SequenceExhausted;
+        }
 
         if range.last <= current {
             return SequenceCheck::OldDataIgnored;
@@ -99,6 +111,8 @@ pub enum GlobalSequenceCheck {
         /// Actual sequence number received.
         received: u64,
     },
+    /// Sequence space exhausted after `u64::MAX`; no further sequence updates are valid.
+    SequenceExhausted,
 }
 
 /// Tracks connection-wide monotonic sequence numbers (e.g. Coinbase Advanced Trade).
@@ -107,45 +121,75 @@ pub enum GlobalSequenceCheck {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GlobalSequenceTracker {
     next: Option<u64>,
+    exhausted: bool,
 }
 
 impl GlobalSequenceTracker {
     /// Creates an uninitialized global sequence tracker.
     pub const fn new() -> Self {
-        Self { next: None }
+        Self {
+            next: None,
+            exhausted: false,
+        }
     }
 
     /// Resets the tracker to an uninitialized state.
     pub fn reset(&mut self) {
         self.next = None;
+        self.exhausted = false;
     }
 
-    /// Returns the expected next sequence number, if initialized.
+    /// Returns the expected next sequence number, if initialized and not exhausted.
     pub fn next(&self) -> Option<u64> {
         self.next
+    }
+
+    /// Returns `true` if the sequence tracker is exhausted after `u64::MAX`.
+    pub const fn is_exhausted(&self) -> bool {
+        self.exhausted
     }
 
     /// Checks an incoming sequence number and advances the tracker accordingly.
     ///
     /// Rules:
-    /// - Uninitialized (`next == None`) -> returns [`GlobalSequenceCheck::First`], setting `next = n + 1`.
-    /// - `n == next` -> returns [`GlobalSequenceCheck::Valid`], setting `next = n + 1`.
+    /// - Exhausted (`exhausted == true`) -> returns [`GlobalSequenceCheck::SequenceExhausted`].
+    /// - Uninitialized (`next == None`) -> returns [`GlobalSequenceCheck::First`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
+    /// - `n == next` -> returns [`GlobalSequenceCheck::Valid`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     /// - `n < next` -> returns [`GlobalSequenceCheck::OldDataIgnored`], leaving `next` unchanged.
-    /// - `n > next` -> returns [`GlobalSequenceCheck::GapDetected`], re-anchoring `next = n + 1`.
+    /// - `n > next` -> returns [`GlobalSequenceCheck::GapDetected`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     pub fn check(&mut self, n: u64) -> GlobalSequenceCheck {
+        if self.exhausted {
+            return GlobalSequenceCheck::SequenceExhausted;
+        }
+
         match self.next {
             None => {
-                self.next = Some(n.saturating_add(1));
+                if n == u64::MAX {
+                    self.exhausted = true;
+                    self.next = None;
+                } else {
+                    self.next = Some(n + 1);
+                }
                 GlobalSequenceCheck::First
             }
             Some(expected) => match n.cmp(&expected) {
                 std::cmp::Ordering::Equal => {
-                    self.next = Some(expected.saturating_add(1));
+                    if expected == u64::MAX {
+                        self.exhausted = true;
+                        self.next = None;
+                    } else {
+                        self.next = Some(expected + 1);
+                    }
                     GlobalSequenceCheck::Valid
                 }
                 std::cmp::Ordering::Less => GlobalSequenceCheck::OldDataIgnored,
                 std::cmp::Ordering::Greater => {
-                    self.next = Some(n.saturating_add(1));
+                    if n == u64::MAX {
+                        self.exhausted = true;
+                        self.next = None;
+                    } else {
+                        self.next = Some(n + 1);
+                    }
                     GlobalSequenceCheck::GapDetected {
                         expected,
                         received: n,
@@ -304,5 +348,88 @@ mod tests {
         assert_eq!(tracker.next(), None);
         assert_eq!(tracker.check(42), GlobalSequenceCheck::First);
         assert_eq!(tracker.next(), Some(43));
+    }
+
+    #[test]
+    fn sequence_tracker_exhaustion() {
+        let mut tracker = SequenceTracker::new();
+        tracker.reset_to(u64::MAX - 1);
+        assert!(!tracker.is_exhausted());
+
+        // Frame advancing to u64::MAX is valid
+        assert_eq!(
+            tracker.check(SequenceRange::new(u64::MAX, u64::MAX)),
+            SequenceCheck::Valid
+        );
+        assert_eq!(tracker.current(), Some(u64::MAX));
+        assert!(tracker.is_exhausted());
+
+        // Any subsequent frame classifies as SequenceExhausted, never Valid
+        assert_eq!(
+            tracker.check(SequenceRange::new(u64::MAX, u64::MAX)),
+            SequenceCheck::SequenceExhausted
+        );
+        assert_eq!(
+            tracker.check(SequenceRange::new(0, 1)),
+            SequenceCheck::SequenceExhausted
+        );
+
+        // Reset to u64::MAX immediately triggers exhaustion on next frame
+        tracker.reset_to(u64::MAX);
+        assert!(tracker.is_exhausted());
+        assert_eq!(
+            tracker.check(SequenceRange::new(100, 100)),
+            SequenceCheck::SequenceExhausted
+        );
+    }
+
+    #[test]
+    fn global_sequence_tracker_exhaustion() {
+        let mut tracker = GlobalSequenceTracker::new();
+
+        // Exhaustion from first frame
+        assert_eq!(tracker.check(u64::MAX), GlobalSequenceCheck::First);
+        assert!(tracker.is_exhausted());
+        assert_eq!(tracker.next(), None);
+        assert_eq!(
+            tracker.check(u64::MAX),
+            GlobalSequenceCheck::SequenceExhausted
+        );
+        assert_eq!(tracker.check(0), GlobalSequenceCheck::SequenceExhausted);
+
+        // Reset clears exhaustion
+        tracker.reset();
+        assert!(!tracker.is_exhausted());
+        assert_eq!(tracker.check(u64::MAX - 1), GlobalSequenceCheck::First);
+        assert_eq!(tracker.next(), Some(u64::MAX));
+        assert!(!tracker.is_exhausted());
+
+        // Valid frame matching u64::MAX transitions to exhausted
+        assert_eq!(tracker.check(u64::MAX), GlobalSequenceCheck::Valid);
+        assert!(tracker.is_exhausted());
+        assert_eq!(tracker.next(), None);
+
+        // Further frames are exhausted
+        assert_eq!(
+            tracker.check(u64::MAX),
+            GlobalSequenceCheck::SequenceExhausted
+        );
+        assert_eq!(tracker.check(1), GlobalSequenceCheck::SequenceExhausted);
+
+        // Gap arriving at u64::MAX transitions to exhausted
+        tracker.reset();
+        assert_eq!(tracker.check(10), GlobalSequenceCheck::First);
+        assert_eq!(
+            tracker.check(u64::MAX),
+            GlobalSequenceCheck::GapDetected {
+                expected: 11,
+                received: u64::MAX,
+            }
+        );
+        assert!(tracker.is_exhausted());
+        assert_eq!(
+            tracker.check(u64::MAX),
+            GlobalSequenceCheck::SequenceExhausted
+        );
     }
 }

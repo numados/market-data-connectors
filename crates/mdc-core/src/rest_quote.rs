@@ -468,24 +468,11 @@ impl RestQuoteCapability {
 
     /// Returns `true` if REST quote snapshots are supported.
     pub fn is_supported(&self) -> bool {
-        matches!(self, Self::Snapshot { .. })
-    }
-}
-
-impl From<bool> for RestQuoteCapability {
-    fn from(supported: bool) -> Self {
-        if supported {
+        match self {
             Self::Snapshot {
-                max_symbols_per_request: 1,
-                batch_mode: false,
-                sizes: true,
-                timestamp_source: TimestampCapability::ReceiptOnly,
-                default_endpoint: String::new(),
-            }
-        } else {
-            Self::Unsupported {
-                reason: "rest quote snapshot is unsupported".to_string(),
-            }
+                default_endpoint, ..
+            } => !default_endpoint.is_empty(),
+            Self::Unsupported { .. } => false,
         }
     }
 }

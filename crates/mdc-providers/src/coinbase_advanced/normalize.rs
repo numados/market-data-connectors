@@ -144,7 +144,7 @@ pub fn normalize_snapshot_from_event(
 ) -> Result<(UnixNanos, L2Snapshot), MdcError> {
     let exchange_ts = match envelope_ts {
         Some(ts_str) => parse_rfc3339_nanos(ts_str)?,
-        None => UnixNanos::now(),
+        None => crate::now_nanos(),
     };
 
     let mut bids = Vec::with_capacity(event.updates.len());
@@ -177,7 +177,7 @@ pub fn normalize_snapshot_from_scratch(
 ) -> Result<(UnixNanos, L2Snapshot), MdcError> {
     let exchange_ts = match envelope_ts {
         Some(ts_str) => parse_rfc3339_nanos(ts_str)?,
-        None => UnixNanos::now(),
+        None => crate::now_nanos(),
     };
 
     let snapshot = L2Snapshot {
@@ -196,7 +196,7 @@ pub fn normalize_delta_from_scratch(
 ) -> Result<(UnixNanos, L2Delta), MdcError> {
     let exchange_ts = match envelope_ts {
         Some(ts_str) => parse_rfc3339_nanos(ts_str)?,
-        None => UnixNanos::now(),
+        None => crate::now_nanos(),
     };
 
     let delta = L2Delta {

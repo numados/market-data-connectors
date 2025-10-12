@@ -29,12 +29,17 @@ impl SequenceRange {
         self.first == self.last
     }
 
-    /// Returns the number of sequence IDs in this range, assuming `last >= first`.
-    pub const fn count(&self) -> u64 {
+    /// Returns the number of sequence IDs in this range using checked arithmetic.
+    ///
+    /// Returns `None` if `last < first` or if the inclusive range count overflows `u64`.
+    pub const fn count(&self) -> Option<u64> {
         if self.last >= self.first {
-            self.last - self.first + 1
+            match self.last.checked_sub(self.first) {
+                Some(diff) => diff.checked_add(1),
+                None => None,
+            }
         } else {
-            0
+            None
         }
     }
 }
@@ -48,7 +53,7 @@ mod tests {
     fn single_sequence() {
         let single = SequenceRange::single(42);
         assert!(single.is_single());
-        assert_eq!(single.count(), 1);
+        assert_eq!(single.count(), Some(1));
         assert_eq!(single.first, 42);
         assert_eq!(single.last, 42);
     }
@@ -57,7 +62,15 @@ mod tests {
     fn range_sequence() {
         let range = SequenceRange::new(100, 105);
         assert!(!range.is_single());
-        assert_eq!(range.count(), 6);
+        assert_eq!(range.count(), Some(6));
+
+        // Invalid range (last < first)
+        let invalid = SequenceRange::new(100, 50);
+        assert_eq!(invalid.count(), None);
+
+        // Overflow range (0..=u64::MAX covers u64::MAX + 1 values)
+        let overflow = SequenceRange::new(0, u64::MAX);
+        assert_eq!(overflow.count(), None);
     }
 
     #[test]

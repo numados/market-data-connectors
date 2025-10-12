@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
 use mdc_core::model::{
-    DeliveryStamp, DisconnectKind, IntegrityAlert, RunId, Side, Symbol, SymbolTag, UnixNanos,
-    VenueId,
+    DeliveryStamp, DisconnectKind, IntegrityAlert, RunId, Side, Symbol, SymbolTag, VenueId,
 };
 use mdc_core::sink::{BookKind, EventContext, StreamingSink};
 use serde::de::DeserializeSeed;
@@ -128,7 +127,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 symbol: sym,
                 tag: *tag,
                 exchange_ts: None,
-                received_ts: UnixNanos::now(),
+                received_ts: crate::now_nanos(),
                 connection_id,
                 delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                 source_sequence: None,
@@ -180,7 +179,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             symbol: sym,
                             tag: *tag,
                             exchange_ts: None,
-                            received_ts: UnixNanos::now(),
+                            received_ts: crate::now_nanos(),
                             connection_id,
                             delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                             source_sequence: None,
@@ -250,7 +249,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: &sym,
                                     tag: *tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                     source_sequence: None,
@@ -280,7 +279,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     symbol: sym,
                                     tag: *tag,
                                     exchange_ts: None,
-                                    received_ts: UnixNanos::now(),
+                                    received_ts: crate::now_nanos(),
                                     connection_id,
                                     delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                     source_sequence: None,
@@ -345,7 +344,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             symbol: sym,
                                             tag,
                                             exchange_ts,
-                                            received_ts: UnixNanos::now(),
+                                            received_ts: crate::now_nanos(),
                                             connection_id,
                                             delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                             source_sequence: None,
@@ -386,7 +385,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         symbol: sym,
                                                         tag,
                                                         exchange_ts,
-                                                        received_ts: UnixNanos::now(),
+                                                        received_ts: crate::now_nanos(),
                                                         connection_id,
                                                         delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
                                                         source_sequence: None,

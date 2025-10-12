@@ -46,7 +46,7 @@ proptest! {
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
         let outcome = fsm
-            .on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, UnixNanos::now(), now)
+            .on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, mdc_providers::now_nanos(), now)
             .unwrap();
         let is_sync = matches!(outcome, SnapshotOutcome::Synchronized { .. });
         prop_assert!(is_sync);
@@ -81,7 +81,7 @@ proptest! {
 
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
-        let _ = fsm.on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, UnixNanos::now(), now).unwrap();
+        let _ = fsm.on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, mdc_providers::now_nanos(), now).unwrap();
         prop_assert_eq!(fsm.state(), SyncState::InSync);
 
         // Introduce gap: prevSeqNum = snap_id + gap
@@ -110,7 +110,7 @@ proptest! {
 
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 1);
-        let _ = fsm.on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, UnixNanos::now(), now).unwrap();
+        let _ = fsm.on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, mdc_providers::now_nanos(), now).unwrap();
 
         // Delta strictly older than or equal to current snapshot
         let old_seq = snap_id.saturating_sub(sub);
@@ -138,7 +138,7 @@ proptest! {
                 venue: VenueId::Huobi,
                 symbol: sym.clone(),
                 exchange_ts: Some(UnixNanos::from_millis(1700000000000 + i as u64)),
-                received_ts: UnixNanos::now(),
+                received_ts: mdc_providers::now_nanos(),
                 tag: SymbolTag::default(),
                 delivery: DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, i as u64 + 1),
                 source_sequence: Some(next),
@@ -161,7 +161,7 @@ proptest! {
         let now = Instant::now();
         let delivery = DeliveryStamp::new(RunId::from_bytes([1; 16]), 1, 100);
         let outcome = fsm
-            .on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, UnixNanos::now(), now)
+            .on_snapshot(&snap_header, &scratch, Some(1700000000000), delivery, mdc_providers::now_nanos(), now)
             .unwrap();
 
         match outcome {

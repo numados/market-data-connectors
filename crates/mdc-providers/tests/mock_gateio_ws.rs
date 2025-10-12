@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, Symbol, UnixNanos};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, Symbol};
 use mdc_providers::gateio::{GateioConfig, GateioConnectorBuilder, GateioStreams};
 use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, load_fixture};
 use rust_decimal::Decimal;
@@ -56,7 +56,7 @@ async fn test_ws_handshake_and_obu_subscription() {
     assert_eq!(v["event"], "subscribe");
     assert_eq!(v["payload"], serde_json::json!(["ob.BTC_USDT.400"]));
 
-    let now_secs = UnixNanos::now().as_nanos() / 1_000_000_000;
+    let now_secs = mdc_providers::now_nanos().as_nanos() / 1_000_000_000;
     let req_time = v["time"].as_u64().expect("timestamp as u64");
     assert!(req_time.abs_diff(now_secs) <= 5);
 

@@ -711,22 +711,13 @@ impl DiscoveryCapability {
 
     /// Returns `true` if discovery is supported.
     pub fn is_supported(&self) -> bool {
-        matches!(self, Self::CompleteCatalog { .. })
-    }
-}
-
-impl From<bool> for DiscoveryCapability {
-    fn from(supported: bool) -> Self {
-        if supported {
+        match self {
             Self::CompleteCatalog {
-                scopes: Vec::new(),
-                pagination: false,
-                default_endpoint: String::new(),
-            }
-        } else {
-            Self::Unsupported {
-                reason: "discovery is unsupported".to_string(),
-            }
+                scopes,
+                default_endpoint,
+                ..
+            } => !scopes.is_empty() && !default_endpoint.is_empty(),
+            Self::Unsupported { .. } => false,
         }
     }
 }
