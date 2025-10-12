@@ -221,19 +221,19 @@ mod tests {
         assert_eq!(res[0].symbol(), &Symbol::from("tBTCUSD"));
         assert!(res[0].is_available());
         let q1 = res[0].quote().unwrap();
-        assert_eq!(q1.bid_price, d("50000.0"));
-        assert_eq!(q1.bid_size, Some(d("1.5")));
-        assert_eq!(q1.ask_price, d("50001.0"));
-        assert_eq!(q1.ask_size, Some(d("2.0")));
+        assert_eq!(q1.bid_price(), d("50000.0"));
+        assert_eq!(q1.bid_size(), Some(d("1.5")));
+        assert_eq!(q1.ask_price(), d("50001.0"));
+        assert_eq!(q1.ask_size(), Some(d("2.0")));
 
         // Second item: tETHUSD
         assert_eq!(res[1].symbol(), &Symbol::from("tETHUSD"));
         assert!(res[1].is_available());
         let q2 = res[1].quote().unwrap();
-        assert_eq!(q2.bid_price, d("3000.0"));
-        assert_eq!(q2.bid_size, Some(d("5.0")));
-        assert_eq!(q2.ask_price, d("3001.0"));
-        assert_eq!(q2.ask_size, Some(d("6.0")));
+        assert_eq!(q2.bid_price(), d("3000.0"));
+        assert_eq!(q2.bid_size(), Some(d("5.0")));
+        assert_eq!(q2.ask_price(), d("3001.0"));
+        assert_eq!(q2.ask_size(), Some(d("6.0")));
     }
 
     #[test]

@@ -50,6 +50,8 @@ pub enum QuoteUnavailable {
     CrossedBook,
     /// Price is zero, negative, or unparseable.
     NonPositivePrice,
+    /// Size or volume is negative or unparseable.
+    NonPositiveSize,
     /// Venue explicitly returned an error envelope or rejected the market.
     ProviderError {
         /// Optional venue-specific error code.
@@ -68,6 +70,7 @@ impl fmt::Display for QuoteUnavailable {
             Self::EmptyBook => write!(f, "empty book side"),
             Self::CrossedBook => write!(f, "crossed or locked book"),
             Self::NonPositivePrice => write!(f, "non-positive price"),
+            Self::NonPositiveSize => write!(f, "non-positive size"),
             Self::ProviderError { code, message } => {
                 if let Some(c) = code {
                     write!(f, "provider error [{c}]: {message}")
@@ -82,29 +85,65 @@ impl fmt::Display for QuoteUnavailable {
 
 /// Validated top-of-book quote snapshot for a single symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawQuoteSnapshot")]
 pub struct QuoteSnapshot {
     /// Quality assessment (firm vs indicative).
-    pub quality: QuoteQuality,
+    quality: QuoteQuality,
     /// Best bid price.
-    pub bid_price: Decimal,
+    bid_price: Decimal,
     /// Available volume / size at best bid, if reported by venue.
-    pub bid_size: Option<Decimal>,
+    bid_size: Option<Decimal>,
     /// Best ask price.
-    pub ask_price: Decimal,
+    ask_price: Decimal,
     /// Available volume / size at best ask, if reported by venue.
-    pub ask_size: Option<Decimal>,
+    ask_size: Option<Decimal>,
     /// Venue-reported exchange timestamp, if provided.
-    pub provider_ts: Option<UnixNanos>,
+    provider_ts: Option<UnixNanos>,
     /// Venue-reported sequence or update ID, if provided.
-    pub sequence: Option<u64>,
+    sequence: Option<u64>,
     /// Ingestion timestamp captured at HTTP frame receipt.
-    pub received_ts: UnixNanos,
+    received_ts: UnixNanos,
+}
+
+#[derive(Deserialize)]
+struct RawQuoteSnapshot {
+    quality: QuoteQuality,
+    bid_price: Decimal,
+    #[serde(default)]
+    bid_size: Option<Decimal>,
+    ask_price: Decimal,
+    #[serde(default)]
+    ask_size: Option<Decimal>,
+    #[serde(default)]
+    provider_ts: Option<UnixNanos>,
+    #[serde(default)]
+    sequence: Option<u64>,
+    received_ts: UnixNanos,
+}
+
+impl TryFrom<RawQuoteSnapshot> for QuoteSnapshot {
+    type Error = QuoteUnavailable;
+
+    fn try_from(raw: RawQuoteSnapshot) -> Result<Self, Self::Error> {
+        Self::try_new(
+            raw.quality,
+            raw.bid_price,
+            raw.bid_size,
+            raw.ask_price,
+            raw.ask_size,
+            raw.provider_ts,
+            raw.sequence,
+            raw.received_ts,
+        )
+    }
 }
 
 impl QuoteSnapshot {
     /// Constructs and validates a new `QuoteSnapshot`.
     ///
     /// Validates that `bid_price > 0`, `ask_price > 0`, and `bid_price < ask_price`.
+    /// Rejects negative sizes with `QuoteUnavailable::NonPositiveSize`.
+    /// Normalizes zero sizes to `None` (absent).
     /// Returns `Err(QuoteUnavailable)` if validation fails.
     #[allow(clippy::too_many_arguments)] // Ingests all 8 QuoteSnapshot fields for atomic validation.
     pub fn try_new(
@@ -123,16 +162,16 @@ impl QuoteSnapshot {
         if bid_price >= ask_price {
             return Err(QuoteUnavailable::CrossedBook);
         }
-        if let Some(bs) = bid_size {
-            if bs < Decimal::ZERO {
-                return Err(QuoteUnavailable::NonPositivePrice);
-            }
-        }
-        if let Some(asize) = ask_size {
-            if asize < Decimal::ZERO {
-                return Err(QuoteUnavailable::NonPositivePrice);
-            }
-        }
+        let bid_size = match bid_size {
+            Some(bs) if bs < Decimal::ZERO => return Err(QuoteUnavailable::NonPositiveSize),
+            Some(bs) if bs.is_zero() => None,
+            other => other,
+        };
+        let ask_size = match ask_size {
+            Some(asize) if asize < Decimal::ZERO => return Err(QuoteUnavailable::NonPositiveSize),
+            Some(asize) if asize.is_zero() => None,
+            other => other,
+        };
 
         Ok(Self {
             quality,
@@ -144,6 +183,46 @@ impl QuoteSnapshot {
             sequence,
             received_ts,
         })
+    }
+
+    /// Returns the quality assessment (firm vs indicative).
+    pub fn quality(&self) -> QuoteQuality {
+        self.quality
+    }
+
+    /// Returns the best bid price.
+    pub fn bid_price(&self) -> Decimal {
+        self.bid_price
+    }
+
+    /// Returns available volume / size at best bid, if reported by venue.
+    pub fn bid_size(&self) -> Option<Decimal> {
+        self.bid_size
+    }
+
+    /// Returns the best ask price.
+    pub fn ask_price(&self) -> Decimal {
+        self.ask_price
+    }
+
+    /// Returns available volume / size at best ask, if reported by venue.
+    pub fn ask_size(&self) -> Option<Decimal> {
+        self.ask_size
+    }
+
+    /// Returns the venue-reported exchange timestamp, if provided.
+    pub fn provider_ts(&self) -> Option<UnixNanos> {
+        self.provider_ts
+    }
+
+    /// Returns the venue-reported sequence or update ID, if provided.
+    pub fn sequence(&self) -> Option<u64> {
+        self.sequence
+    }
+
+    /// Returns the ingestion timestamp captured at HTTP frame receipt.
+    pub fn received_ts(&self) -> UnixNanos {
+        self.received_ts
     }
 }
 

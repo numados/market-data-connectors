@@ -52,6 +52,14 @@ fn test_native_instrument_id_validation() {
         NativeInstrumentId::new("BTC\0USDT").unwrap_err(),
         IdentifierError::ControlCharacter
     );
+
+    // Deserialization & TryFrom checks
+    assert!(NativeInstrumentId::try_from("".to_string()).is_err());
+    assert!(serde_json::from_str::<NativeInstrumentId>(r#""""#).is_err());
+    assert!(serde_json::from_str::<NativeInstrumentId>(r#""BTC\u0000USDT""#).is_err());
+    assert!(serde_json::from_str::<NativeInstrumentId>(r#""BTC€""#).is_err());
+    let too_long_json = format!(r#""{}""#, "a".repeat(129));
+    assert!(serde_json::from_str::<NativeInstrumentId>(&too_long_json).is_err());
 }
 
 #[test]
@@ -72,6 +80,18 @@ fn test_raw_currency_and_raw_status_validation() {
         RawCurrency::new("USD$€").unwrap_err(),
         IdentifierError::NonAscii
     );
+    assert_eq!(
+        RawCurrency::new("USD\n").unwrap_err(),
+        IdentifierError::ControlCharacter
+    );
+
+    // Deserialization & TryFrom checks for RawCurrency
+    assert!(RawCurrency::try_from("".to_string()).is_err());
+    assert!(serde_json::from_str::<RawCurrency>(r#""""#).is_err());
+    assert!(serde_json::from_str::<RawCurrency>(r#""USD\u0000""#).is_err());
+    assert!(serde_json::from_str::<RawCurrency>(r#""USD$€""#).is_err());
+    let too_long_curr = format!(r#""{}""#, "C".repeat(65));
+    assert!(serde_json::from_str::<RawCurrency>(&too_long_curr).is_err());
 
     // RawStatus bound 128
     assert!(RawStatus::new("TRADING").is_ok());
@@ -84,6 +104,22 @@ fn test_raw_currency_and_raw_status_validation() {
         }
     );
     assert_eq!(RawStatus::new("").unwrap_err(), IdentifierError::Empty);
+    assert_eq!(
+        RawStatus::new("STATUS\n").unwrap_err(),
+        IdentifierError::ControlCharacter
+    );
+    assert_eq!(
+        RawStatus::new("STATUS_€").unwrap_err(),
+        IdentifierError::NonAscii
+    );
+
+    // Deserialization & TryFrom checks for RawStatus
+    assert!(RawStatus::try_from("".to_string()).is_err());
+    assert!(serde_json::from_str::<RawStatus>(r#""""#).is_err());
+    assert!(serde_json::from_str::<RawStatus>(r#""STAT\u0000""#).is_err());
+    assert!(serde_json::from_str::<RawStatus>(r#""STATUS_€""#).is_err());
+    let too_long_status = format!(r#""{}""#, "S".repeat(129));
+    assert!(serde_json::from_str::<RawStatus>(&too_long_status).is_err());
 
     // EntityCode bound 64
     assert!(EntityCode::new("US").is_ok());
@@ -95,6 +131,23 @@ fn test_raw_currency_and_raw_status_validation() {
             actual: 65,
         }
     );
+    assert_eq!(EntityCode::new("").unwrap_err(), IdentifierError::Empty);
+    assert_eq!(
+        EntityCode::new("EC\n").unwrap_err(),
+        IdentifierError::ControlCharacter
+    );
+    assert_eq!(
+        EntityCode::new("EC_€").unwrap_err(),
+        IdentifierError::NonAscii
+    );
+
+    // Deserialization & TryFrom checks for EntityCode
+    assert!(EntityCode::try_from("".to_string()).is_err());
+    assert!(serde_json::from_str::<EntityCode>(r#""""#).is_err());
+    assert!(serde_json::from_str::<EntityCode>(r#""EC\u0000""#).is_err());
+    assert!(serde_json::from_str::<EntityCode>(r#""EC_€""#).is_err());
+    let too_long_ec = format!(r#""{}""#, "E".repeat(65));
+    assert!(serde_json::from_str::<EntityCode>(&too_long_ec).is_err());
 }
 
 #[test]

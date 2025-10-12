@@ -61,7 +61,7 @@ fn validate_ascii_identifier(s: &str, max: usize) -> Result<(), IdentifierError>
 ///
 /// Preserves exact exchange-native identifiers without translation or case smashing.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct NativeInstrumentId(SmallString<[u8; 128]>);
 
 impl NativeInstrumentId {
@@ -74,6 +74,28 @@ impl NativeInstrumentId {
     /// Borrows the native instrument ID as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for NativeInstrumentId {
+    type Error = IdentifierError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for NativeInstrumentId {
+    type Error = IdentifierError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<NativeInstrumentId> for String {
+    fn from(id: NativeInstrumentId) -> Self {
+        id.as_str().to_string()
     }
 }
 
@@ -99,7 +121,7 @@ impl std::ops::Deref for NativeInstrumentId {
 
 /// Bounded inline raw currency identifier (1–64 ASCII bytes).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct RawCurrency(SmallString<[u8; 64]>);
 
 impl RawCurrency {
@@ -112,6 +134,28 @@ impl RawCurrency {
     /// Borrows the raw currency as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for RawCurrency {
+    type Error = IdentifierError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for RawCurrency {
+    type Error = IdentifierError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<RawCurrency> for String {
+    fn from(c: RawCurrency) -> Self {
+        c.as_str().to_string()
     }
 }
 
@@ -137,7 +181,7 @@ impl std::ops::Deref for RawCurrency {
 
 /// Bounded inline raw status string (1–128 ASCII bytes).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct RawStatus(SmallString<[u8; 128]>);
 
 impl RawStatus {
@@ -150,6 +194,28 @@ impl RawStatus {
     /// Borrows the raw status as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for RawStatus {
+    type Error = IdentifierError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for RawStatus {
+    type Error = IdentifierError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<RawStatus> for String {
+    fn from(st: RawStatus) -> Self {
+        st.as_str().to_string()
     }
 }
 
@@ -175,7 +241,7 @@ impl std::ops::Deref for RawStatus {
 
 /// Bounded inline legal/regulatory entity code (1–64 ASCII bytes).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct EntityCode(SmallString<[u8; 64]>);
 
 impl EntityCode {
@@ -188,6 +254,28 @@ impl EntityCode {
     /// Borrows the entity code as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for EntityCode {
+    type Error = IdentifierError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for EntityCode {
+    type Error = IdentifierError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<EntityCode> for String {
+    fn from(ec: EntityCode) -> Self {
+        ec.as_str().to_string()
     }
 }
 

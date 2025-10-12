@@ -37,14 +37,14 @@ fn test_quote_snapshot_validation() {
     );
     assert!(valid.is_ok());
     let q = valid.unwrap();
-    assert_eq!(q.quality, QuoteQuality::Firm);
-    assert_eq!(q.bid_price, d("50000.00"));
-    assert_eq!(q.ask_price, d("50001.00"));
-    assert_eq!(q.bid_size, Some(d("1.5")));
-    assert_eq!(q.ask_size, Some(d("2.0")));
-    assert_eq!(q.provider_ts, prov);
-    assert_eq!(q.sequence, Some(42));
-    assert_eq!(q.received_ts, recv);
+    assert_eq!(q.quality(), QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00"));
+    assert_eq!(q.ask_price(), d("50001.00"));
+    assert_eq!(q.bid_size(), Some(d("1.5")));
+    assert_eq!(q.ask_size(), Some(d("2.0")));
+    assert_eq!(q.provider_ts(), prov);
+    assert_eq!(q.sequence(), Some(42));
+    assert_eq!(q.received_ts(), recv);
 
     // Indicative quality
     let indicative = QuoteSnapshot::try_new(
@@ -58,7 +58,7 @@ fn test_quote_snapshot_validation() {
         recv,
     );
     assert!(indicative.is_ok());
-    assert_eq!(indicative.unwrap().quality, QuoteQuality::Indicative);
+    assert_eq!(indicative.unwrap().quality(), QuoteQuality::Indicative);
 
     // Non-positive bid price
     assert_eq!(
@@ -158,7 +158,7 @@ fn test_quote_snapshot_validation() {
             None,
             recv
         ),
-        Err(QuoteUnavailable::NonPositivePrice)
+        Err(QuoteUnavailable::NonPositiveSize)
     );
     assert_eq!(
         QuoteSnapshot::try_new(
@@ -171,8 +171,62 @@ fn test_quote_snapshot_validation() {
             None,
             recv
         ),
-        Err(QuoteUnavailable::NonPositivePrice)
+        Err(QuoteUnavailable::NonPositiveSize)
     );
+
+    // Zero sizes normalize to None (absent)
+    let zero_sizes = QuoteSnapshot::try_new(
+        QuoteQuality::Firm,
+        d("100"),
+        Some(d("0")),
+        d("101"),
+        Some(d("0")),
+        None,
+        None,
+        recv,
+    )
+    .unwrap();
+    assert_eq!(zero_sizes.bid_size(), None);
+    assert_eq!(zero_sizes.ask_size(), None);
+}
+
+#[test]
+fn test_quote_snapshot_deserialize_validation() {
+    let recv = 1_000_000;
+
+    // Valid JSON deserialization
+    let valid_json = format!(
+        r#"{{"quality":"firm","bid_price":"100","bid_size":"1.5","ask_price":"101","ask_size":"2.0","received_ts":{recv}}}"#
+    );
+    let q: QuoteSnapshot = serde_json::from_str(&valid_json).expect("valid quote json");
+    assert_eq!(q.bid_price(), d("100"));
+    assert_eq!(q.ask_price(), d("101"));
+
+    // Crossed book JSON rejected
+    let crossed_json = format!(
+        r#"{{"quality":"firm","bid_price":"105","ask_price":"100","received_ts":{recv}}}"#
+    );
+    assert!(serde_json::from_str::<QuoteSnapshot>(&crossed_json).is_err());
+
+    // Non-positive price JSON rejected
+    let non_pos_json = format!(
+        r#"{{"quality":"firm","bid_price":"0","ask_price":"100","received_ts":{recv}}}"#
+    );
+    assert!(serde_json::from_str::<QuoteSnapshot>(&non_pos_json).is_err());
+
+    // Negative size JSON rejected
+    let neg_size_json = format!(
+        r#"{{"quality":"firm","bid_price":"100","bid_size":"-1","ask_price":"101","received_ts":{recv}}}"#
+    );
+    assert!(serde_json::from_str::<QuoteSnapshot>(&neg_size_json).is_err());
+
+    // Zero size JSON normalized to None
+    let zero_size_json = format!(
+        r#"{{"quality":"firm","bid_price":"100","bid_size":"0","ask_price":"101","ask_size":"0","received_ts":{recv}}}"#
+    );
+    let q_zero: QuoteSnapshot = serde_json::from_str(&zero_size_json).expect("zero size json");
+    assert_eq!(q_zero.bid_size(), None);
+    assert_eq!(q_zero.ask_size(), None);
 }
 
 #[test]

@@ -200,11 +200,11 @@ mod tests {
         let item = &res[0];
         assert!(item.is_available());
         let q = item.quote().unwrap();
-        assert_eq!(q.bid_price, d("50000.00"));
-        assert_eq!(q.bid_size, Some(d("1.50")));
-        assert_eq!(q.ask_price, d("50001.00"));
-        assert_eq!(q.ask_size, Some(d("2.00")));
-        assert_eq!(q.quality, QuoteQuality::Firm);
+        assert_eq!(q.bid_price(), d("50000.00"));
+        assert_eq!(q.bid_size(), Some(d("1.50")));
+        assert_eq!(q.ask_price(), d("50001.00"));
+        assert_eq!(q.ask_size(), Some(d("2.00")));
+        assert_eq!(q.quality(), QuoteQuality::Firm);
     }
 
     #[test]

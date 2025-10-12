@@ -131,11 +131,11 @@ async fn test_conformance_binance_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.00"));
-    assert_eq!(q.bid_size, Some(d("1.50")));
-    assert_eq!(q.ask_price, d("50001.00"));
-    assert_eq!(q.ask_size, Some(d("2.00")));
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00"));
+    assert_eq!(q.bid_size(), Some(d("1.50")));
+    assert_eq!(q.ask_price(), d("50001.00"));
+    assert_eq!(q.ask_size(), Some(d("2.00")));
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -181,12 +181,12 @@ async fn test_conformance_coinbase_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.00"));
-    assert_eq!(q.bid_size, Some(d("1.50")));
-    assert_eq!(q.ask_price, d("50001.00"));
-    assert_eq!(q.ask_size, Some(d("2.00")));
-    assert_eq!(q.sequence, Some(12345678));
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00"));
+    assert_eq!(q.bid_size(), Some(d("1.50")));
+    assert_eq!(q.ask_price(), d("50001.00"));
+    assert_eq!(q.ask_size(), Some(d("2.00")));
+    assert_eq!(q.sequence(), Some(12345678));
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -206,7 +206,7 @@ async fn test_conformance_coinbase_quote_indicative() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.quality, QuoteQuality::Indicative);
+    assert_eq!(q.quality(), QuoteQuality::Indicative);
 }
 
 #[tokio::test]
@@ -229,11 +229,11 @@ async fn test_conformance_kraken_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.00000"));
-    assert_eq!(q.bid_size, Some(d("1.500")));
-    assert_eq!(q.ask_price, d("50001.00000"));
-    assert_eq!(q.ask_size, Some(d("2.000")));
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00000"));
+    assert_eq!(q.bid_size(), Some(d("1.500")));
+    assert_eq!(q.ask_price(), d("50001.00000"));
+    assert_eq!(q.ask_size(), Some(d("2.000")));
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -256,12 +256,12 @@ async fn test_conformance_bitstamp_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.00"));
-    assert_eq!(q.bid_size, None);
-    assert_eq!(q.ask_price, d("50001.00"));
-    assert_eq!(q.ask_size, None);
-    assert!(q.provider_ts.is_some());
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00"));
+    assert_eq!(q.bid_size(), None);
+    assert_eq!(q.ask_price(), d("50001.00"));
+    assert_eq!(q.ask_size(), None);
+    assert!(q.provider_ts().is_some());
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -284,11 +284,11 @@ async fn test_conformance_gateio_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.0"));
-    assert_eq!(q.bid_size, Some(d("1.5")));
-    assert_eq!(q.ask_price, d("50001.0"));
-    assert_eq!(q.ask_size, Some(d("2.0")));
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.0"));
+    assert_eq!(q.bid_size(), Some(d("1.5")));
+    assert_eq!(q.ask_price(), d("50001.0"));
+    assert_eq!(q.ask_size(), Some(d("2.0")));
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -311,12 +311,12 @@ async fn test_conformance_huobi_quote() {
     let res = &snapshot.results[0];
     assert!(res.is_available());
     let q = res.quote().unwrap();
-    assert_eq!(q.bid_price, d("50000.00"));
-    assert_eq!(q.bid_size, Some(d("1.50")));
-    assert_eq!(q.ask_price, d("50001.00"));
-    assert_eq!(q.ask_size, Some(d("2.00")));
-    assert!(q.provider_ts.is_some());
-    assert_eq!(q.quality, QuoteQuality::Firm);
+    assert_eq!(q.bid_price(), d("50000.00"));
+    assert_eq!(q.bid_size(), Some(d("1.50")));
+    assert_eq!(q.ask_price(), d("50001.00"));
+    assert_eq!(q.ask_size(), Some(d("2.00")));
+    assert!(q.provider_ts().is_some());
+    assert_eq!(q.quality(), QuoteQuality::Firm);
 }
 
 #[tokio::test]
@@ -345,19 +345,19 @@ async fn test_conformance_bitfinex_quote_batch() {
     assert!(btc.is_available());
     assert_eq!(btc.symbol(), &Symbol::from("tBTCUSD"));
     let btc_q = btc.quote().unwrap();
-    assert_eq!(btc_q.bid_price, d("50000"));
-    assert_eq!(btc_q.bid_size, Some(d("1.5")));
-    assert_eq!(btc_q.ask_price, d("50001"));
-    assert_eq!(btc_q.ask_size, Some(d("2")));
+    assert_eq!(btc_q.bid_price(), d("50000"));
+    assert_eq!(btc_q.bid_size(), Some(d("1.5")));
+    assert_eq!(btc_q.ask_price(), d("50001"));
+    assert_eq!(btc_q.ask_size(), Some(d("2")));
 
     let eth = &snapshot.results[1];
     assert!(eth.is_available());
     assert_eq!(eth.symbol(), &Symbol::from("tETHUSD"));
     let eth_q = eth.quote().unwrap();
-    assert_eq!(eth_q.bid_price, d("3000"));
-    assert_eq!(eth_q.bid_size, Some(d("5")));
-    assert_eq!(eth_q.ask_price, d("3001"));
-    assert_eq!(eth_q.ask_size, Some(d("6")));
+    assert_eq!(eth_q.bid_price(), d("3000"));
+    assert_eq!(eth_q.bid_size(), Some(d("5")));
+    assert_eq!(eth_q.ask_price(), d("3001"));
+    assert_eq!(eth_q.ask_size(), Some(d("6")));
 }
 
 #[tokio::test]

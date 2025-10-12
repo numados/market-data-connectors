@@ -177,12 +177,12 @@ mod tests {
         let item = &res[0];
         assert!(item.is_available());
         let q = item.quote().unwrap();
-        assert_eq!(q.bid_price, d("50000.00"));
-        assert_eq!(q.bid_size, None);
-        assert_eq!(q.ask_price, d("50001.00"));
-        assert_eq!(q.ask_size, None);
-        assert_eq!(q.quality, QuoteQuality::Firm);
-        assert_eq!(q.provider_ts, Some(UnixNanos::from_secs(1700000000)));
+        assert_eq!(q.bid_price(), d("50000.00"));
+        assert_eq!(q.bid_size(), None);
+        assert_eq!(q.ask_price(), d("50001.00"));
+        assert_eq!(q.ask_size(), None);
+        assert_eq!(q.quality(), QuoteQuality::Firm);
+        assert_eq!(q.provider_ts(), Some(UnixNanos::from_secs(1700000000)));
     }
 
     #[test]

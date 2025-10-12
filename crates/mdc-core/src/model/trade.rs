@@ -22,6 +22,7 @@ pub enum TradeIdentityError {
 /// Bounded inline namespace for trade identifiers (1–64 ASCII bytes).
 /// Immutable, stable across reconnects and restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct TradeNamespace(SmallString<[u8; 64]>);
 
 impl TradeNamespace {
@@ -37,6 +38,28 @@ impl TradeNamespace {
     }
 }
 
+impl TryFrom<String> for TradeNamespace {
+    type Error = TradeIdentityError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for TradeNamespace {
+    type Error = TradeIdentityError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<TradeNamespace> for String {
+    fn from(ns: TradeNamespace) -> Self {
+        ns.as_str().to_string()
+    }
+}
+
 impl fmt::Display for TradeNamespace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -46,6 +69,7 @@ impl fmt::Display for TradeNamespace {
 /// Bounded inline trade identifier (1–128 ASCII bytes).
 /// Immutable, retains venue-exact token representation without truncation or float coercion.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct TradeId(SmallString<[u8; 128]>);
 
 impl TradeId {
@@ -58,6 +82,28 @@ impl TradeId {
     /// Borrows the trade ID as a string slice.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl TryFrom<String> for TradeId {
+    type Error = TradeIdentityError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::new(&s)
+    }
+}
+
+impl TryFrom<&str> for TradeId {
+    type Error = TradeIdentityError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::new(s)
+    }
+}
+
+impl From<TradeId> for String {
+    fn from(id: TradeId) -> Self {
+        id.as_str().to_string()
     }
 }
 
@@ -176,6 +222,14 @@ mod tests {
             TradeNamespace::new("ns_привет").unwrap_err(),
             TradeIdentityError::NonAscii
         );
+
+        // Deserialization & TryFrom checks
+        assert!(TradeNamespace::try_from("".to_string()).is_err());
+        assert!(serde_json::from_str::<TradeNamespace>(r#""""#).is_err());
+        assert!(serde_json::from_str::<TradeNamespace>(r#""ns\u0000null""#).is_err());
+        assert!(serde_json::from_str::<TradeNamespace>(r#""ns_привет""#).is_err());
+        let too_long_json = format!(r#""{}""#, "a".repeat(65));
+        assert!(serde_json::from_str::<TradeNamespace>(&too_long_json).is_err());
     }
 
     #[test]
@@ -196,6 +250,27 @@ mod tests {
                 actual: 129
             }
         );
+
+        assert_eq!(
+            TradeId::new("id\0null").unwrap_err(),
+            TradeIdentityError::ControlCharacter
+        );
+        assert_eq!(
+            TradeId::new("id\nline").unwrap_err(),
+            TradeIdentityError::ControlCharacter
+        );
+        assert_eq!(
+            TradeId::new("id_привет").unwrap_err(),
+            TradeIdentityError::NonAscii
+        );
+
+        // Deserialization & TryFrom checks
+        assert!(TradeId::try_from("".to_string()).is_err());
+        assert!(serde_json::from_str::<TradeId>(r#""""#).is_err());
+        assert!(serde_json::from_str::<TradeId>(r#""id\u0000null""#).is_err());
+        assert!(serde_json::from_str::<TradeId>(r#""id_привет""#).is_err());
+        let too_long_id_json = format!(r#""{}""#, "x".repeat(129));
+        assert!(serde_json::from_str::<TradeId>(&too_long_id_json).is_err());
     }
 
     #[test]
