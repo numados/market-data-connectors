@@ -2,6 +2,9 @@
 
 use crate::model::SequenceRange;
 
+/// Default number of consecutive frames in lower epoch required to classify a sequence reset.
+pub const DEFAULT_RESET_THRESHOLD: u32 = 2;
+
 /// Outcome of checking an incoming sequence range against the current tracker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceCheck {
@@ -20,31 +23,71 @@ pub enum SequenceCheck {
     NotSynchronized,
     /// Sequence space exhausted after `u64::MAX`; no further sequence updates are valid.
     SequenceExhausted,
+    /// Mid-connection venue counter reset detected; local book is invalid and must be resynced via snapshot.
+    SequenceReset {
+        /// Current sequence before reset.
+        current: u64,
+        /// First sequence received in the reset frame.
+        reset_to: u64,
+    },
 }
 
 /// Tracks the latest applied sequence or update ID and validates incoming update ranges.
 ///
 /// Designed for venues using incremental delta sequences (e.g. Binance `U`/`u`, Gate.io, Huobi).
 /// Pure state machine with zero allocations and no I/O.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceTracker {
     last: Option<u64>,
+    reset_threshold: u32,
+    reset_count: u32,
+    last_candidate: Option<u64>,
+    is_reset: bool,
+}
+
+impl Default for SequenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SequenceTracker {
-    /// Creates an uninitialized sequence tracker.
+    /// Creates an uninitialized sequence tracker with default reset threshold.
     pub const fn new() -> Self {
-        Self { last: None }
+        Self {
+            last: None,
+            reset_threshold: DEFAULT_RESET_THRESHOLD,
+            reset_count: 0,
+            last_candidate: None,
+            is_reset: false,
+        }
+    }
+
+    /// Configures the consecutive monotonic frame threshold required to classify a sequence reset.
+    pub const fn with_reset_threshold(mut self, threshold: u32) -> Self {
+        self.reset_threshold = if threshold == 0 { 1 } else { threshold };
+        self
+    }
+
+    /// Returns `true` if a sequence reset was detected and the tracker is awaiting resynchronization.
+    pub const fn is_reset(&self) -> bool {
+        self.is_reset
     }
 
     /// Anchors the tracker to an authoritative snapshot update ID.
     pub fn reset_to(&mut self, snapshot_last_update_id: u64) {
         self.last = Some(snapshot_last_update_id);
+        self.reset_count = 0;
+        self.last_candidate = None;
+        self.is_reset = false;
     }
 
     /// Clears the tracker state, returning to uninitialized (`NotSynchronized`).
     pub fn clear(&mut self) {
         self.last = None;
+        self.reset_count = 0;
+        self.last_candidate = None;
+        self.is_reset = false;
     }
 
     /// Returns the current last applied sequence ID, if initialized.
@@ -61,12 +104,15 @@ impl SequenceTracker {
     ///
     /// Classification rules:
     /// 1. `current == None` -> [`SequenceCheck::NotSynchronized`]
-    /// 2. `current == u64::MAX` -> [`SequenceCheck::SequenceExhausted`]
-    /// 3. `range.last <= current` -> [`SequenceCheck::OldDataIgnored`]
-    /// 4. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
-    /// 5. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last`.
+    /// 2. `is_reset == true` -> [`SequenceCheck::SequenceReset`]
+    /// 3. `current == u64::MAX` -> [`SequenceCheck::SequenceExhausted`]
+    /// 4. `range.last <= current`:
+    ///    - If monotonic progression in lower numbers reaches threshold -> [`SequenceCheck::SequenceReset`]
+    ///    - Otherwise -> [`SequenceCheck::OldDataIgnored`]
+    /// 5. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
+    /// 6. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last`.
     ///
-    /// Rule 5 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
+    /// Rule 6 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
     /// which is required by exchange snapshot-reconciliation contracts (e.g. Binance)
     /// where the first delta after snapshot application overlaps with the snapshot's `last_update_id`.
     pub fn check(&mut self, range: SequenceRange) -> SequenceCheck {
@@ -74,13 +120,48 @@ impl SequenceTracker {
             return SequenceCheck::NotSynchronized;
         };
 
+        if self.is_reset {
+            return SequenceCheck::SequenceReset {
+                current,
+                reset_to: range.first,
+            };
+        }
+
         if current == u64::MAX {
             return SequenceCheck::SequenceExhausted;
         }
 
-        if range.last <= current {
+        if range.last < current {
+            let is_monotonic_progression = match self.last_candidate {
+                Some(prev) => range.last >= prev,
+                None => true,
+            };
+
+            if is_monotonic_progression {
+                self.reset_count = self.reset_count.saturating_add(1);
+                self.last_candidate = Some(range.last);
+
+                if self.reset_count >= self.reset_threshold {
+                    self.is_reset = true;
+                    return SequenceCheck::SequenceReset {
+                        current,
+                        reset_to: range.first,
+                    };
+                }
+            } else {
+                self.reset_count = 1;
+                self.last_candidate = Some(range.last);
+            }
+
             return SequenceCheck::OldDataIgnored;
         }
+
+        if range.last == current {
+            return SequenceCheck::OldDataIgnored;
+        }
+
+        self.reset_count = 0;
+        self.last_candidate = None;
 
         let expected = current.saturating_add(1);
         if range.first > expected {
@@ -113,30 +194,65 @@ pub enum GlobalSequenceCheck {
     },
     /// Sequence space exhausted after `u64::MAX`; no further sequence updates are valid.
     SequenceExhausted,
+    /// Mid-connection sequence counter reset detected; local book is invalid and must be resynced via snapshot.
+    SequenceReset {
+        /// Expected sequence number before reset.
+        expected: u64,
+        /// Sequence received in the reset frame.
+        reset_to: u64,
+    },
 }
 
 /// Tracks connection-wide monotonic sequence numbers (e.g. Coinbase Advanced Trade).
 ///
 /// Pure state machine with zero heap allocations and no I/O.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlobalSequenceTracker {
     next: Option<u64>,
     exhausted: bool,
+    reset_threshold: u32,
+    reset_count: u32,
+    last_candidate: Option<u64>,
+    is_reset: bool,
+}
+
+impl Default for GlobalSequenceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GlobalSequenceTracker {
-    /// Creates an uninitialized global sequence tracker.
+    /// Creates an uninitialized global sequence tracker with default reset threshold.
     pub const fn new() -> Self {
         Self {
             next: None,
             exhausted: false,
+            reset_threshold: DEFAULT_RESET_THRESHOLD,
+            reset_count: 0,
+            last_candidate: None,
+            is_reset: false,
         }
+    }
+
+    /// Configures the consecutive monotonic frame threshold required to classify a sequence reset.
+    pub const fn with_reset_threshold(mut self, threshold: u32) -> Self {
+        self.reset_threshold = if threshold == 0 { 1 } else { threshold };
+        self
+    }
+
+    /// Returns `true` if a sequence reset was detected and the tracker is awaiting resynchronization.
+    pub const fn is_reset(&self) -> bool {
+        self.is_reset
     }
 
     /// Resets the tracker to an uninitialized state.
     pub fn reset(&mut self) {
         self.next = None;
         self.exhausted = false;
+        self.reset_count = 0;
+        self.last_candidate = None;
+        self.is_reset = false;
     }
 
     /// Returns the expected next sequence number, if initialized and not exhausted.
@@ -153,13 +269,23 @@ impl GlobalSequenceTracker {
     ///
     /// Rules:
     /// - Exhausted (`exhausted == true`) -> returns [`GlobalSequenceCheck::SequenceExhausted`].
+    /// - Reset (`is_reset == true`) -> returns [`GlobalSequenceCheck::SequenceReset`].
     /// - Uninitialized (`next == None`) -> returns [`GlobalSequenceCheck::First`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     /// - `n == next` -> returns [`GlobalSequenceCheck::Valid`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
-    /// - `n < next` -> returns [`GlobalSequenceCheck::OldDataIgnored`], leaving `next` unchanged.
+    /// - `n < next`:
+    ///   - If monotonic progression in lower numbers reaches threshold -> returns [`GlobalSequenceCheck::SequenceReset`].
+    ///   - Otherwise -> returns [`GlobalSequenceCheck::OldDataIgnored`], leaving `next` unchanged.
     /// - `n > next` -> returns [`GlobalSequenceCheck::GapDetected`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     pub fn check(&mut self, n: u64) -> GlobalSequenceCheck {
         if self.exhausted {
             return GlobalSequenceCheck::SequenceExhausted;
+        }
+
+        if self.is_reset {
+            return GlobalSequenceCheck::SequenceReset {
+                expected: self.next.unwrap_or(0),
+                reset_to: n,
+            };
         }
 
         match self.next {
@@ -174,6 +300,8 @@ impl GlobalSequenceTracker {
             }
             Some(expected) => match n.cmp(&expected) {
                 std::cmp::Ordering::Equal => {
+                    self.reset_count = 0;
+                    self.last_candidate = None;
                     if expected == u64::MAX {
                         self.exhausted = true;
                         self.next = None;
@@ -182,8 +310,33 @@ impl GlobalSequenceTracker {
                     }
                     GlobalSequenceCheck::Valid
                 }
-                std::cmp::Ordering::Less => GlobalSequenceCheck::OldDataIgnored,
+                std::cmp::Ordering::Less => {
+                    let is_monotonic_progression = match self.last_candidate {
+                        Some(prev) => n >= prev,
+                        None => true,
+                    };
+
+                    if is_monotonic_progression {
+                        self.reset_count = self.reset_count.saturating_add(1);
+                        self.last_candidate = Some(n);
+
+                        if self.reset_count >= self.reset_threshold {
+                            self.is_reset = true;
+                            return GlobalSequenceCheck::SequenceReset {
+                                expected,
+                                reset_to: n,
+                            };
+                        }
+                    } else {
+                        self.reset_count = 1;
+                        self.last_candidate = Some(n);
+                    }
+
+                    GlobalSequenceCheck::OldDataIgnored
+                }
                 std::cmp::Ordering::Greater => {
+                    self.reset_count = 0;
+                    self.last_candidate = None;
                     if n == u64::MAX {
                         self.exhausted = true;
                         self.next = None;
@@ -197,6 +350,36 @@ impl GlobalSequenceTracker {
                 }
             },
         }
+    }
+}
+
+/// Strategy for validating sequence ranges and managing sequence state.
+pub trait SequenceRule: Send + 'static {
+    /// Classifies an incoming sequence range against the current tracker state.
+    fn check(&mut self, range: SequenceRange) -> SequenceCheck;
+    /// Anchors the rule to an authoritative snapshot update ID.
+    fn reset_to(&mut self, anchor: u64);
+    /// Clears the rule state back to uninitialized.
+    fn clear(&mut self);
+    /// Returns the current last applied sequence ID, if initialized.
+    fn current(&self) -> Option<u64>;
+}
+
+impl SequenceRule for SequenceTracker {
+    fn check(&mut self, range: SequenceRange) -> SequenceCheck {
+        self.check(range)
+    }
+
+    fn reset_to(&mut self, anchor: u64) {
+        self.reset_to(anchor);
+    }
+
+    fn clear(&mut self) {
+        self.clear();
+    }
+
+    fn current(&self) -> Option<u64> {
+        self.current()
     }
 }
 
@@ -431,5 +614,102 @@ mod tests {
             tracker.check(u64::MAX),
             GlobalSequenceCheck::SequenceExhausted
         );
+    }
+
+    #[test]
+    fn sequence_tracker_reset_detection_within_threshold() {
+        let mut tracker = SequenceTracker::new();
+        tracker.reset_to(1_000_000);
+
+        // Frame 1 in reset epoch (lower counter): first candidate
+        assert_eq!(
+            tracker.check(SequenceRange::new(1, 10)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert!(!tracker.is_reset());
+
+        // Frame 2 in reset epoch with monotonic progression (11 >= 10): threshold reached!
+        assert_eq!(
+            tracker.check(SequenceRange::new(11, 20)),
+            SequenceCheck::SequenceReset {
+                current: 1_000_000,
+                reset_to: 11,
+            }
+        );
+        assert!(tracker.is_reset());
+
+        // Subsequent frames are locked in SequenceReset until snapshot reset_to
+        assert_eq!(
+            tracker.check(SequenceRange::new(21, 30)),
+            SequenceCheck::SequenceReset {
+                current: 1_000_000,
+                reset_to: 21,
+            }
+        );
+
+        // Fresh snapshot anchors the new epoch
+        tracker.reset_to(25);
+        assert!(!tracker.is_reset());
+        assert_eq!(tracker.current(), Some(25));
+        assert_eq!(
+            tracker.check(SequenceRange::new(26, 30)),
+            SequenceCheck::Valid
+        );
+        assert_eq!(tracker.current(), Some(30));
+    }
+
+    #[test]
+    fn sequence_tracker_non_monotonic_old_data_does_not_trigger_reset() {
+        let mut tracker = SequenceTracker::new().with_reset_threshold(3);
+        tracker.reset_to(1_000_000);
+
+        // Frame 1: candidate at 50
+        assert_eq!(
+            tracker.check(SequenceRange::new(50, 50)),
+            SequenceCheck::OldDataIgnored
+        );
+        // Frame 2: regressive older frame at 20 (not monotonic)
+        assert_eq!(
+            tracker.check(SequenceRange::new(20, 20)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert!(!tracker.is_reset());
+    }
+
+    #[test]
+    fn global_sequence_tracker_reset_detection_within_threshold() {
+        let mut tracker = GlobalSequenceTracker::new();
+        assert_eq!(tracker.check(500_000), GlobalSequenceCheck::First);
+        assert_eq!(tracker.check(500_001), GlobalSequenceCheck::Valid);
+        assert_eq!(tracker.next(), Some(500_002));
+
+        // Frame 1 in lower epoch
+        assert_eq!(tracker.check(1), GlobalSequenceCheck::OldDataIgnored);
+        assert!(!tracker.is_reset());
+
+        // Frame 2 in lower epoch with monotonic progression (2 >= 1): triggers SequenceReset!
+        assert_eq!(
+            tracker.check(2),
+            GlobalSequenceCheck::SequenceReset {
+                expected: 500_002,
+                reset_to: 2,
+            }
+        );
+        assert!(tracker.is_reset());
+
+        // Subsequent frames remain locked
+        assert_eq!(
+            tracker.check(3),
+            GlobalSequenceCheck::SequenceReset {
+                expected: 500_002,
+                reset_to: 3,
+            }
+        );
+
+        // Reset clears the tracker
+        tracker.reset();
+        assert!(!tracker.is_reset());
+        assert_eq!(tracker.check(5), GlobalSequenceCheck::First);
+        assert_eq!(tracker.next(), Some(6));
     }
 }

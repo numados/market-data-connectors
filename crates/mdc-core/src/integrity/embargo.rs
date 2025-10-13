@@ -77,7 +77,7 @@ impl EmbargoTracker {
         };
 
         let wait = retry_after.unwrap_or(fallback).min(EMBARGO_SAFETY_CAP);
-        let deadline = now + wait;
+        let deadline = now.checked_add(wait).unwrap_or(now);
 
         self.embargo_until = Some(match self.embargo_until {
             Some(current) => current.max(deadline),
@@ -93,15 +93,24 @@ impl EmbargoTracker {
 
 /// Parses an HTTP `Retry-After` header value into a [`Duration`].
 ///
-/// Only numeric seconds format is parsed (e.g. `"120"`). Date-based formats
+/// Only numeric seconds format is parsed (e.g. `"120"`). Values exceeding `u64::MAX`
+/// are clamped to the 24-hour safety cap ([`EMBARGO_SAFETY_CAP`]). Date-based formats
 /// and invalid/negative numbers return `None`, falling back to standard venue defaults.
 pub fn parse_retry_after(header: Option<&str>) -> Option<Duration> {
     let raw = header?.trim();
     if raw.is_empty() {
         return None;
     }
-    let secs = raw.parse::<u64>().ok()?;
-    Some(Duration::from_secs(secs))
+    match raw.parse::<u64>() {
+        Ok(secs) => Some(Duration::from_secs(secs).min(EMBARGO_SAFETY_CAP)),
+        Err(_) => {
+            if raw.bytes().all(|b| b.is_ascii_digit()) {
+                Some(EMBARGO_SAFETY_CAP)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -117,9 +126,11 @@ mod tests {
         assert_eq!(parse_retry_after(Some("soon")), None);
         assert_eq!(parse_retry_after(Some("-5")), None);
         assert_eq!(parse_retry_after(Some("")), None);
+        assert_eq!(parse_retry_after(Some("259200")), Some(EMBARGO_SAFETY_CAP));
+        // Exceeding u64::MAX clamps to 24h safety cap
         assert_eq!(
-            parse_retry_after(Some("259200")),
-            Some(Duration::from_secs(259200))
+            parse_retry_after(Some("999999999999999999999999999999999999")),
+            Some(EMBARGO_SAFETY_CAP)
         );
     }
 

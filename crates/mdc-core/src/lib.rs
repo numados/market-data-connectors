@@ -16,10 +16,11 @@ pub use error::{ArcError, MdcError};
 #[cfg(test)]
 pub use integrity::clean_token;
 pub use integrity::{
-    BitfinexChecksum, ChecksumStrategy, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429,
-    EMBARGO_SAFETY_CAP, EmbargoTracker, GlobalSequenceCheck, GlobalSequenceTracker, KrakenChecksum,
-    NoChecksum, RawLevelRef, SequenceCheck, SequenceTracker, SilenceWatchdog, SnapshotPermit,
-    WatchdogAction, for_each_cleaned_byte, parse_retry_after, remove_decimal_and_leading_zeros,
+    BitfinexChecksum, ChecksumStrategy, DEFAULT_RESET_THRESHOLD, EMBARGO_FALLBACK_418,
+    EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP, EmbargoTracker, GlobalSequenceCheck,
+    GlobalSequenceTracker, KrakenChecksum, NoChecksum, RawLevelRef, SequenceCheck, SequenceRule,
+    SequenceTracker, SilenceWatchdog, SnapshotPermit, WatchdogAction, for_each_cleaned_byte,
+    parse_retry_after, remove_decimal_and_leading_zeros,
 };
 pub use model::*;
 pub use rest_quote::*;

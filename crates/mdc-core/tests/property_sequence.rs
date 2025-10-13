@@ -89,4 +89,106 @@ proptest! {
         prop_assert_eq!(check, SequenceCheck::Valid);
         prop_assert_eq!(tracker.current(), Some(last));
     }
+
+    #[test]
+    fn property_reset_epoch_triggers_sequence_reset(
+        anchor in 10_000u64..1_000_000,
+        threshold in 1u32..5,
+        start_lower in 1u64..1000,
+        steps in proptest::collection::vec(1u32..20, 5..10),
+    ) {
+        let mut tracker = SequenceTracker::new().with_reset_threshold(threshold);
+        tracker.reset_to(anchor);
+
+        let mut curr = start_lower;
+        for (idx, step) in steps.iter().enumerate() {
+            let next_last = curr + *step as u64;
+            let range = SequenceRange::new(curr, next_last);
+            let check = tracker.check(range);
+
+            if ((idx + 1) as u32) < threshold {
+                prop_assert_eq!(check, SequenceCheck::OldDataIgnored);
+                prop_assert!(!tracker.is_reset());
+            } else {
+                prop_assert_eq!(
+                    check,
+                    SequenceCheck::SequenceReset {
+                        current: anchor,
+                        reset_to: curr,
+                    }
+                );
+                prop_assert!(tracker.is_reset());
+            }
+            curr = next_last + 1;
+        }
+
+        // Post-alert overlap does NOT re-anchor without snapshot
+        let overlap = SequenceRange::new(anchor - 10, anchor + 10);
+        prop_assert_eq!(
+            tracker.check(overlap),
+            SequenceCheck::SequenceReset {
+                current: anchor,
+                reset_to: anchor - 10,
+            }
+        );
+
+        // Re-anchor permitted only post-snapshot reset_to
+        tracker.reset_to(curr);
+        prop_assert!(!tracker.is_reset());
+        prop_assert_eq!(tracker.current(), Some(curr));
+        prop_assert_eq!(
+            tracker.check(SequenceRange::new(curr + 1, curr + 5)),
+            SequenceCheck::Valid
+        );
+    }
+
+    #[test]
+    fn property_global_sequence_reset_epoch(
+        anchor in 10_000u64..1_000_000,
+        threshold in 1u32..5,
+        start_lower in 1u64..1000,
+        steps in proptest::collection::vec(1u32..20, 5..10),
+    ) {
+        use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+
+        let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(threshold);
+        prop_assert_eq!(tracker.check(anchor), GlobalSequenceCheck::First);
+        let expected = anchor + 1;
+        prop_assert_eq!(tracker.next(), Some(expected));
+
+        let mut curr = start_lower;
+        for (idx, step) in steps.iter().enumerate() {
+            let next_val = curr + *step as u64;
+            let check = tracker.check(next_val);
+
+            if ((idx + 1) as u32) < threshold {
+                prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
+                prop_assert!(!tracker.is_reset());
+            } else {
+                prop_assert_eq!(
+                    check,
+                    GlobalSequenceCheck::SequenceReset {
+                        expected,
+                        reset_to: next_val,
+                    }
+                );
+                prop_assert!(tracker.is_reset());
+            }
+            curr = next_val;
+        }
+
+        // Post-alert higher sequence does NOT re-anchor without reset
+        prop_assert_eq!(
+            tracker.check(expected + 10),
+            GlobalSequenceCheck::SequenceReset {
+                expected,
+                reset_to: expected + 10,
+            }
+        );
+
+        // Tracker accepts new epoch only via reset
+        tracker.reset();
+        prop_assert!(!tracker.is_reset());
+        prop_assert_eq!(tracker.check(curr + 1), GlobalSequenceCheck::First);
+    }
 }

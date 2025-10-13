@@ -416,6 +416,52 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 continue 'frame_loop;
                             }
+                            GlobalSequenceCheck::SequenceReset { expected, reset_to } => {
+                                warn!(
+                                    connection_id,
+                                    expected,
+                                    reset_to,
+                                    "Connection-wide sequence reset detected on Coinbase Advanced; forcing resync"
+                                );
+
+                                let (should_resubscribe, alerts) = fsm.on_gap(expected, reset_to, now);
+                                for (sym, tag, [gap_alert, start_alert]) in alerts {
+                                    delivery_ordinal += 1;
+                                    let ctx = EventContext {
+                                        venue: VenueId::CoinbaseAdvanced,
+                                        symbol: &sym,
+                                        tag,
+                                        exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                        received_ts,
+                                        connection_id,
+                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                        source_sequence: Some(reset_to),
+                                    };
+                                    let _ = sink.alert(&ctx, gap_alert);
+
+                                    delivery_ordinal += 1;
+                                    let start_ctx = EventContext {
+                                        venue: VenueId::CoinbaseAdvanced,
+                                        symbol: &sym,
+                                        tag,
+                                        exchange_ts: None,
+                                        received_ts,
+                                        connection_id,
+                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                        source_sequence: None,
+                                    };
+                                    let _ = sink.alert(&start_ctx, start_alert);
+                                }
+
+                                if should_resubscribe {
+                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                    let sub = build_subscribe_frame("level2", &product_strs);
+                                    let _ = ws_tx.send(Message::Text(unsub)).await;
+                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                }
+
+                                continue 'frame_loop;
+                            }
                         }
                     }
 
