@@ -353,6 +353,17 @@ impl GlobalSequenceTracker {
     }
 }
 
+/// Requirement policy governing whether sequence numbering is mandatory on venue messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SequencePolicy {
+    /// Sequence numbers are strictly required on integrity-bearing channels.
+    /// Messages omitting a sequence number fail closed (emit `ResyncStarted` and drop data).
+    #[default]
+    Required,
+    /// Sequence numbers are optional.
+    Optional,
+}
+
 /// Strategy for validating sequence ranges and managing sequence state.
 pub trait SequenceRule: Send + 'static {
     /// Classifies an incoming sequence range against the current tracker state.

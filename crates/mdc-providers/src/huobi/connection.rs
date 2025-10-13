@@ -605,7 +605,34 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 asks: scratch.asks.clone(),
                                                             },
                                                         };
-                                                        fsm.buffer_delta(event);
+                                                        if let Err(e) = fsm.buffer_delta(event) {
+                                                            warn!(
+                                                                %symbol,
+                                                                error = %e,
+                                                                "Buffer overflow while buffering Huobi deltas; triggering resync"
+                                                            );
+                                                            let start_alert = fsm.trigger_resync(now);
+                                                            delivery_ordinal += 1;
+                                                            let start_ctx = EventContext {
+                                                                venue: VenueId::Huobi,
+                                                                symbol: &symbol,
+                                                                tag: fsm.tag(),
+                                                                exchange_ts: None,
+                                                                received_ts: crate::now_nanos(),
+                                                                connection_id,
+                                                                delivery: DeliveryStamp::new(
+                                                                    run_id,
+                                                                    connection_id as u64,
+                                                                    delivery_ordinal,
+                                                                ),
+                                                                source_sequence: None,
+                                                            };
+                                                            let _ = sink.alert(&start_ctx, start_alert);
+
+                                                            if !pending_snapshots.contains(&symbol) {
+                                                                pending_snapshots.push_back(symbol);
+                                                            }
+                                                        }
                                                     }
                                                     DeltaDecision::Drop => {
                                                         // Stale or duplicate delta; dropped silently

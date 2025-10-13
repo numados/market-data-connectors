@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
     BookKind, DeliveryStamp, DisconnectKind, EventContext, GlobalSequenceCheck, IntegrityAlert,
-    RunId, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId, WatchdogAction,
+    RunId, SequencePolicy, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId,
+    WatchdogAction,
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
@@ -463,6 +464,41 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 continue 'frame_loop;
                             }
                         }
+                    } else if env.channel == "l2_data"
+                        && config.sequence_policy == SequencePolicy::Required
+                    {
+                        warn!(
+                            connection_id,
+                            "Missing sequence_num on Coinbase Advanced l2_data channel under Required policy; failing closed"
+                        );
+                        let (should_resubscribe, alerts) = fsm.trigger_resync_all(now);
+                        for (sym, tag, start_alert) in alerts {
+                            delivery_ordinal += 1;
+                            let start_ctx = EventContext {
+                                venue: VenueId::CoinbaseAdvanced,
+                                symbol: &sym,
+                                tag,
+                                exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                received_ts,
+                                connection_id,
+                                delivery: DeliveryStamp::new(
+                                    run_id,
+                                    connection_id as u64,
+                                    delivery_ordinal,
+                                ),
+                                source_sequence: None,
+                            };
+                            let _ = sink.alert(&start_ctx, start_alert);
+                        }
+
+                        if should_resubscribe {
+                            let unsub = build_unsubscribe_frame("level2", &product_strs);
+                            let sub = build_subscribe_frame("level2", &product_strs);
+                            let _ = ws_tx.send(Message::Text(unsub)).await;
+                            let _ = ws_tx.send(Message::Text(sub)).await;
+                        }
+
+                        continue 'frame_loop;
                     }
 
                     if is_paused {

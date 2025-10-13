@@ -41,6 +41,17 @@ pub trait ChecksumStrategy: Send + Sync + 'static {
     fn depth(&self) -> usize;
 }
 
+/// Policy governing whether checksum verification is mandatory on venue updates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChecksumPolicy {
+    /// Checksum verification is strictly required on integrity-bearing channels.
+    /// Updates omitting a checksum fail closed (emit `ResyncStarted` / `ChecksumMismatch` and drop data).
+    #[default]
+    Required,
+    /// Checksum verification is optional (e.g. non-book channels or when venue documents absence).
+    Optional,
+}
+
 /// Disables checksum computation (always returns 0).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoChecksum;

@@ -159,6 +159,11 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
+        // Reset FSMs upon new connection
+        for fsm in fsms.values_mut() {
+            fsm.reset(&config);
+        }
+
         // Send initial subscriptions for all configured symbols
         let now_secs = current_unix_secs();
         for (sym, _) in &symbols {
@@ -510,7 +515,48 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 source_sequence: Some(header.last_id),
                                                 kind: delta,
                                             };
-                                            fsm.buffer_delta(event);
+                                            if let Err(e) = fsm.buffer_delta(event) {
+                                                warn!(
+                                                    %sym,
+                                                    error = %e,
+                                                    "Buffer overflow while buffering Gate.io deltas; triggering resync"
+                                                );
+                                                let alert = fsm.trigger_resync(now);
+                                                delivery_ordinal += 1;
+                                                let ctx = EventContext {
+                                                    venue: VenueId::Gateio,
+                                                    symbol: &sym,
+                                                    tag,
+                                                    exchange_ts,
+                                                    received_ts,
+                                                    connection_id,
+                                                    delivery: DeliveryStamp::new(
+                                                        run_id,
+                                                        connection_id as u64,
+                                                        delivery_ordinal,
+                                                    ),
+                                                    source_sequence: Some(header.last_id),
+                                                };
+                                                let _ = sink.alert(&ctx, alert);
+
+                                                if fsm.can_resubscribe(now) {
+                                                    let now_secs = current_unix_secs();
+                                                    let un_frame = build_obu_unsubscribe_frame(
+                                                        sym.as_str(),
+                                                        config.orderbook_levels,
+                                                        now_secs,
+                                                    );
+                                                    let sub_frame = build_obu_subscribe_frame(
+                                                        sym.as_str(),
+                                                        config.orderbook_levels,
+                                                        now_secs,
+                                                    );
+                                                    let _ = ws_tx.send(Message::Text(un_frame)).await;
+                                                    let _ = ws_tx.send(Message::Text(sub_frame)).await;
+                                                } else {
+                                                    fsm.record_resubscribe_failure(now);
+                                                }
+                                            }
                                         }
                                         DeltaDecision::GapDetected { alert } => {
                                             warn!(

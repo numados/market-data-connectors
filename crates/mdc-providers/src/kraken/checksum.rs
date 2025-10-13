@@ -457,4 +457,37 @@ mod tests {
             assert_eq!(book.verify(None), ChecksumVerdict::NotProvided);
         }
     }
+
+    #[test]
+    fn test_checksum_policy_fail_closed_mapping() {
+        use mdc_core::ChecksumPolicy;
+
+        let verdict = ChecksumVerdict::NotProvided;
+
+        let is_valid_required = match verdict {
+            ChecksumVerdict::Valid => true,
+            ChecksumVerdict::Mismatch { .. } => false,
+            ChecksumVerdict::NotProvided => match ChecksumPolicy::Required {
+                ChecksumPolicy::Required => false,
+                ChecksumPolicy::Optional => true,
+            },
+        };
+        assert!(
+            !is_valid_required,
+            "Required checksum policy must fail closed on missing checksum"
+        );
+
+        let is_valid_optional = match verdict {
+            ChecksumVerdict::Valid => true,
+            ChecksumVerdict::Mismatch { .. } => false,
+            ChecksumVerdict::NotProvided => match ChecksumPolicy::Optional {
+                ChecksumPolicy::Required => false,
+                ChecksumPolicy::Optional => true,
+            },
+        };
+        assert!(
+            is_valid_optional,
+            "Optional checksum policy accepts missing checksum"
+        );
+    }
 }

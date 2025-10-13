@@ -48,6 +48,8 @@ pub struct KrakenConfig {
     /// Silence grace duration after ping after which the connector forces a reconnect.
     /// Default: 30 seconds.
     pub watchdog_reconnect_after: Duration,
+    /// Checksum verification policy (Required or Optional). Default: Required.
+    pub checksum_policy: mdc_core::ChecksumPolicy,
     /// Initial reconnect backoff duration. Default: 1 second.
     pub initial_backoff: Duration,
     /// Maximum reconnect backoff duration. Default: 15 seconds.
@@ -65,6 +67,7 @@ impl Default for KrakenConfig {
             resubscribe_timeout: Duration::from_secs(5),
             quarantine_duration: Duration::from_secs(30),
             streams: KrakenStreams::default(),
+            checksum_policy: mdc_core::ChecksumPolicy::Required,
             watchdog_ping_after: Duration::from_secs(10),
             watchdog_reconnect_after: Duration::from_secs(30),
             initial_backoff: Duration::from_secs(1),

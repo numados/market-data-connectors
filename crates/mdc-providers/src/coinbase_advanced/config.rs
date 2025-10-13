@@ -21,6 +21,8 @@ pub struct CoinbaseAdvancedConfig {
     pub connection_timeout: Duration,
     /// Silence watchdog timeout before reconnecting (default: 15s).
     pub silence_timeout: Duration,
+    /// Sequence enforcement policy (Required or Optional). Default: Required.
+    pub sequence_policy: mdc_core::SequencePolicy,
 }
 
 impl Default for CoinbaseAdvancedConfig {
@@ -34,6 +36,7 @@ impl Default for CoinbaseAdvancedConfig {
             resync_timeout: Duration::from_secs(5),
             connection_timeout: Duration::from_secs(10),
             silence_timeout: Duration::from_secs(15),
+            sequence_policy: mdc_core::SequencePolicy::Required,
         }
     }
 }

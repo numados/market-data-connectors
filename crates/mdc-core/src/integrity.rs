@@ -8,7 +8,7 @@ pub mod watchdog;
 #[cfg(test)]
 pub use checksum::clean_token;
 pub use checksum::{
-    BitfinexChecksum, ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef,
+    BitfinexChecksum, ChecksumPolicy, ChecksumStrategy, KrakenChecksum, NoChecksum, RawLevelRef,
     for_each_cleaned_byte, remove_decimal_and_leading_zeros,
 };
 pub use embargo::{
@@ -17,6 +17,6 @@ pub use embargo::{
 };
 pub use sequence::{
     DEFAULT_RESET_THRESHOLD, GlobalSequenceCheck, GlobalSequenceTracker, SequenceCheck,
-    SequenceRule, SequenceTracker,
+    SequencePolicy, SequenceRule, SequenceTracker,
 };
 pub use watchdog::{SilenceWatchdog, WatchdogAction};

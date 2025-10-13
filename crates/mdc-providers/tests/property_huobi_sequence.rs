@@ -148,7 +148,7 @@ proptest! {
                     asks: vec![],
                 },
             };
-            fsm.buffer_delta(event);
+            let _ = fsm.buffer_delta(event);
             curr = next;
         }
 

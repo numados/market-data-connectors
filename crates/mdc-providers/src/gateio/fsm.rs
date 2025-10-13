@@ -65,8 +65,14 @@ impl SymbolFsm {
     }
 
     /// Buffers an owned delta during initial synchronization or resync.
-    pub fn buffer_delta(&mut self, event: MarketEvent<L2Delta>) {
-        let _ = self.controller.buffer(event);
+    ///
+    /// # Errors
+    /// Returns [`mdc_core::resync::BufferError`] if the buffer overflows or controller is in an invalid state.
+    pub fn buffer_delta(
+        &mut self,
+        event: MarketEvent<L2Delta>,
+    ) -> Result<(), mdc_core::resync::BufferError> {
+        self.controller.buffer(event)
     }
 
     /// Applies an authoritative snapshot (`full: true`).

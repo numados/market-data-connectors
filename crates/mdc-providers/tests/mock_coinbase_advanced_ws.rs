@@ -685,3 +685,83 @@ async fn test_cancellation_emits_shutdown_alert() {
         "Expected ConnectionLost(Shutdown) for ETH-USD"
     );
 }
+
+#[tokio::test]
+async fn test_ws_sequenceless_l2_data_fails_closed() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
+    let upd_json = load_fixture(UPDATE_FIXTURE).expect("load update fixture");
+
+    // Remove sequence_num from update payload
+    let mut bad_upd: serde_json::Value =
+        serde_json::from_str(&upd_json).expect("valid update json");
+    bad_upd.as_object_mut().unwrap().remove("sequence_num");
+    let bad_upd_str = bad_upd.to_string();
+
+    let mut config = CoinbaseAdvancedConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    assert_eq!(config.sequence_policy, mdc_core::SequencePolicy::Required);
+
+    let symbols = vec![Symbol::from("BTC-USD")];
+    let sink = RecordingSink::new();
+
+    let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+        .symbols(symbols)
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Send valid snapshot -> InSync
+    ws.broadcast_text(&snap_json);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let books_after_snap: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { symbol, kind } if symbol.as_str() == "BTC-USD" => Some(kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(books_after_snap.len(), 1, "Snapshot must be applied");
+    assert_eq!(books_after_snap[0], BookKind::Snapshot);
+
+    // Send sequence-less l2_data frame -> must fail closed
+    ws.broadcast_text(&bad_upd_str);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Verify: no book delta was emitted
+    let books_after_update: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { symbol, kind } if symbol.as_str() == "BTC-USD" => Some(kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        books_after_update.len(),
+        1,
+        "No book delta may be emitted when sequence_num is absent under Required policy"
+    );
+
+    // Verify: alerts contain ResyncStarted
+    let alerts = sink.alerts_for("BTC-USD");
+    let has_resync = alerts
+        .iter()
+        .any(|a| matches!(a, IntegrityAlert::ResyncStarted));
+    assert!(
+        has_resync,
+        "Must emit ResyncStarted alert for absent sequence"
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}

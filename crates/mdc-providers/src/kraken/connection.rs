@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, DeliveryStamp, DisconnectKind, EventContext, IntegrityAlert, PriceLevel,
-    RawLevelText, RunId, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, UnixNanos,
-    VenueId, WatchdogAction,
+    BookKind, ChecksumPolicy, DeliveryStamp, DisconnectKind, EventContext, IntegrityAlert,
+    PriceLevel, RawLevelText, RunId, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag,
+    UnixNanos, VenueId, WatchdogAction,
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -390,6 +390,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                             handle_frame_text(
                                 &text,
+                                config.checksum_policy,
                                 received_ts,
                                 connection_id,
                                 run_id,
@@ -410,6 +411,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             if let Ok(text) = std::str::from_utf8(&bin) {
                                 handle_frame_text(
                                     text,
+                                    config.checksum_policy,
                                     received_ts,
                                     connection_id,
                                     run_id,
@@ -468,6 +470,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 #[allow(clippy::too_many_arguments)]
 fn handle_frame_text<S: StreamingSink>(
     text: &str,
+    checksum_policy: ChecksumPolicy,
     received_ts: UnixNanos,
     connection_id: u32,
     run_id: RunId,
@@ -520,6 +523,7 @@ fn handle_frame_text<S: StreamingSink>(
                 if kind == "snapshot" {
                     handle_snapshot(
                         &book_data,
+                        checksum_policy,
                         &symbol,
                         tag,
                         received_ts,
@@ -534,6 +538,7 @@ fn handle_frame_text<S: StreamingSink>(
                 } else if kind == "update" {
                     handle_update(
                         &book_data,
+                        checksum_policy,
                         &symbol,
                         tag,
                         received_ts,
@@ -582,6 +587,7 @@ fn handle_frame_text<S: StreamingSink>(
 #[allow(clippy::too_many_arguments)]
 fn handle_snapshot<S: StreamingSink>(
     data: &RawBookData<'_>,
+    checksum_policy: ChecksumPolicy,
     symbol: &Symbol,
     tag: SymbolTag,
     received_ts: UnixNanos,
@@ -610,7 +616,16 @@ fn handle_snapshot<S: StreamingSink>(
             );
             false
         }
-        ChecksumVerdict::NotProvided => false,
+        ChecksumVerdict::NotProvided => match checksum_policy {
+            ChecksumPolicy::Required => {
+                warn!(
+                    symbol = symbol.as_str(),
+                    "Missing checksum on Kraken snapshot under Required policy; failing closed"
+                );
+                false
+            }
+            ChecksumPolicy::Optional => true,
+        },
     };
 
     match fsm.on_snapshot(is_valid) {
@@ -672,6 +687,7 @@ fn handle_snapshot<S: StreamingSink>(
 #[allow(clippy::too_many_arguments)]
 fn handle_update<S: StreamingSink>(
     data: &RawBookData<'_>,
+    checksum_policy: ChecksumPolicy,
     symbol: &Symbol,
     tag: SymbolTag,
     received_ts: UnixNanos,
@@ -700,7 +716,16 @@ fn handle_update<S: StreamingSink>(
             expected,
             calculated,
         } => (false, expected, calculated),
-        ChecksumVerdict::NotProvided => (true, 0, 0),
+        ChecksumVerdict::NotProvided => match checksum_policy {
+            ChecksumPolicy::Required => {
+                warn!(
+                    symbol = symbol.as_str(),
+                    "Missing checksum on Kraken book update under Required policy; failing closed"
+                );
+                (false, 0, book.checksum())
+            }
+            ChecksumPolicy::Optional => (true, 0, 0),
+        },
     };
 
     let now = Instant::now();
