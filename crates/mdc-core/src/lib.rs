@@ -1,6 +1,7 @@
 //! Core abstractions and domain models for market data connectors.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod catalog;
 pub mod error;
@@ -11,7 +12,7 @@ pub mod resync;
 pub mod sink;
 
 pub use catalog::*;
-pub use error::MdcError;
+pub use error::{ArcError, MdcError};
 #[cfg(test)]
 pub use integrity::clean_token;
 pub use integrity::{

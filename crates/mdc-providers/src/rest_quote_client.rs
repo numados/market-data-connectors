@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::ArcError;
 use mdc_core::integrity::embargo::parse_retry_after;
-use mdc_core::model::{Symbol, UnixNanos};
+use mdc_core::model::{Symbol, UnixNanos, VenueId};
 use mdc_core::rest_quote::{
     BoxFuture, RestQuoteError, RestQuoteRequest, RestQuoteSnapshot, RestQuoteSource,
     SymbolQuoteResult,
@@ -13,7 +13,7 @@ use url::Url;
 
 /// Function signature for pure provider REST quote payload decoders.
 pub type RestQuoteDecoderFn =
-    fn(ProviderKind, &[Symbol], &str, UnixNanos) -> Result<Vec<SymbolQuoteResult>, RestQuoteError>;
+    fn(VenueId, &[Symbol], &str, UnixNanos) -> Result<Vec<SymbolQuoteResult>, RestQuoteError>;
 
 /// Function signature for constructing the provider-specific target URL.
 pub type RestQuoteUrlBuilderFn = fn(&Url, &[Symbol]) -> Result<Url, RestQuoteError>;
@@ -21,7 +21,7 @@ pub type RestQuoteUrlBuilderFn = fn(&Url, &[Symbol]) -> Result<Url, RestQuoteErr
 /// Configuration and runtime state for an HTTP REST quote snapshot client.
 #[derive(Clone)]
 pub struct HttpRestQuoteClient {
-    provider: ProviderKind,
+    provider: VenueId,
     default_endpoint: Url,
     endpoint_override: Option<Url>,
     client: reqwest::Client,
@@ -32,14 +32,15 @@ pub struct HttpRestQuoteClient {
 }
 
 impl HttpRestQuoteClient {
-    /// Creates a new `HttpRestQuoteClient` for a given provider with endpoint, URL builder, and decoder.
+    /// Creates a new `HttpRestQuoteClient` for a given venue with endpoint, URL builder, and decoder.
     pub fn new(
-        provider: ProviderKind,
+        provider: impl Into<VenueId>,
         default_endpoint: &str,
         max_symbols_per_request: usize,
         url_builder: RestQuoteUrlBuilderFn,
         decoder: RestQuoteDecoderFn,
     ) -> Result<Self, RestQuoteError> {
+        let provider = provider.into();
         let default_url =
             Url::parse(default_endpoint).map_err(|e| RestQuoteError::Unsupported {
                 provider,
@@ -109,7 +110,7 @@ impl HttpRestQuoteClient {
     }
 
     /// Returns the provider kind.
-    pub fn provider(&self) -> ProviderKind {
+    pub fn provider(&self) -> VenueId {
         self.provider
     }
 
@@ -160,18 +161,16 @@ impl RestQuoteSource for HttpRestQuoteClient {
                         });
                     }
                     if err.is_redirect() {
-                        return Err(RestQuoteError::HttpTransport {
+                        return Err(RestQuoteError::Transport {
                             provider: self.provider,
-                            status: 301,
                             message: "foreign-origin redirect disallowed".to_string(),
-                            retry_after: None,
+                            source: Some(ArcError::new(err)),
                         });
                     }
-                    return Err(RestQuoteError::HttpTransport {
+                    return Err(RestQuoteError::Transport {
                         provider: self.provider,
-                        status: err.status().map(|s| s.as_u16()).unwrap_or(0),
                         message: format!("network transport error: {err}"),
-                        retry_after: None,
+                        source: Some(ArcError::new(err)),
                     });
                 }
             };
@@ -203,11 +202,12 @@ impl RestQuoteSource for HttpRestQuoteClient {
                     .await
                     .unwrap_or_else(|_| "failed to read error body".to_string());
 
-                return Err(RestQuoteError::HttpTransport {
+                return Err(RestQuoteError::HttpStatus {
                     provider: self.provider,
                     status: status.as_u16(),
                     message: msg,
                     retry_after,
+                    source: None,
                 });
             }
 
@@ -229,11 +229,10 @@ impl RestQuoteSource for HttpRestQuoteClient {
                             provider: self.provider,
                         });
                     }
-                    return Err(RestQuoteError::HttpTransport {
+                    return Err(RestQuoteError::Transport {
                         provider: self.provider,
-                        status: 0,
                         message: format!("failed to read response body: {err}"),
-                        retry_after: None,
+                        source: Some(ArcError::new(err)),
                     });
                 }
             };

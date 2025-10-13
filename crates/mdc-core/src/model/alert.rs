@@ -8,23 +8,51 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "alert", rename_all = "snake_case")]
 pub enum IntegrityAlert {
     /// Missing sequence segment; the local book must be treated as invalid until `ResyncCompleted`.
-    GapDetected { expected: u64, received: u64 },
+    GapDetected {
+        /// Expected sequence ID.
+        expected: u64,
+        /// Received sequence ID that did not match expected.
+        received: u64,
+    },
     /// CRC32 checksum mismatch against the venue-published checksum (Kraken, Bitfinex).
-    ChecksumMismatch { expected: u32, calculated: u32 },
+    ChecksumMismatch {
+        /// Expected checksum published by the venue.
+        expected: u32,
+        /// Calculated checksum computed over the local order book.
+        calculated: u32,
+    },
     /// Connection-level silence: no data frame for the configured window; a reconnect follows.
-    SilenceTimeout { elapsed_ms: u64 },
+    SilenceTimeout {
+        /// Milliseconds elapsed without receiving any frame.
+        elapsed_ms: u64,
+    },
     /// Venue heartbeat missing or heartbeat sequence gap (Coinbase).
-    HeartbeatTimeout { elapsed_ms: u64 },
+    HeartbeatTimeout {
+        /// Milliseconds elapsed without receiving a venue heartbeat.
+        elapsed_ms: u64,
+    },
     /// Resynchronization started (buffering deltas, snapshot requested). Emitted once per attempt.
     ResyncStarted,
     /// Book is contiguous again from `last_update_id` onward; follows snapshot and delta replay.
-    ResyncCompleted { last_update_id: Option<u64> },
+    ResyncCompleted {
+        /// Sequence ID that the resynchronized book is aligned to, if known.
+        last_update_id: Option<u64>,
+    },
     /// Resync gave up for now. Book stays invalid; a retry follows after `retry_in_ms`.
-    Quarantined { retry_in_ms: u64 },
+    Quarantined {
+        /// Delay in milliseconds before attempting resync again.
+        retry_in_ms: u64,
+    },
     /// The data source itself failed (polling error, invalid quote). Book stays invalid until next delivery.
-    SourceError { kind: SourceErrorKind },
+    SourceError {
+        /// Cause category of the source error.
+        kind: SourceErrorKind,
+    },
     /// The connection carrying this symbol is lost. Emitted once per symbol at the moment socket is dropped.
-    ConnectionLost { reason: DisconnectKind },
+    ConnectionLost {
+        /// Reason the connection terminated.
+        reason: DisconnectKind,
+    },
 }
 
 /// Cause category when a data source fails.
@@ -32,10 +60,15 @@ pub enum IntegrityAlert {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SourceErrorKind {
+    /// Network or I/O failure communicating with the source.
     Transport,
+    /// HTTP error status code returned by the source endpoint.
     HttpStatus(u16),
+    /// Failure parsing or deserializing the venue payload.
     Parse,
+    /// Expected quote or book data missing from the response payload.
     MissingQuote,
+    /// Quote data received violated semantic validation invariants.
     InvalidQuote,
 }
 
@@ -44,12 +77,19 @@ pub enum SourceErrorKind {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DisconnectKind {
+    /// Normal connection closure by peer or client.
     Closed,
+    /// Underlying transport or socket error.
     TransportError,
+    /// Disconnection due to silence timeout without data or heartbeats.
     SilenceTimeout,
+    /// Disconnection explicitly requested or signaled by the venue.
     VenueRequested,
+    /// Connection suspended or paused administratively.
     Paused,
+    /// Normal connector shutdown initiated by consumer.
     Shutdown,
+    /// Connection task terminated unexpectedly due to a panic.
     Panic,
 }
 

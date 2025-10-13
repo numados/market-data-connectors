@@ -1,16 +1,17 @@
 //! Shared helpers and utilities for REST quote snapshot decoders and URL builders.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::rest_quote::RestQuoteError;
 use rust_decimal::Decimal;
 use url::Url;
 
 /// Safely appends a path and query string to a base `Url`.
 pub fn build_url(
-    provider: ProviderKind,
+    provider: impl Into<VenueId>,
     base: &Url,
     path_and_query: &str,
 ) -> Result<Url, RestQuoteError> {
+    let provider = provider.into();
     let base_trimmed = base.as_str().trim_end_matches('/');
     let clean_path = path_and_query.trim_start_matches('/');
     let full = format!("{base_trimmed}/{clean_path}");

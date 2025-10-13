@@ -9,12 +9,21 @@ use std::fmt;
 /// Validation error when creating a `TradeId` or `TradeNamespace`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TradeIdentityError {
+    /// Trade identifier string cannot be empty.
     #[error("trade identifier string cannot be empty")]
     Empty,
+    /// Trade identifier exceeded maximum byte length.
     #[error("trade identifier too long: max {max} bytes, got {actual}")]
-    TooLong { max: usize, actual: usize },
+    TooLong {
+        /// Maximum permitted length in bytes.
+        max: usize,
+        /// Actual length in bytes encountered.
+        actual: usize,
+    },
+    /// Trade identifier contains non-ASCII characters.
     #[error("trade identifier must contain only ASCII characters")]
     NonAscii,
+    /// Trade identifier contains ASCII control characters.
     #[error("trade identifier contains ASCII control characters")]
     ControlCharacter,
 }
@@ -135,7 +144,9 @@ fn validate_identifier(s: &str, max_len: usize) -> Result<(), TradeIdentityError
 /// Durable trade identity scoped by namespace and value.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NativeTradeIdentity {
+    /// Scoped namespace for the trade identifier.
     pub namespace: TradeNamespace,
+    /// Native identifier string from the venue.
     pub value: TradeId,
 }
 
@@ -149,8 +160,11 @@ impl NativeTradeIdentity {
 /// Public executed trade.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trade {
+    /// Venue-native trade identity, if provided.
     pub identity: Option<NativeTradeIdentity>,
+    /// Execution price.
     pub price: Decimal,
+    /// Executed trade size or volume.
     pub volume: Decimal,
     /// Side of the aggressor (taker).
     /// Binance `is_buyer_maker == true` implies the buyer is passive and seller is aggressor => `Side::Ask`.

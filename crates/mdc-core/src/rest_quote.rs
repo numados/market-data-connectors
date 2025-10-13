@@ -12,9 +12,9 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 pub use crate::catalog::BoxFuture;
-use crate::catalog::ProviderKind;
+use crate::error::ArcError;
 use crate::model::capabilities::TimestampCapability;
-use crate::model::{Symbol, UnixNanos};
+use crate::model::{Symbol, UnixNanos, VenueId};
 
 /// Default maximum HTTP response body cap for REST quote snapshots (8 MiB).
 pub const DEFAULT_MAX_REST_QUOTE_RESPONSE_BYTES: u32 = 8 * 1024 * 1024;
@@ -317,43 +317,57 @@ pub struct RestQuoteSnapshot {
 /// Errors occurring during on-demand REST quote snapshot discovery.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RestQuoteError {
-    /// HTTP transport failure.
-    #[error("http transport error on {provider}: status {status}, message: {message}")]
-    HttpTransport {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+    /// Underlying transport or network failure (DNS, connect, body read).
+    #[error("transport error on {provider}: {message}")]
+    Transport {
+        /// Venue where error occurred.
+        provider: VenueId,
+        /// Error message.
+        message: String,
+        /// Underlying error cause, if available.
+        #[source]
+        source: Option<ArcError>,
+    },
+    /// HTTP status failure returned by server (e.g. 400, 404, 500, 503).
+    #[error("http status error on {provider}: status {status}, message: {message}")]
+    HttpStatus {
+        /// Venue where error occurred.
+        provider: VenueId,
         /// HTTP status code.
         status: u16,
         /// Error message.
         message: String,
         /// Optional retry delay recommended by the server.
         retry_after: Option<Duration>,
+        /// Underlying error cause, if available.
+        #[source]
+        source: Option<ArcError>,
     },
     /// Rate limit exceeded (HTTP 429 / 418).
     #[error("rate limit exceeded on {provider}")]
     RateLimit {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Optional retry delay recommended by the server.
         retry_after: Option<Duration>,
     },
     /// Request timeout / deadline exceeded.
     #[error("request timeout / deadline exceeded on {provider}")]
     Timeout {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
     },
     /// Request cancelled via cancellation token.
     #[error("request cancelled on {provider}")]
     Cancelled {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
     },
     /// Response body exceeded limits.
     #[error("response body exceeded limit on {provider}: max {max} bytes, actual {actual}")]
     ResponseTooLarge {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Configured maximum bytes.
         max: u32,
         /// Actual bytes encountered.
@@ -362,32 +376,32 @@ pub enum RestQuoteError {
     /// Invalid or unrecognized response envelope.
     #[error("invalid response envelope on {provider}: {reason}")]
     InvalidEnvelope {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Reason description.
         reason: String,
     },
     /// Malformed quote snapshot item.
     #[error("malformed quote item on {provider}: {reason}")]
     MalformedItem {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Reason description.
         reason: String,
     },
     /// Unsupported request scope or market family.
     #[error("unsupported scope on {provider}: {reason}")]
     UnsupportedScope {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Reason description.
         reason: String,
     },
     /// Requested symbols exceeded the provider's batch limit.
     #[error("batch limit exceeded on {provider}: max {max}, actual {actual}")]
     BatchLimitExceeded {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Configured maximum symbols per batch.
         max: usize,
         /// Actual requested symbols.
@@ -396,8 +410,8 @@ pub enum RestQuoteError {
     /// REST quote snapshot capability is unsupported for this provider.
     #[error("rest quote snapshots unsupported for {provider}: {reason}")]
     Unsupported {
-        /// Provider where error occurred.
-        provider: ProviderKind,
+        /// Venue where error occurred.
+        provider: VenueId,
         /// Reason description.
         reason: String,
     },

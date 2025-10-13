@@ -18,11 +18,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum MarketDataKind {
+    /// Level 2 order book incremental diff.
     L2Delta(L2Delta),
+    /// Level 2 full order book snapshot.
     L2Snapshot(L2Snapshot),
+    /// Public trade execution.
     Trade(Trade),
+    /// Top-of-book best bid and best ask ticker.
     BookTicker(BookTicker),
+    /// Reference exchange rate (e.g., ECB FX benchmark).
     ReferenceRate(ReferenceRate),
+    /// In-band integrity or connection alert.
     IntegrityAlert(IntegrityAlert),
 }
 

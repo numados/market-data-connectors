@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// A single level in an order book. `volume == 0` denotes level removal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevel {
+    /// Price of the book level.
     pub price: Decimal,
+    /// Quantity or volume available at this price level; zero indicates removal.
     pub volume: Decimal,
 }
 

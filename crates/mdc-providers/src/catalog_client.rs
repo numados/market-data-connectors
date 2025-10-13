@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use mdc_core::ArcError;
 use mdc_core::catalog::{
     BoxFuture, CatalogError, CatalogInstrument, CatalogRequest, CompleteCatalog, InstrumentCatalog,
     MarketFamily, ProviderKind,
@@ -137,18 +138,16 @@ impl InstrumentCatalog for HttpCatalogClient {
                         });
                     }
                     if err.is_redirect() {
-                        return Err(CatalogError::HttpTransport {
+                        return Err(CatalogError::Transport {
                             provider: self.provider,
-                            status: 301,
                             message: "foreign-origin redirect disallowed".to_string(),
-                            retry_after: None,
+                            source: Some(ArcError::new(err)),
                         });
                     }
-                    return Err(CatalogError::HttpTransport {
+                    return Err(CatalogError::Transport {
                         provider: self.provider,
-                        status: err.status().map(|s| s.as_u16()).unwrap_or(0),
                         message: format!("network transport error: {err}"),
-                        retry_after: None,
+                        source: Some(ArcError::new(err)),
                     });
                 }
             };
@@ -180,11 +179,12 @@ impl InstrumentCatalog for HttpCatalogClient {
                     .await
                     .unwrap_or_else(|_| "failed to read error body".to_string());
 
-                return Err(CatalogError::HttpTransport {
+                return Err(CatalogError::HttpStatus {
                     provider: self.provider,
                     status: status.as_u16(),
                     message: msg,
                     retry_after,
+                    source: None,
                 });
             }
 
@@ -208,11 +208,10 @@ impl InstrumentCatalog for HttpCatalogClient {
                             provider: self.provider,
                         });
                     }
-                    return Err(CatalogError::HttpTransport {
+                    return Err(CatalogError::Transport {
                         provider: self.provider,
-                        status: 0,
                         message: format!("failed to read response body: {err}"),
-                        retry_after: None,
+                        source: Some(ArcError::new(err)),
                     });
                 }
             };

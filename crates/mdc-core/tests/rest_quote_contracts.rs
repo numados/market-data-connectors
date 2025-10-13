@@ -5,9 +5,9 @@
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::error::ArcError;
 use mdc_core::model::capabilities::TimestampCapability;
-use mdc_core::model::{Symbol, UnixNanos};
+use mdc_core::model::{Symbol, UnixNanos, VenueId};
 use mdc_core::rest_quote::{
     BoxFuture, DEFAULT_MAX_REST_QUOTE_RESPONSE_BYTES, QuoteQuality, QuoteSnapshot,
     QuoteUnavailable, RestQuoteCapability, RestQuoteError, RestQuoteRequest, RestQuoteSnapshot,
@@ -336,18 +336,18 @@ fn test_rest_quote_capability() {
 #[test]
 fn test_rest_quote_error_display() {
     let err = RestQuoteError::RateLimit {
-        provider: ProviderKind::Binance,
+        provider: VenueId::Binance,
         retry_after: Some(Duration::from_secs(60)),
     };
     assert!(err.to_string().contains("rate limit exceeded on binance"));
 
     let err2 = RestQuoteError::Timeout {
-        provider: ProviderKind::Coinbase,
+        provider: VenueId::Coinbase,
     };
     assert!(err2.to_string().contains("request timeout"));
 
     let err3 = RestQuoteError::BatchLimitExceeded {
-        provider: ProviderKind::Bitstamp,
+        provider: VenueId::Bitstamp,
         max: 1,
         actual: 5,
     };
@@ -355,6 +355,42 @@ fn test_rest_quote_error_display() {
         err3.to_string()
             .contains("batch limit exceeded on bitstamp: max 1, actual 5")
     );
+
+    // Transport error preserving source chain
+    #[derive(Debug, thiserror::Error)]
+    #[error("connection refused")]
+    struct NetworkCause;
+
+    let arc_source = ArcError::new(NetworkCause);
+    let transport_err = RestQuoteError::Transport {
+        provider: VenueId::Kraken,
+        message: "DNS lookup failed".to_string(),
+        source: Some(arc_source),
+    };
+    assert!(
+        transport_err
+            .to_string()
+            .contains("transport error on kraken: DNS lookup failed")
+    );
+    assert!(std::error::Error::source(&transport_err).is_some());
+    assert_eq!(
+        std::error::Error::source(&transport_err)
+            .unwrap()
+            .to_string(),
+        "connection refused"
+    );
+
+    // HttpStatus error preserving source chain
+    let status_err = RestQuoteError::HttpStatus {
+        provider: VenueId::FrankfurterEcb,
+        status: 503,
+        message: "service unavailable".to_string(),
+        retry_after: Some(Duration::from_secs(30)),
+        source: None,
+    };
+    assert!(status_err.to_string().contains(
+        "http status error on frankfurter_ecb: status 503, message: service unavailable"
+    ));
 }
 
 /// Verification that `RestQuoteSource` trait compiles and executes

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -19,7 +19,7 @@ pub const DEFAULT_BITFINEX_QUOTE_ENDPOINT: &str = "https://api-pub.bitfinex.com"
 pub fn bitfinex_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuoteError> {
     if symbols.is_empty() {
         return Err(RestQuoteError::MalformedItem {
-            provider: ProviderKind::Bitfinex,
+            provider: VenueId::Bitfinex,
             reason: "empty symbols list".to_string(),
         });
     }
@@ -29,12 +29,12 @@ pub fn bitfinex_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuo
         .collect::<Vec<_>>()
         .join(",");
     let path = format!("v2/tickers?symbols={comma_separated}");
-    build_url(ProviderKind::Bitfinex, base, &path)
+    build_url(VenueId::Bitfinex, base, &path)
 }
 
 /// Parses Bitfinex tickers JSON into validated `SymbolQuoteResult` items.
 pub fn parse_bitfinex_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -180,7 +180,7 @@ pub fn parse_bitfinex_quote(
 /// Creates a default HTTP REST quote snapshot client for Bitfinex.
 pub fn bitfinex_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Bitfinex,
+        VenueId::Bitfinex,
         DEFAULT_BITFINEX_QUOTE_ENDPOINT,
         100,
         bitfinex_quote_url,
@@ -213,8 +213,7 @@ mod tests {
     fn test_parse_bitfinex_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/valid.json");
         let syms = vec![Symbol::from("tBTCUSD"), Symbol::from("tETHUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 2);
 
         // First item: tBTCUSD
@@ -241,8 +240,7 @@ mod tests {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/valid.json");
         // Request in reverse order
         let syms = vec![Symbol::from("tETHUSD"), Symbol::from("tBTCUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].symbol(), &Symbol::from("tETHUSD"));
         assert_eq!(res[1].symbol(), &Symbol::from("tBTCUSD"));
@@ -252,8 +250,7 @@ mod tests {
     fn test_parse_bitfinex_funding_rejected() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/funding.json");
         let syms = vec![Symbol::from("fUSD")];
-        let err =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap_err();
+        let err = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap_err();
         assert!(matches!(err, RestQuoteError::UnsupportedScope { .. }));
     }
 
@@ -261,8 +258,7 @@ mod tests {
     fn test_parse_bitfinex_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/crossed.json");
         let syms = vec![Symbol::from("tBTCUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -277,8 +273,7 @@ mod tests {
     fn test_parse_bitfinex_missing_symbol() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/missing.json");
         let syms = vec![Symbol::from("tBTCUSD"), Symbol::from("tETHUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 2);
         // tBTCUSD was not in the payload
         assert_eq!(
@@ -296,8 +291,7 @@ mod tests {
     fn test_parse_bitfinex_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/malformed.json");
         let syms = vec![Symbol::from("tBTCUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -312,8 +306,7 @@ mod tests {
     fn test_parse_bitfinex_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitfinex/provider_error.json");
         let syms = vec![Symbol::from("tBTCUSD")];
-        let res =
-            parse_bitfinex_quote(ProviderKind::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitfinex_quote(VenueId::Bitfinex, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {

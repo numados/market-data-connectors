@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Incremental order book delta. Applied on top of the most recent `L2Snapshot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct L2Delta {
+    /// Changed bid price levels.
     pub bids: Vec<PriceLevel>,
+    /// Changed ask price levels.
     pub asks: Vec<PriceLevel>,
     /// Venue sequence information, `None` for venues without sequencing (Bitstamp, LMAX).
     pub sequence: Option<SequenceRange>,
@@ -30,7 +32,9 @@ impl L2Delta {
 /// Authoritative full order book snapshot. Replaces any previous local book state for the symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct L2Snapshot {
+    /// Complete list of bid price levels ordered by price.
     pub bids: Vec<PriceLevel>,
+    /// Complete list of ask price levels ordered by price.
     pub asks: Vec<PriceLevel>,
     /// Sequence the snapshot is synchronized to, when the venue provides one.
     pub last_update_id: Option<u64>,

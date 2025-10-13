@@ -3,6 +3,7 @@
 //! Provides types and traits for querying complete exchange trading pair inventories
 //! across venues without live streaming subscriptions.
 
+use crate::error::ArcError;
 use crate::model::symbol::Symbol;
 use crate::model::timestamp::UnixNanos;
 use crate::model::venue::VenueId;
@@ -552,9 +553,20 @@ pub struct CompleteCatalog {
 /// Errors occurring during catalog discovery.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CatalogError {
-    /// HTTP transport failure.
-    #[error("http transport error on {provider}: status {status}, message: {message}")]
-    HttpTransport {
+    /// Underlying transport or network failure (DNS, connect, body read).
+    #[error("transport error on {provider}: {message}")]
+    Transport {
+        /// Provider where error occurred.
+        provider: ProviderKind,
+        /// Error message.
+        message: String,
+        /// Underlying error cause, if available.
+        #[source]
+        source: Option<ArcError>,
+    },
+    /// HTTP status failure returned by server (e.g. 400, 404, 500, 503).
+    #[error("http status error on {provider}: status {status}, message: {message}")]
+    HttpStatus {
         /// Provider where error occurred.
         provider: ProviderKind,
         /// HTTP status code.
@@ -563,6 +575,9 @@ pub enum CatalogError {
         message: String,
         /// Optional retry delay recommended by the server.
         retry_after: Option<Duration>,
+        /// Underlying error cause, if available.
+        #[source]
+        source: Option<ArcError>,
     },
     /// Rate limit exceeded (HTTP 429 / 418).
     #[error("rate limit exceeded on {provider}")]

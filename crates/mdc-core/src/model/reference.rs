@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Dated reference midpoint; no executed size or order book claims.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReferenceRate {
+    /// Midpoint reference rate value.
     pub mid: Decimal,
 }
 

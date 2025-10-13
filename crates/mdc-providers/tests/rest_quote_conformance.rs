@@ -11,8 +11,7 @@
 
 use std::time::Duration;
 
-use mdc_core::catalog::ProviderKind;
-use mdc_core::model::Symbol;
+use mdc_core::model::{Symbol, VenueId};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteUnavailable, RestQuoteCapability, RestQuoteError, RestQuoteRequest,
     RestQuoteSource, SymbolQuoteResult,
@@ -42,37 +41,13 @@ fn d(s: &str) -> Decimal {
 #[test]
 fn test_all_seven_legacy_providers_declare_rest_quote_capability() {
     let capabilities = [
-        (
-            &*BINANCE_CAPABILITIES,
-            ProviderKind::Binance,
-            1,
-            false,
-            true,
-        ),
-        (
-            &*COINBASE_CAPABILITIES,
-            ProviderKind::Coinbase,
-            1,
-            false,
-            true,
-        ),
-        (&*KRAKEN_CAPABILITIES, ProviderKind::Kraken, 1, false, true),
-        (
-            &*BITSTAMP_CAPABILITIES,
-            ProviderKind::Bitstamp,
-            1,
-            false,
-            false,
-        ),
-        (&*GATEIO_CAPABILITIES, ProviderKind::Gateio, 1, false, true),
-        (&*HUOBI_CAPABILITIES, ProviderKind::Huobi, 1, false, true),
-        (
-            &*BITFINEX_CAPABILITIES,
-            ProviderKind::Bitfinex,
-            100,
-            true,
-            true,
-        ),
+        (&*BINANCE_CAPABILITIES, VenueId::Binance, 1, false, true),
+        (&*COINBASE_CAPABILITIES, VenueId::Coinbase, 1, false, true),
+        (&*KRAKEN_CAPABILITIES, VenueId::Kraken, 1, false, true),
+        (&*BITSTAMP_CAPABILITIES, VenueId::Bitstamp, 1, false, false),
+        (&*GATEIO_CAPABILITIES, VenueId::Gateio, 1, false, true),
+        (&*HUOBI_CAPABILITIES, VenueId::Huobi, 1, false, true),
+        (&*BITFINEX_CAPABILITIES, VenueId::Bitfinex, 100, true, true),
     ];
 
     for (cap, provider, max_symbols, batch_mode, sizes) in capabilities {
@@ -81,7 +56,7 @@ fn test_all_seven_legacy_providers_declare_rest_quote_capability() {
             "REST quote snapshot capability must be supported for {provider:?}"
         );
 
-        match &cap.rest_quote {
+        match cap.rest_quote.clone() {
             RestQuoteCapability::Snapshot {
                 max_symbols_per_request,
                 batch_mode: b_mode,
@@ -90,11 +65,11 @@ fn test_all_seven_legacy_providers_declare_rest_quote_capability() {
                 ..
             } => {
                 assert_eq!(
-                    *max_symbols_per_request, max_symbols,
+                    max_symbols_per_request, max_symbols,
                     "max_symbols_per_request mismatch for {provider:?}"
                 );
-                assert_eq!(*b_mode, batch_mode, "batch_mode mismatch for {provider:?}");
-                assert_eq!(*s_mode, sizes, "sizes mode mismatch for {provider:?}");
+                assert_eq!(b_mode, batch_mode, "batch_mode mismatch for {provider:?}");
+                assert_eq!(s_mode, sizes, "sizes mode mismatch for {provider:?}");
                 assert!(
                     default_endpoint.starts_with("https://"),
                     "default_endpoint must be an https URL for {provider:?}"
@@ -928,7 +903,7 @@ async fn test_batch_limit_exceeded_single_symbol_provider() {
             max,
             actual,
         }) => {
-            assert_eq!(provider, ProviderKind::Binance);
+            assert_eq!(provider, VenueId::Binance);
             assert_eq!(max, 1);
             assert_eq!(actual, 2);
         }
@@ -972,7 +947,7 @@ async fn test_rate_limit_429_with_retry_after() {
             provider,
             retry_after,
         } => {
-            assert_eq!(provider, ProviderKind::Binance);
+            assert_eq!(provider, VenueId::Binance);
             assert_eq!(retry_after, Some(Duration::from_secs(30)));
         }
         other => panic!("expected RateLimit error, got {other:?}"),
@@ -999,7 +974,7 @@ async fn test_request_timeout() {
 
     match err {
         RestQuoteError::Timeout { provider } => {
-            assert_eq!(provider, ProviderKind::Binance);
+            assert_eq!(provider, VenueId::Binance);
         }
         other => panic!("expected Timeout error, got {other:?}"),
     }
@@ -1029,7 +1004,7 @@ async fn test_payload_too_large() {
             max,
             actual,
         } => {
-            assert_eq!(provider, ProviderKind::Binance);
+            assert_eq!(provider, VenueId::Binance);
             assert_eq!(max, 8 * 1024 * 1024);
             assert!(actual > 8 * 1024 * 1024);
         }
@@ -1056,19 +1031,18 @@ async fn test_foreign_origin_redirect_disallowed() {
     let err = client.fetch(&request).await.unwrap_err();
 
     match err {
-        RestQuoteError::HttpTransport {
+        RestQuoteError::Transport {
             provider,
-            status: _,
             message,
-            retry_after: _,
+            source: _,
         } => {
-            assert_eq!(provider, ProviderKind::Binance);
+            assert_eq!(provider, VenueId::Binance);
             assert!(
                 message.contains("redirect") || message.contains("foreign-origin"),
                 "unexpected transport error details: {message}"
             );
         }
-        other => panic!("expected HttpTransport error for foreign redirect, got {other:?}"),
+        other => panic!("expected Transport error for foreign redirect, got {other:?}"),
     }
 }
 

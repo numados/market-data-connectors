@@ -8,16 +8,27 @@ use std::fmt;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum VenueId {
+    /// Binance exchange venue.
     Binance,
+    /// Legacy Coinbase Exchange / Pro venue.
     Coinbase,
+    /// Coinbase Advanced Trade venue.
     CoinbaseAdvanced,
+    /// Kraken cryptocurrency exchange.
     Kraken,
+    /// Gate.io cryptocurrency exchange.
     Gateio,
+    /// Bitstamp cryptocurrency exchange.
     Bitstamp,
+    /// Bitfinex cryptocurrency exchange.
     Bitfinex,
+    /// LMAX Exchange (FX / Digital).
     Lmax,
+    /// Vereinigte Wirtschaftsdienste (VWD) market data feed.
     Vwd,
+    /// Huobi / HTX cryptocurrency exchange.
     Huobi,
+    /// European Central Bank reference FX feed via Frankfurter API.
     FrankfurterEcb,
 }
 

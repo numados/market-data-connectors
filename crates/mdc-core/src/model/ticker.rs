@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Best bid and best ask price levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTicker {
+    /// Current best bid price level.
     pub best_bid: PriceLevel,
+    /// Current best ask price level.
     pub best_ask: PriceLevel,
     /// Venue update id when provided.
     pub update_id: Option<u64>,

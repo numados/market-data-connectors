@@ -1,6 +1,6 @@
 //! Coinbase Exchange REST quote snapshot decoder.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -29,16 +29,16 @@ pub fn coinbase_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuo
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Coinbase,
+            provider: VenueId::Coinbase,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!("products/{}/book?level=1", sym.as_str());
-    build_url(ProviderKind::Coinbase, base, &path)
+    build_url(VenueId::Coinbase, base, &path)
 }
 
 /// Parses Coinbase Exchange level 1 book JSON into a validated `SymbolQuoteResult`.
 pub fn parse_coinbase_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -161,7 +161,7 @@ pub fn parse_coinbase_quote(
 /// Creates a default HTTP REST quote snapshot client for Coinbase Exchange.
 pub fn coinbase_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Coinbase,
+        VenueId::Coinbase,
         DEFAULT_COINBASE_QUOTE_ENDPOINT,
         1,
         coinbase_quote_url,
@@ -194,8 +194,7 @@ mod tests {
     fn test_parse_coinbase_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/valid.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res =
-            parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -213,8 +212,7 @@ mod tests {
     fn test_parse_coinbase_indicative() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/indicative.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res =
-            parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -226,8 +224,7 @@ mod tests {
     fn test_parse_coinbase_empty() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/empty.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res =
-            parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -242,8 +239,7 @@ mod tests {
     fn test_parse_coinbase_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/crossed.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res =
-            parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -258,7 +254,7 @@ mod tests {
     fn test_parse_coinbase_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/malformed.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res = parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100));
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100));
         assert!(matches!(res, Err(RestQuoteError::InvalidEnvelope { .. })));
     }
 
@@ -266,8 +262,7 @@ mod tests {
     fn test_parse_coinbase_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/coinbase/provider_error.json");
         let syms = vec![Symbol::from("BTC-USD")];
-        let res =
-            parse_coinbase_quote(ProviderKind::Coinbase, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_coinbase_quote(VenueId::Coinbase, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {

@@ -1,6 +1,6 @@
 //! Binance Spot REST quote snapshot decoder.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -35,16 +35,16 @@ pub fn binance_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuot
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Binance,
+            provider: VenueId::Binance,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!("api/v3/ticker/bookTicker?symbol={}", sym.as_str());
-    build_url(ProviderKind::Binance, base, &path)
+    build_url(VenueId::Binance, base, &path)
 }
 
 /// Parses Binance Spot bookTicker JSON into a validated `SymbolQuoteResult`.
 pub fn parse_binance_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -163,7 +163,7 @@ pub fn parse_binance_quote(
 /// Creates a default HTTP REST quote snapshot client for Binance Spot.
 pub fn binance_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Binance,
+        VenueId::Binance,
         DEFAULT_BINANCE_QUOTE_ENDPOINT,
         1,
         binance_quote_url,
@@ -195,7 +195,7 @@ mod tests {
     fn test_parse_binance_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/binance/valid.json");
         let syms = vec![Symbol::from("BTCUSDT")];
-        let res = parse_binance_quote(ProviderKind::Binance, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_binance_quote(VenueId::Binance, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -211,7 +211,7 @@ mod tests {
     fn test_parse_binance_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/binance/crossed.json");
         let syms = vec![Symbol::from("BTCUSDT")];
-        let res = parse_binance_quote(ProviderKind::Binance, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_binance_quote(VenueId::Binance, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert!(!res[0].is_available());
         assert_eq!(
@@ -227,7 +227,7 @@ mod tests {
     fn test_parse_binance_missing() {
         let json = include_str!("../../tests/fixtures/rest_quote/binance/missing.json");
         let syms = vec![Symbol::from("BTCUSDT")];
-        let res = parse_binance_quote(ProviderKind::Binance, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_binance_quote(VenueId::Binance, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert!(!res[0].is_available());
         assert_eq!(
@@ -243,7 +243,7 @@ mod tests {
     fn test_parse_binance_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/binance/malformed.json");
         let syms = vec![Symbol::from("BTCUSDT")];
-        let res = parse_binance_quote(ProviderKind::Binance, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_binance_quote(VenueId::Binance, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert!(!res[0].is_available());
         assert_eq!(
@@ -259,7 +259,7 @@ mod tests {
     fn test_parse_binance_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/binance/provider_error.json");
         let syms = vec![Symbol::from("BTCUSDT")];
-        let res = parse_binance_quote(ProviderKind::Binance, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_binance_quote(VenueId::Binance, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert!(!res[0].is_available());
         match &res[0] {

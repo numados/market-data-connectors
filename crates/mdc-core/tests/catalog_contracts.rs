@@ -369,3 +369,46 @@ fn test_instrument_catalog_runtime_independent_execution() {
         _ => panic!("expected ready catalog result"),
     }
 }
+
+#[test]
+fn test_catalog_error_transport_and_http_status_source_chain() {
+    use mdc_core::ArcError;
+    use std::time::Duration;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("connection reset by peer")]
+    struct TcpError;
+
+    let arc_err = ArcError::new(TcpError);
+    let transport_err = CatalogError::Transport {
+        provider: ProviderKind::Kraken,
+        message: "read tcp stream failed".to_string(),
+        source: Some(arc_err),
+    };
+
+    assert!(
+        transport_err
+            .to_string()
+            .contains("transport error on kraken: read tcp stream failed")
+    );
+    assert!(std::error::Error::source(&transport_err).is_some());
+    assert_eq!(
+        std::error::Error::source(&transport_err)
+            .unwrap()
+            .to_string(),
+        "connection reset by peer"
+    );
+
+    let http_err = CatalogError::HttpStatus {
+        provider: ProviderKind::Binance,
+        status: 502,
+        message: "bad gateway".to_string(),
+        retry_after: Some(Duration::from_secs(5)),
+        source: None,
+    };
+    assert!(
+        http_err
+            .to_string()
+            .contains("http status error on binance: status 502, message: bad gateway")
+    );
+}

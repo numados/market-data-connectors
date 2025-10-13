@@ -1,6 +1,6 @@
 //! Gate.io REST quote snapshot decoder.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -35,16 +35,16 @@ pub fn gateio_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuote
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Gateio,
+            provider: VenueId::Gateio,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!("api/v4/spot/tickers?currency_pair={}", sym.as_str());
-    build_url(ProviderKind::Gateio, base, &path)
+    build_url(VenueId::Gateio, base, &path)
 }
 
 /// Parses Gate.io spot tickers JSON into a validated `SymbolQuoteResult`.
 pub fn parse_gateio_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -166,7 +166,7 @@ pub fn parse_gateio_quote(
 /// Creates a default HTTP REST quote snapshot client for Gate.io.
 pub fn gateio_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Gateio,
+        VenueId::Gateio,
         DEFAULT_GATEIO_QUOTE_ENDPOINT,
         1,
         gateio_quote_url,
@@ -198,7 +198,7 @@ mod tests {
     fn test_parse_gateio_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/gateio/valid.json");
         let syms = vec![Symbol::from("BTC_USDT")];
-        let res = parse_gateio_quote(ProviderKind::Gateio, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_gateio_quote(VenueId::Gateio, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -214,7 +214,7 @@ mod tests {
     fn test_parse_gateio_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/gateio/crossed.json");
         let syms = vec![Symbol::from("BTC_USDT")];
-        let res = parse_gateio_quote(ProviderKind::Gateio, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_gateio_quote(VenueId::Gateio, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -229,7 +229,7 @@ mod tests {
     fn test_parse_gateio_missing() {
         let json = include_str!("../../tests/fixtures/rest_quote/gateio/missing.json");
         let syms = vec![Symbol::from("BTC_USDT")];
-        let res = parse_gateio_quote(ProviderKind::Gateio, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_gateio_quote(VenueId::Gateio, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -244,7 +244,7 @@ mod tests {
     fn test_parse_gateio_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/gateio/malformed.json");
         let syms = vec![Symbol::from("BTC_USDT")];
-        let res = parse_gateio_quote(ProviderKind::Gateio, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_gateio_quote(VenueId::Gateio, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -259,7 +259,7 @@ mod tests {
     fn test_parse_gateio_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/gateio/provider_error.json");
         let syms = vec![Symbol::from("BTC_USDT")];
-        let res = parse_gateio_quote(ProviderKind::Gateio, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_gateio_quote(VenueId::Gateio, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {

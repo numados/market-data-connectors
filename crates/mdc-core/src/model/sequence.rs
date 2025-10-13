@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Venues with a single sequence number per message set `first == last`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SequenceRange {
+    /// First exchange sequence or update ID covered by this range (inclusive).
     pub first: u64,
+    /// Last exchange sequence or update ID covered by this range (inclusive).
     pub last: u64,
 }
 

@@ -1,6 +1,6 @@
 //! Huobi/HTX REST quote snapshot decoder.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -38,19 +38,19 @@ pub fn huobi_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuoteE
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Huobi,
+            provider: VenueId::Huobi,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!(
         "market/detail/merged?symbol={}",
         sym.as_str().to_lowercase()
     );
-    build_url(ProviderKind::Huobi, base, &path)
+    build_url(VenueId::Huobi, base, &path)
 }
 
 /// Parses Huobi detail/merged JSON into a validated `SymbolQuoteResult`.
 pub fn parse_huobi_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -162,7 +162,7 @@ pub fn parse_huobi_quote(
 /// Creates a default HTTP REST quote snapshot client for Huobi/HTX.
 pub fn huobi_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Huobi,
+        VenueId::Huobi,
         DEFAULT_HUOBI_QUOTE_ENDPOINT,
         1,
         huobi_quote_url,
@@ -195,7 +195,7 @@ mod tests {
     fn test_parse_huobi_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/huobi/valid.json");
         let syms = vec![Symbol::from("btcusdt")];
-        let res = parse_huobi_quote(ProviderKind::Huobi, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_huobi_quote(VenueId::Huobi, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -213,7 +213,7 @@ mod tests {
     fn test_parse_huobi_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/huobi/crossed.json");
         let syms = vec![Symbol::from("btcusdt")];
-        let res = parse_huobi_quote(ProviderKind::Huobi, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_huobi_quote(VenueId::Huobi, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -228,7 +228,7 @@ mod tests {
     fn test_parse_huobi_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/huobi/malformed.json");
         let syms = vec![Symbol::from("btcusdt")];
-        let res = parse_huobi_quote(ProviderKind::Huobi, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_huobi_quote(VenueId::Huobi, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -243,7 +243,7 @@ mod tests {
     fn test_parse_huobi_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/huobi/provider_error.json");
         let syms = vec![Symbol::from("btcusdt")];
-        let res = parse_huobi_quote(ProviderKind::Huobi, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_huobi_quote(VenueId::Huobi, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {

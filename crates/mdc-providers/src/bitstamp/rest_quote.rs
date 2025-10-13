@@ -1,6 +1,6 @@
 //! Bitstamp REST quote snapshot decoder.
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -30,16 +30,16 @@ pub fn bitstamp_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuo
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Bitstamp,
+            provider: VenueId::Bitstamp,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!("api/v2/ticker/{}/", sym.as_str());
-    build_url(ProviderKind::Bitstamp, base, &path)
+    build_url(VenueId::Bitstamp, base, &path)
 }
 
 /// Parses Bitstamp ticker JSON into a validated `SymbolQuoteResult`.
 pub fn parse_bitstamp_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -139,7 +139,7 @@ pub fn parse_bitstamp_quote(
 /// Creates a default HTTP REST quote snapshot client for Bitstamp.
 pub fn bitstamp_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Bitstamp,
+        VenueId::Bitstamp,
         DEFAULT_BITSTAMP_QUOTE_ENDPOINT,
         1,
         bitstamp_quote_url,
@@ -171,8 +171,7 @@ mod tests {
     fn test_parse_bitstamp_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitstamp/valid.json");
         let syms = vec![Symbol::from("btcusd")];
-        let res =
-            parse_bitstamp_quote(ProviderKind::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitstamp_quote(VenueId::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -189,8 +188,7 @@ mod tests {
     fn test_parse_bitstamp_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitstamp/crossed.json");
         let syms = vec![Symbol::from("btcusd")];
-        let res =
-            parse_bitstamp_quote(ProviderKind::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitstamp_quote(VenueId::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -205,8 +203,7 @@ mod tests {
     fn test_parse_bitstamp_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitstamp/malformed.json");
         let syms = vec![Symbol::from("btcusd")];
-        let res =
-            parse_bitstamp_quote(ProviderKind::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitstamp_quote(VenueId::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -221,8 +218,7 @@ mod tests {
     fn test_parse_bitstamp_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/bitstamp/provider_error.json");
         let syms = vec![Symbol::from("btcusd")];
-        let res =
-            parse_bitstamp_quote(ProviderKind::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_bitstamp_quote(VenueId::Bitstamp, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {

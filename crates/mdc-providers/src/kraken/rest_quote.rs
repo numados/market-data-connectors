@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use mdc_core::catalog::ProviderKind;
+use mdc_core::model::VenueId;
 use mdc_core::model::{Symbol, UnixNanos};
 use mdc_core::rest_quote::{
     QuoteQuality, QuoteSnapshot, QuoteUnavailable, RestQuoteError, SymbolQuoteResult,
@@ -34,16 +34,16 @@ pub fn kraken_quote_url(base: &Url, symbols: &[Symbol]) -> Result<Url, RestQuote
     let sym = symbols
         .first()
         .ok_or_else(|| RestQuoteError::MalformedItem {
-            provider: ProviderKind::Kraken,
+            provider: VenueId::Kraken,
             reason: "empty symbols list".to_string(),
         })?;
     let path = format!("0/public/Ticker?pair={}", sym.as_str());
-    build_url(ProviderKind::Kraken, base, &path)
+    build_url(VenueId::Kraken, base, &path)
 }
 
 /// Parses Kraken public Ticker JSON into a validated `SymbolQuoteResult`.
 pub fn parse_kraken_quote(
-    provider: ProviderKind,
+    provider: VenueId,
     symbols: &[Symbol],
     payload: &str,
     received_ts: UnixNanos,
@@ -177,7 +177,7 @@ pub fn parse_kraken_quote(
 /// Creates a default HTTP REST quote snapshot client for Kraken.
 pub fn kraken_rest_quote_client() -> Result<HttpRestQuoteClient, RestQuoteError> {
     HttpRestQuoteClient::new(
-        ProviderKind::Kraken,
+        VenueId::Kraken,
         DEFAULT_KRAKEN_QUOTE_ENDPOINT,
         1,
         kraken_quote_url,
@@ -209,7 +209,7 @@ mod tests {
     fn test_parse_kraken_valid() {
         let json = include_str!("../../tests/fixtures/rest_quote/kraken/valid.json");
         let syms = vec![Symbol::from("XXBTZUSD")];
-        let res = parse_kraken_quote(ProviderKind::Kraken, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_kraken_quote(VenueId::Kraken, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         let item = &res[0];
         assert!(item.is_available());
@@ -225,7 +225,7 @@ mod tests {
     fn test_parse_kraken_crossed() {
         let json = include_str!("../../tests/fixtures/rest_quote/kraken/crossed.json");
         let syms = vec![Symbol::from("XXBTZUSD")];
-        let res = parse_kraken_quote(ProviderKind::Kraken, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_kraken_quote(VenueId::Kraken, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -240,7 +240,7 @@ mod tests {
     fn test_parse_kraken_empty() {
         let json = include_str!("../../tests/fixtures/rest_quote/kraken/empty.json");
         let syms = vec![Symbol::from("XXBTZUSD")];
-        let res = parse_kraken_quote(ProviderKind::Kraken, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_kraken_quote(VenueId::Kraken, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -255,7 +255,7 @@ mod tests {
     fn test_parse_kraken_malformed() {
         let json = include_str!("../../tests/fixtures/rest_quote/kraken/malformed.json");
         let syms = vec![Symbol::from("XXBTZUSD")];
-        let res = parse_kraken_quote(ProviderKind::Kraken, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_kraken_quote(VenueId::Kraken, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(
             res[0],
@@ -270,7 +270,7 @@ mod tests {
     fn test_parse_kraken_provider_error() {
         let json = include_str!("../../tests/fixtures/rest_quote/kraken/provider_error.json");
         let syms = vec![Symbol::from("XXBTZUSD")];
-        let res = parse_kraken_quote(ProviderKind::Kraken, &syms, json, UnixNanos(100)).unwrap();
+        let res = parse_kraken_quote(VenueId::Kraken, &syms, json, UnixNanos(100)).unwrap();
         assert_eq!(res.len(), 1);
         match &res[0] {
             SymbolQuoteResult::Unavailable {
