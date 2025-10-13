@@ -122,7 +122,7 @@ async fn test_rest_snapshot_reconciliation_flow() {
     )
     .expect("create client");
 
-    let mut controller = ResyncController::new(100);
+    let mut controller = ResyncController::new(100).expect("valid controller");
     assert_eq!(controller.state(), SyncState::BufferingDiffs);
 
     // Buffer delta that bridges snapshot lastUpdateId (990..1010)

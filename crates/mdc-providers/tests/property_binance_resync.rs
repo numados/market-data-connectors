@@ -58,7 +58,7 @@ proptest! {
         deltas_before in 0usize..10,
         deltas_after in 1usize..20,
     ) {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
         prop_assert_eq!(controller.state(), SyncState::BufferingDiffs);
 
         // Buffer some old deltas that arrive before or around snapshot
@@ -117,7 +117,7 @@ proptest! {
         start_id in 100u64..10_000,
         gap_size in 2u64..100,
     ) {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
         let bridge_range = SequenceRange::new(start_id, start_id + 5);
         let _ = controller.buffer(dummy_delta(bridge_range.first, bridge_range.last));
 
@@ -143,7 +143,7 @@ proptest! {
         earliest_buffered_first in 100u64..1000,
         stale_offset in 5u64..50,
     ) {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
         // Buffer delta starting at earliest_buffered_first
         let _ = controller.buffer(dummy_delta(earliest_buffered_first, earliest_buffered_first + 10));
 

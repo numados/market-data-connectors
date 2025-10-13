@@ -25,8 +25,9 @@ pub use integrity::{
 pub use model::*;
 pub use rest_quote::*;
 pub use resync::{
-    BufferOverflow, CooldownPolicy, DeltaDecision, ResyncController, ResyncDecision, ResyncError,
-    ResyncFailure, ResyncPolicy, SnapshotOutcome, SyncState, TimeoutQuarantinePolicy,
+    BufferError, BufferOverflow, ConfigError, CooldownPolicy, DeltaDecision, ResyncController,
+    ResyncDecision, ResyncError, ResyncFailure, ResyncPolicy, SnapshotOutcome, SyncState,
+    TimeoutQuarantinePolicy,
 };
 pub use sink::{
     BookKind, EventContext, FnSink, MarketDataSink, Owned, RawLevelText, StreamingSink, VecSink,

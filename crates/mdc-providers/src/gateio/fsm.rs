@@ -27,10 +27,14 @@ pub struct SymbolFsm {
 impl SymbolFsm {
     /// Creates a new `SymbolFsm` for the given symbol.
     pub fn new(symbol: Symbol, tag: SymbolTag, config: &GateioConfig) -> Self {
+        #[allow(clippy::expect_used)] // capacity clamped to >= 1
+        let controller =
+            mdc_core::resync::ResyncController::new(config.resync_buffer_capacity.max(1))
+                .expect("resync_buffer_capacity clamped to >= 1");
         Self {
             symbol,
             tag,
-            controller: mdc_core::resync::ResyncController::new(config.resync_buffer_capacity),
+            controller,
             cooldown: CooldownPolicy::new(config.resync_timeout),
         }
     }
@@ -115,7 +119,11 @@ impl SymbolFsm {
 
     /// Resets the FSM on disconnect.
     pub fn reset(&mut self, config: &GateioConfig) {
-        self.controller = mdc_core::resync::ResyncController::new(config.resync_buffer_capacity);
+        #[allow(clippy::expect_used)] // capacity clamped to >= 1
+        let controller =
+            mdc_core::resync::ResyncController::new(config.resync_buffer_capacity.max(1))
+                .expect("resync_buffer_capacity clamped to >= 1");
+        self.controller = controller;
     }
 }
 

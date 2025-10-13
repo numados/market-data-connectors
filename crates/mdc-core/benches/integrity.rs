@@ -1,4 +1,5 @@
 //! Criterion benchmarks for mdc-core integrity and resync hot path.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use mdc_core::integrity::SequenceTracker;
@@ -25,7 +26,7 @@ fn bench_sequence_tracker_check(c: &mut Criterion) {
 }
 
 fn bench_resync_controller_check_delta_in_sync(c: &mut Criterion) {
-    let mut controller = ResyncController::new(5000);
+    let mut controller = ResyncController::new(5000).expect("valid capacity");
     let snap = MarketEvent {
         exchange_ts: Some(UnixNanos(1_000)),
         received_ts: UnixNanos(1_000),
@@ -70,7 +71,7 @@ fn bench_resync_controller_on_snapshot_5000(c: &mut Criterion) {
 
     c.bench_function("resync_controller_on_snapshot_5000_deltas", |b| {
         b.iter(|| {
-            let mut controller = ResyncController::new(6000);
+            let mut controller = ResyncController::new(6000).expect("valid capacity");
             for d in &template_deltas {
                 let _ = controller.buffer(d.clone());
             }

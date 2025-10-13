@@ -70,7 +70,7 @@ proptest! {
         max_buffer in 5usize..100,
         ops in proptest::collection::vec(arb_op(), 1..60),
     ) {
-        let mut controller = ResyncController::new(max_buffer);
+        let mut controller = ResyncController::new(max_buffer).expect("valid max_buffer");
         let mut prev_emitted_last: Option<u64> = None;
 
         for op in ops {

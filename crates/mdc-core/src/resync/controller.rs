@@ -35,10 +35,30 @@ pub enum DeltaDecision {
 }
 
 /// Indicates that the delta buffer exceeded its capacity and was purged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("in-flight delta buffer capacity exceeded; dropped {dropped} deltas")]
 pub struct BufferOverflow {
     /// Number of buffered deltas that were dropped upon purge.
     pub dropped: usize,
+}
+
+/// Errors occurring when attempting to buffer an incoming delta.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BufferError {
+    /// Controller is not in [`SyncState::BufferingDiffs`].
+    #[error("cannot buffer delta while controller is in state {0:?}")]
+    InvalidState(SyncState),
+    /// In-flight delta buffer capacity exceeded.
+    #[error(transparent)]
+    Overflow(#[from] BufferOverflow),
+}
+
+/// Configuration error when constructing a [`ResyncController`].
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// The maximum delta buffer capacity must be at least 1.
+    #[error("max_buffer must be at least 1, got 0")]
+    InvalidMaxBuffer,
 }
 
 /// Result of evaluating an authoritative REST snapshot against buffered deltas.
@@ -95,13 +115,19 @@ pub struct ResyncController {
 
 impl ResyncController {
     /// Creates a new resync controller starting in [`SyncState::BufferingDiffs`].
-    pub fn new(max_buffer: usize) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidMaxBuffer`] if `max_buffer == 0`.
+    pub fn new(max_buffer: usize) -> Result<Self, ConfigError> {
+        if max_buffer == 0 {
+            return Err(ConfigError::InvalidMaxBuffer);
+        }
+        Ok(Self {
             state: SyncState::BufferingDiffs,
             max_buffer,
             buffer: VecDeque::with_capacity(max_buffer.min(1024)),
             tracker: SequenceTracker::new(),
-        }
+        })
     }
 
     /// Returns the current synchronization state.
@@ -178,19 +204,22 @@ impl ResyncController {
 
     /// Step 2: Buffers an owned delta while in [`SyncState::BufferingDiffs`].
     ///
-    /// If buffer capacity is exceeded, the buffer is purged and [`BufferOverflow`]
+    /// # Preconditions
+    /// - The controller must be in [`SyncState::BufferingDiffs`]. Returns [`BufferError::InvalidState`] otherwise.
+    /// - Deltas should arrive in chronological sequence order (FIFO). During reconciliation,
+    ///   [`Self::on_snapshot`] normalizes retained sequence ranges to ensure deterministic replay.
+    ///
+    /// If buffer capacity is exceeded, the buffer is purged and [`BufferError::Overflow`]
     /// is returned in `Err`, prompting the caller to restart the snapshot request.
-    pub fn buffer(&mut self, event: MarketEvent<L2Delta>) -> Result<(), BufferOverflow> {
-        debug_assert_eq!(
-            self.state,
-            SyncState::BufferingDiffs,
-            "buffer called while InSync"
-        );
+    pub fn buffer(&mut self, event: MarketEvent<L2Delta>) -> Result<(), BufferError> {
+        if self.state != SyncState::BufferingDiffs {
+            return Err(BufferError::InvalidState(self.state));
+        }
 
         if self.buffer.len() >= self.max_buffer {
             let dropped = self.buffer.len();
             self.buffer.clear();
-            return Err(BufferOverflow { dropped });
+            return Err(BufferError::Overflow(BufferOverflow { dropped }));
         }
 
         self.buffer.push_back(event);
@@ -203,9 +232,9 @@ impl ResyncController {
     /// 1. If already [`SyncState::InSync`], return [`SnapshotOutcome::Ignored`].
     /// 2. Validate that `snapshot` has `last_update_id` ($L$).
     /// 3. Verify all buffered deltas have sequence ranges.
-    /// 4. If the first delta after $L$ has $first > L + 1$, the snapshot is stale relative to the buffer.
-    ///    Return [`SnapshotOutcome::StaleSnapshot`]; buffer remains intact.
-    /// 5. Pop all deltas with $last \le L$.
+    /// 4. Min/max normalize retained ranges: if the earliest retained delta after $L$ has $first > L + 1$,
+    ///    the snapshot is stale relative to the buffer. Return [`SnapshotOutcome::StaleSnapshot`]; buffer remains intact.
+    /// 5. Retain all deltas with $last > L$ and sort them by sequence $first$ to enforce FIFO order.
     /// 6. Initialize `SequenceTracker` with $L$, replay remaining deltas through tracker,
     ///    transition to [`SyncState::InSync`], and return [`SnapshotOutcome::Synchronized`].
     pub fn on_snapshot(
@@ -228,36 +257,35 @@ impl ResyncController {
             }
         }
 
-        // Find the first delta that extends past the snapshot
-        let first_retained_idx = self.buffer.iter().position(|d| match d.kind.sequence {
+        // Min/max normalize: find the earliest sequence start among all retained deltas extending past snapshot_id
+        let min_retained_first = self
+            .buffer
+            .iter()
+            .filter_map(|d| d.kind.sequence)
+            .filter(|seq| seq.last > snapshot_id)
+            .map(|seq| seq.first)
+            .min();
+
+        if let Some(earliest_first) = min_retained_first {
+            let expected_max_first = snapshot_id.saturating_add(1);
+            if earliest_first > expected_max_first {
+                return Ok(SnapshotOutcome::StaleSnapshot {
+                    snapshot_id,
+                    first_buffered: earliest_first,
+                });
+            }
+        }
+
+        // Retain only deltas extending past snapshot_id
+        self.buffer.retain(|d| match d.kind.sequence {
             Some(seq) => seq.last > snapshot_id,
             None => false,
         });
 
-        if let Some(idx) = first_retained_idx {
-            if let Some(first_delta) = self.buffer.get(idx) {
-                if let Some(seq) = first_delta.kind.sequence {
-                    let expected_max_first = snapshot_id.saturating_add(1);
-                    if seq.first > expected_max_first {
-                        return Ok(SnapshotOutcome::StaleSnapshot {
-                            snapshot_id,
-                            first_buffered: seq.first,
-                        });
-                    }
-                }
-            }
-        }
-
-        // Drop deltas older than or equal to snapshot_id
-        while let Some(front) = self.buffer.front() {
-            if let Some(seq) = front.kind.sequence {
-                if seq.last <= snapshot_id {
-                    self.buffer.pop_front();
-                    continue;
-                }
-            }
-            break;
-        }
+        // Normalize order: sort retained deltas by sequence `first` to guarantee deterministic contiguous replay
+        self.buffer
+            .make_contiguous()
+            .sort_by_key(|d| d.kind.sequence.map(|s| s.first).unwrap_or(0));
 
         // Anchor tracker to snapshot
         self.tracker.reset_to(snapshot_id);
@@ -334,8 +362,54 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_max_buffer() {
+        assert_eq!(
+            ResyncController::new(0).unwrap_err(),
+            ConfigError::InvalidMaxBuffer
+        );
+    }
+
+    #[test]
+    fn buffer_while_in_sync_returns_error() {
+        let mut controller = ResyncController::new(10).expect("valid controller");
+        let snap = make_snapshot(Some(50));
+        controller.on_snapshot(snap).expect("snap");
+        assert_eq!(controller.state(), SyncState::InSync);
+
+        let err = controller
+            .buffer(make_delta(51, 52))
+            .expect_err("should reject buffer while InSync");
+        assert_eq!(err, BufferError::InvalidState(SyncState::InSync));
+    }
+
+    #[test]
+    fn on_snapshot_normalizes_out_of_order_deltas() {
+        let mut controller = ResyncController::new(10).expect("valid controller");
+
+        // Buffer out-of-order deltas: [105, 106], [101, 102], [103, 104]
+        controller.buffer(make_delta(105, 106)).expect("d3");
+        controller.buffer(make_delta(101, 102)).expect("d1");
+        controller.buffer(make_delta(103, 104)).expect("d2");
+
+        let snap = make_snapshot(Some(100));
+        let outcome = controller.on_snapshot(snap).expect("on_snapshot");
+
+        match outcome {
+            SnapshotOutcome::Synchronized { replay, .. } => {
+                assert_eq!(replay.len(), 3);
+                assert_eq!(replay[0].kind.sequence, Some(SequenceRange::new(101, 102)));
+                assert_eq!(replay[1].kind.sequence, Some(SequenceRange::new(103, 104)));
+                assert_eq!(replay[2].kind.sequence, Some(SequenceRange::new(105, 106)));
+            }
+            other => panic!("expected Synchronized, got {other:?}"),
+        }
+        assert_eq!(controller.state(), SyncState::InSync);
+        assert_eq!(controller.tracker().current(), Some(106));
+    }
+
+    #[test]
     fn happy_path_reconciliation_and_transition_to_insync() {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
         assert_eq!(controller.state(), SyncState::BufferingDiffs);
 
         // Delta 1 arrives while buffering
@@ -401,7 +475,7 @@ mod tests {
 
     #[test]
     fn stale_snapshot_rejection_leaves_buffer_intact() {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
 
         // Buffered delta covers [105, 110]
         controller.buffer(make_delta(105, 110)).expect("buffer");
@@ -436,7 +510,7 @@ mod tests {
 
     #[test]
     fn duplicate_snapshot_in_sync_is_ignored() {
-        let mut controller = ResyncController::new(100);
+        let mut controller = ResyncController::new(100).expect("valid controller");
         let snap1 = make_snapshot(Some(100));
         let outcome1 = controller.on_snapshot(snap1).expect("snap1");
         assert!(matches!(outcome1, SnapshotOutcome::Synchronized { .. }));
@@ -450,24 +524,27 @@ mod tests {
 
     #[test]
     fn buffer_overflow_purges_buffer() {
-        let mut controller = ResyncController::new(3);
+        let mut controller = ResyncController::new(3).expect("valid controller");
 
         controller.buffer(make_delta(1, 2)).expect("1");
         controller.buffer(make_delta(3, 4)).expect("2");
         controller.buffer(make_delta(5, 6)).expect("3");
         assert_eq!(controller.buffered_count(), 3);
 
-        // 4th delta exceeds capacity 3 -> Err(BufferOverflow { dropped: 3 })
+        // 4th delta exceeds capacity 3 -> Err(BufferError::Overflow(BufferOverflow { dropped: 3 }))
         let overflow = controller
             .buffer(make_delta(7, 8))
             .expect_err("should overflow");
-        assert_eq!(overflow, BufferOverflow { dropped: 3 });
+        assert_eq!(
+            overflow,
+            BufferError::Overflow(BufferOverflow { dropped: 3 })
+        );
         assert_eq!(controller.buffered_count(), 0);
     }
 
     #[test]
     fn unsequenced_snapshot_returns_error() {
-        let mut controller = ResyncController::new(10);
+        let mut controller = ResyncController::new(10).expect("valid controller");
         let unsequenced_snap = make_snapshot(None);
         let err = controller
             .on_snapshot(unsequenced_snap)
@@ -477,7 +554,7 @@ mod tests {
 
     #[test]
     fn unsequenced_delta_returns_error() {
-        let mut controller = ResyncController::new(10);
+        let mut controller = ResyncController::new(10).expect("valid controller");
         let unsequenced_delta = MarketEvent {
             exchange_ts: Some(UnixNanos(1_000)),
             received_ts: UnixNanos(1_000),
@@ -497,7 +574,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state_and_buffer() {
-        let mut controller = ResyncController::new(10);
+        let mut controller = ResyncController::new(10).expect("valid controller");
         controller.buffer(make_delta(1, 2)).expect("buffer");
         let snap = make_snapshot(Some(2));
         controller.on_snapshot(snap).expect("snap");

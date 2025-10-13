@@ -73,10 +73,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut controllers: HashMap<Symbol, ResyncController> = symbols
         .iter()
         .map(|(s, _)| {
-            (
-                s.clone(),
-                ResyncController::new(config.resync_buffer_capacity),
-            )
+            #[allow(clippy::expect_used)] // capacity clamped to >= 1
+            let ctrl = ResyncController::new(config.resync_buffer_capacity.max(1))
+                .expect("resync_buffer_capacity clamped to >= 1");
+            (s.clone(), ctrl)
         })
         .collect();
 
