@@ -13,5 +13,8 @@ pub use conformance::{MrsConsumerHarness, MrsConsumerStats};
 pub use fixture::{load_fixture, load_fixture_bytes};
 pub use rest::MockRest;
 pub use rest_quote::MockRestQuoteServer;
-pub use sink::{NoopStreamingSink, RecordedEvent, RecordingSink};
+pub use sink::{
+    FaultInjectingSink, FaultInjectionPoint, InjectedSinkError, NoopStreamingSink, RecordedEvent,
+    RecordingSink,
+};
 pub use ws::{MockWsServer, WsAction};

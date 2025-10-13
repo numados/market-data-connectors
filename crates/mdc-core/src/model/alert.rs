@@ -53,6 +53,8 @@ pub enum IntegrityAlert {
         /// Reason the connection terminated.
         reason: DisconnectKind,
     },
+    /// Downstream sink failed to accept an event. Emission stops and the connection is closed.
+    SinkFailure,
 }
 
 /// Cause category when a data source fails.
@@ -125,6 +127,7 @@ mod tests {
             IntegrityAlert::ConnectionLost {
                 reason: DisconnectKind::TransportError,
             },
+            IntegrityAlert::SinkFailure,
         ];
 
         for alert in alerts {

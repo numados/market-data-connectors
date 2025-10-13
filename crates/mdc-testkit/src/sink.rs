@@ -130,6 +130,7 @@ pub enum RecordedEvent {
 #[derive(Debug, Clone, Default)]
 pub struct RecordingSink {
     events: Arc<Mutex<Vec<RecordedEvent>>>,
+    stamps: Arc<Mutex<Vec<mdc_core::DeliveryStamp>>>,
 }
 
 impl RecordingSink {
@@ -137,6 +138,7 @@ impl RecordingSink {
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
+            stamps: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -144,6 +146,15 @@ impl RecordingSink {
     pub fn events(&self) -> Vec<RecordedEvent> {
         let guard = self
             .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone()
+    }
+
+    /// Returns a snapshot of all recorded delivery stamps in arrival order.
+    pub fn delivery_stamps(&self) -> Vec<mdc_core::DeliveryStamp> {
+        let guard = self
+            .stamps
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.clone()
@@ -173,13 +184,18 @@ impl RecordingSink {
             .collect()
     }
 
-    /// Clears all recorded events.
+    /// Clears all recorded events and delivery stamps.
     pub fn clear(&self) {
         let mut guard = self
             .events
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.clear();
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.clear();
     }
 
     /// Returns the number of events recorded.
@@ -209,6 +225,11 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             kind,
         });
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.push(ctx.delivery);
         Ok(())
     }
 
@@ -250,6 +271,11 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             trade: trade.clone(),
         });
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.push(ctx.delivery);
         Ok(())
     }
 
@@ -266,6 +292,11 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             ticker: *ticker,
         });
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.push(ctx.delivery);
         Ok(())
     }
 
@@ -282,6 +313,11 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             rate: *rate,
         });
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.push(ctx.delivery);
         Ok(())
     }
 
@@ -294,6 +330,302 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             alert,
         });
+        let mut stamp_guard = self
+            .stamps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        stamp_guard.push(ctx.delivery);
         Ok(())
+    }
+}
+
+/// Target streaming callback where a fault should be injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultInjectionPoint {
+    /// Never inject a fault (acts as normal recording sink).
+    Never,
+    /// Fail immediately on `begin_book`.
+    BeginBook,
+    /// Fail on the Nth `level` (1-indexed).
+    Level(usize),
+    /// Fail on `end_book`.
+    EndBook,
+    /// Fail on `trade`.
+    Trade,
+    /// Fail on `book_ticker`.
+    BookTicker,
+    /// Fail on `reference_rate`.
+    ReferenceRate,
+    /// Fail on `alert`.
+    Alert,
+}
+
+/// Error type returned by [`FaultInjectingSink`].
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("Fault injected by test sink at {point:?}")]
+pub struct InjectedSinkError {
+    /// The injection point that triggered this error.
+    pub point: FaultInjectionPoint,
+}
+
+/// A streaming sink that injects an error at a configured callback point
+/// and records all events accepted before and after the failure.
+#[derive(Debug, Clone)]
+pub struct FaultInjectingSink {
+    inner: RecordingSink,
+    fault_point: FaultInjectionPoint,
+    level_count: Arc<Mutex<usize>>,
+    tripped: Arc<Mutex<bool>>,
+}
+
+impl FaultInjectingSink {
+    /// Creates a new `FaultInjectingSink` with the specified injection point.
+    pub fn new(fault_point: FaultInjectionPoint) -> Self {
+        Self {
+            inner: RecordingSink::new(),
+            fault_point,
+            level_count: Arc::new(Mutex::new(0)),
+            tripped: Arc::new(Mutex::new(false)),
+        }
+    }
+
+    /// Returns all events recorded by the inner sink.
+    pub fn events(&self) -> Vec<RecordedEvent> {
+        self.inner.events()
+    }
+
+    /// Returns all alerts recorded by the inner sink.
+    pub fn alerts(&self) -> Vec<IntegrityAlert> {
+        self.inner.alerts()
+    }
+
+    /// Returns all delivery stamps recorded by the inner sink.
+    pub fn delivery_stamps(&self) -> Vec<mdc_core::DeliveryStamp> {
+        self.inner.delivery_stamps()
+    }
+
+    /// Returns `true` if the configured fault has tripped.
+    pub fn is_tripped(&self) -> bool {
+        *self.tripped.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl StreamingSink for FaultInjectingSink {
+    type Error = InjectedSinkError;
+
+    fn begin_book(&mut self, ctx: &EventContext<'_>, kind: BookKind) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::BeginBook {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::BeginBook,
+                });
+            }
+        }
+        let _ = self.inner.begin_book(ctx, kind);
+        Ok(())
+    }
+
+    fn level(&mut self, side: Side, price: Decimal, volume: Decimal) -> Result<(), Self::Error> {
+        if let FaultInjectionPoint::Level(n) = self.fault_point {
+            let mut count = self.level_count.lock().unwrap_or_else(|p| p.into_inner());
+            *count += 1;
+            if *count == n {
+                let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+                if !*tripped {
+                    *tripped = true;
+                    return Err(InjectedSinkError {
+                        point: FaultInjectionPoint::Level(n),
+                    });
+                }
+            }
+        }
+        let _ = self.inner.level(side, price, volume);
+        Ok(())
+    }
+
+    fn level_raw(
+        &mut self,
+        side: Side,
+        price: Decimal,
+        volume: Decimal,
+        raw: mdc_core::RawLevelText<'_>,
+    ) -> Result<(), Self::Error> {
+        if let FaultInjectionPoint::Level(n) = self.fault_point {
+            let mut count = self.level_count.lock().unwrap_or_else(|p| p.into_inner());
+            *count += 1;
+            if *count == n {
+                let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+                if !*tripped {
+                    *tripped = true;
+                    return Err(InjectedSinkError {
+                        point: FaultInjectionPoint::Level(n),
+                    });
+                }
+            }
+        }
+        let _ = self.inner.level_raw(side, price, volume, raw);
+        Ok(())
+    }
+
+    fn end_book(
+        &mut self,
+        ctx: &EventContext<'_>,
+        seq: Option<SequenceRange>,
+    ) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::EndBook {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::EndBook,
+                });
+            }
+        }
+        let _ = self.inner.end_book(ctx, seq);
+        Ok(())
+    }
+
+    fn trade(&mut self, ctx: &EventContext<'_>, trade: &Trade) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::Trade {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::Trade,
+                });
+            }
+        }
+        let _ = self.inner.trade(ctx, trade);
+        Ok(())
+    }
+
+    fn book_ticker(
+        &mut self,
+        ctx: &EventContext<'_>,
+        ticker: &BookTicker,
+    ) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::BookTicker {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::BookTicker,
+                });
+            }
+        }
+        let _ = self.inner.book_ticker(ctx, ticker);
+        Ok(())
+    }
+
+    fn reference_rate(
+        &mut self,
+        ctx: &EventContext<'_>,
+        rate: &ReferenceRate,
+    ) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::ReferenceRate {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::ReferenceRate,
+                });
+            }
+        }
+        let _ = self.inner.reference_rate(ctx, rate);
+        Ok(())
+    }
+
+    fn alert(&mut self, ctx: &EventContext<'_>, alert: IntegrityAlert) -> Result<(), Self::Error> {
+        if self.fault_point == FaultInjectionPoint::Alert {
+            let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+            if !*tripped {
+                *tripped = true;
+                return Err(InjectedSinkError {
+                    point: FaultInjectionPoint::Alert,
+                });
+            }
+        }
+        let _ = self.inner.alert(ctx, alert);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use mdc_core::{DeliveryStamp, RunId, SymbolTag, UnixNanos, VenueId};
+
+    fn make_ctx(sym: &Symbol, delivery: DeliveryStamp) -> EventContext<'_> {
+        EventContext {
+            venue: VenueId::Binance,
+            symbol: sym,
+            tag: SymbolTag::default(),
+            exchange_ts: None,
+            received_ts: UnixNanos(100),
+            connection_id: 1,
+            delivery,
+            source_sequence: None,
+        }
+    }
+
+    #[test]
+    fn fault_injecting_sink_triggers_at_points() {
+        let sym = Symbol::from("BTCUSDT");
+        let run = RunId::from_u128(1);
+        let stamp = DeliveryStamp::new(run, 1, 1);
+        let ctx = make_ctx(&sym, stamp);
+
+        // Fail at begin_book
+        let mut sink = FaultInjectingSink::new(FaultInjectionPoint::BeginBook);
+        assert!(sink.begin_book(&ctx, BookKind::Snapshot).is_err());
+        assert!(sink.is_tripped());
+
+        // Fail at level 2
+        let mut sink = FaultInjectingSink::new(FaultInjectionPoint::Level(2));
+        assert!(sink.begin_book(&ctx, BookKind::Snapshot).is_ok());
+        assert!(sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).is_ok());
+        assert!(!sink.is_tripped());
+        assert!(sink.level(Side::Ask, Decimal::ONE, Decimal::ONE).is_err());
+        assert!(sink.is_tripped());
+
+        // Fail at end_book
+        let mut sink = FaultInjectingSink::new(FaultInjectionPoint::EndBook);
+        assert!(sink.begin_book(&ctx, BookKind::Delta).is_ok());
+        assert!(sink.end_book(&ctx, None).is_err());
+        assert!(sink.is_tripped());
+
+        // Fail at trade
+        let mut sink = FaultInjectingSink::new(FaultInjectionPoint::Trade);
+        let trade = Trade {
+            identity: None,
+            price: Decimal::ONE,
+            volume: Decimal::ONE,
+            aggressor: Side::Bid,
+        };
+        assert!(sink.trade(&ctx, &trade).is_err());
+        assert!(sink.is_tripped());
+    }
+
+    #[test]
+    fn recording_sink_records_delivery_stamps() {
+        let sym = Symbol::from("BTCUSDT");
+        let run = RunId::from_u128(1);
+        let stamp1 = DeliveryStamp::new(run, 1, 1);
+        let stamp2 = DeliveryStamp::new(run, 1, 2);
+
+        let mut sink = RecordingSink::new();
+        let ctx1 = make_ctx(&sym, stamp1);
+        sink.begin_book(&ctx1, BookKind::Snapshot).unwrap();
+
+        let ctx2 = make_ctx(&sym, stamp2);
+        sink.alert(&ctx2, IntegrityAlert::ResyncStarted).unwrap();
+
+        let stamps = sink.delivery_stamps();
+        assert_eq!(stamps.len(), 2);
+        assert_eq!(stamps[0], stamp1);
+        assert_eq!(stamps[1], stamp2);
     }
 }
