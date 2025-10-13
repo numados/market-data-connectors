@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mdc_core::model::{Symbol, SymbolTag};
+use mdc_core::model::{RunId, Symbol, SymbolTag};
 use thiserror::Error;
 
 /// Error returned when constructing or validating a `BitfinexConfig`.
@@ -63,6 +63,8 @@ pub struct BitfinexConfig {
     pub reconnect_backoff_initial: Duration,
     /// Maximum reconnect backoff delay. Defaults to 10s.
     pub reconnect_backoff_max: Duration,
+    /// Injected session run token (generated if not provided).
+    pub run_id: Option<RunId>,
 }
 
 impl Default for BitfinexConfig {
@@ -79,6 +81,7 @@ impl Default for BitfinexConfig {
             quarantine_duration: Duration::from_secs(30),
             reconnect_backoff_initial: Duration::from_millis(100),
             reconnect_backoff_max: Duration::from_secs(10),
+            run_id: None,
         }
     }
 }

@@ -130,12 +130,19 @@ async fn test_ws_silence_watchdog_forces_reconnect() {
         ws.connection_count()
     );
 
-    // Verify ConnectionLost alert was recorded
+    // Verify SilenceTimeout and ConnectionLost alerts were recorded
     let alerts = sink.alerts();
     assert!(
         alerts
             .iter()
-            .any(|a| matches!(a, IntegrityAlert::ConnectionLost { .. }))
+            .any(|a| matches!(a, IntegrityAlert::SilenceTimeout { elapsed_ms } if *elapsed_ms >= 50)),
+        "expected SilenceTimeout alert, got alerts: {alerts:?}"
+    );
+    assert!(
+        alerts
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::ConnectionLost { reason: mdc_core::DisconnectKind::SilenceTimeout })),
+        "expected ConnectionLost(SilenceTimeout), got alerts: {alerts:?}"
     );
 
     cancel.cancel();

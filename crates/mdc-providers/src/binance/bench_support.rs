@@ -24,7 +24,7 @@ impl<S: StreamingSink> Connection<S> {
         Self {
             scratch: ConnectionScratchBuffers::with_capacity(128),
             sink,
-            run_id: RunId::from_bytes([1; 16]),
+            run_id: RunId::from_u128(1),
             symbol: Symbol::from("BTCUSDT"),
             tag: 0,
             delivery_ordinal: 0,

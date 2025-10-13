@@ -7,9 +7,9 @@ use futures_util::{SinkExt, StreamExt};
 use mdc_core::MdcError;
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
 use mdc_core::model::{
-    DeliveryStamp, DisconnectKind, IntegrityAlert, RunId, Symbol, SymbolTag, UnixNanos, VenueId,
+    DisconnectKind, IntegrityAlert, RunId, Symbol, SymbolTag, UnixNanos, VenueId,
 };
-use mdc_core::sink::{BookKind, EventContext, RawLevelText, StreamingSink};
+use mdc_core::sink::{BookKind, RawLevelText, StreamingSink};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -58,13 +58,15 @@ fn build_trades_subscribe(symbol: &str) -> String {
 /// and channel-id lifecycle handling.
 pub async fn run_connection_loop<S: StreamingSink>(
     config: BitfinexConfig,
-    mut sink: S,
+    sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
 ) -> Result<(), MdcError> {
-    let run_id = RunId::from_bytes([0x62, 0x66, 0x78, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let run_id = config.run_id.unwrap_or_else(|| {
+        let now = crate::now_nanos().0 as u128;
+        RunId::from_nanos(now)
+    });
     let mut connection_id: u32 = 0;
-    let mut delivery_ordinal: u64 = 0;
     let mut reconnect_attempt: u32 = 0;
 
     let symbol_list = config.symbols.clone();
@@ -76,8 +78,10 @@ pub async fn run_connection_loop<S: StreamingSink>(
     let mut books: HashMap<u32, BitfinexChecksumBook> = HashMap::new();
     let mut scratch = BitfinexConnectionScratch::new();
 
+    let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
+
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
         }
 
@@ -124,6 +128,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
 
         connection_id = connection_id.wrapping_add(1);
         reconnect_attempt = reconnect_attempt.saturating_add(1);
+        sink.next_generation();
 
         let ws_url = match url::Url::parse(&config.ws_url) {
             Ok(u) => u,
@@ -172,18 +177,20 @@ pub async fn run_connection_loop<S: StreamingSink>(
             );
 
             let tag = *tag_map.get(sym).unwrap_or(&0);
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Bitfinex,
-                symbol: sym,
-                tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            if sink
+                .emit_alert(
+                    VenueId::Bitfinex,
+                    sym,
+                    tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
+                break 'reconnect_loop;
+            }
         }
 
         // Send conf handshake message: TIMESTAMP (32768) + OB_CHECKSUM (131072) = 163840
@@ -219,11 +226,26 @@ pub async fn run_connection_loop<S: StreamingSink>(
 
         let mut timer = tokio::time::interval(Duration::from_millis(100));
         let mut pending_resubscribe: HashSet<Symbol> = HashSet::new();
+        let mut disconnect_emitted = false;
 
         'message_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     info!(connection_id, "Bitfinex connection worker cancelled");
+                    for sym in &symbol_list {
+                        let tag = *tag_map.get(sym).unwrap_or(&0);
+                        let _ = sink.emit_alert(
+                            VenueId::Bitfinex,
+                            sym,
+                            tag,
+                            None,
+                            crate::now_nanos(),
+                            None,
+                            IntegrityAlert::ConnectionLost {
+                                reason: DisconnectKind::Shutdown,
+                            },
+                        );
+                    }
                     let _ = ws_stream.close(None).await;
                     break 'reconnect_loop;
                 }
@@ -233,27 +255,22 @@ pub async fn run_connection_loop<S: StreamingSink>(
                             info!(connection_id, "Pausing Bitfinex connector");
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Bitfinex,
-                                    symbol: sym,
-                                    tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(
-                                    &ctx,
-                                    IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::Paused,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Bitfinex,
+                                        sym,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::Paused,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break 'reconnect_loop;
+                                }
                             }
                             let _ = ws_stream.close(None).await;
 
@@ -310,6 +327,31 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 ?silent_for,
                                 "Silence watchdog triggered reconnect"
                             );
+                            disconnect_emitted = true;
+                            let elapsed_ms = silent_for.as_millis() as u64;
+                            for sym in &symbol_list {
+                                let tag = *tag_map.get(sym).unwrap_or(&0);
+                                let _ = sink.emit_alert(
+                                    VenueId::Bitfinex,
+                                    sym,
+                                    tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::Bitfinex,
+                                    sym,
+                                    tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             break 'message_loop;
                         }
                         WatchdogAction::Healthy => {}
@@ -333,23 +375,13 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 PollOutcome::TimeoutQuarantined { until } => {
                                     warn!(connection_id, %sym, ?until, "Symbol snapshot timed out, entering quarantine");
                                     let tag = *tag_map.get(sym).unwrap_or(&0);
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Bitfinex,
-                                        symbol: sym,
+                                    let _ = sink.emit_alert(
+                                        VenueId::Bitfinex,
+                                        sym,
                                         tag,
-                                        exchange_ts: None,
-                                        received_ts: crate::now_nanos(),
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(
-                                            run_id,
-                                            u64::from(connection_id),
-                                            delivery_ordinal,
-                                        ),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(
-                                        &ctx,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
                                         IntegrityAlert::Quarantined {
                                             retry_in_ms: 30_000,
                                         },
@@ -381,22 +413,15 @@ pub async fn run_connection_loop<S: StreamingSink>(
                             }
 
                             let tag = *tag_map.get(&sym).unwrap_or(&0);
-                            delivery_ordinal += 1;
-                            let ctx = EventContext {
-                                venue: VenueId::Bitfinex,
-                                symbol: &sym,
+                            let _ = sink.emit_alert(
+                                VenueId::Bitfinex,
+                                &sym,
                                 tag,
-                                exchange_ts: None,
-                                received_ts: crate::now_nanos(),
-                                connection_id,
-                                delivery: DeliveryStamp::new(
-                                    run_id,
-                                    u64::from(connection_id),
-                                    delivery_ordinal,
-                                ),
-                                source_sequence: None,
-                            };
-                            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                None,
+                                crate::now_nanos(),
+                                None,
+                                IntegrityAlert::ResyncStarted,
+                            );
 
                             let sub_msg = build_book_subscribe(sym.as_str(), config.orderbook_depth);
                             if let Err(e) = ws_stream.send(Message::Text(sub_msg)).await {
@@ -428,8 +453,6 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 &text,
                                 received_ts,
                                 connection_id,
-                                run_id,
-                                &mut delivery_ordinal,
                                 &symbol_list,
                                 &tag_map,
                                 &mut fsms,
@@ -456,8 +479,6 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                     text,
                                     received_ts,
                                     connection_id,
-                                    run_id,
-                                    &mut delivery_ordinal,
                                     &symbol_list,
                                     &tag_map,
                                     &mut fsms,
@@ -492,26 +513,35 @@ pub async fn run_connection_loop<S: StreamingSink>(
             }
         }
 
-        // On socket disconnection, emit ConnectionLost for all active symbols
-        for sym in &symbol_list {
-            let tag = *tag_map.get(sym).unwrap_or(&0);
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Bitfinex,
-                symbol: sym,
-                tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
-                IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::TransportError,
-                },
-            );
+        if sink.is_failed() {
+            break 'reconnect_loop;
+        }
+
+        // On socket disconnection, emit ConnectionLost for all active symbols if not already disconnected
+        if !disconnect_emitted {
+            for sym in &symbol_list {
+                let tag = *tag_map.get(sym).unwrap_or(&0);
+                if sink
+                    .emit_alert(
+                        VenueId::Bitfinex,
+                        sym,
+                        tag,
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ConnectionLost {
+                            reason: DisconnectKind::TransportError,
+                        },
+                    )
+                    .is_err()
+                {
+                    break 'reconnect_loop;
+                }
+            }
+        }
+
+        if sink.is_failed() {
+            break 'reconnect_loop;
         }
     }
 
@@ -525,8 +555,6 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
     text: &str,
     received_ts: UnixNanos,
     connection_id: u32,
-    run_id: RunId,
-    delivery_ordinal: &mut u64,
     symbol_list: &[Symbol],
     tag_map: &HashMap<Symbol, SymbolTag>,
     fsms: &mut HashMap<Symbol, ChannelFsm>,
@@ -537,7 +565,7 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
     orderbook_depth: usize,
     trades_enabled: bool,
     ws_stream: &mut W,
-    sink: &mut S,
+    sink: &mut crate::sink_util::ConnectionSink<S>,
 ) -> Result<(), bool> {
     let frame = match RawFrame::parse(text) {
         Ok(f) => f,
@@ -647,23 +675,13 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     "Bitfinex CRC32 checksum mismatch; triggering channel resubscribe"
                                 );
 
-                                *delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Bitfinex,
-                                    symbol: &sym,
+                                let _ = sink.emit_alert(
+                                    VenueId::Bitfinex,
+                                    &sym,
                                     tag,
                                     exchange_ts,
                                     received_ts,
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        *delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(
-                                    &ctx,
+                                    None,
                                     IntegrityAlert::ChecksumMismatch {
                                         expected: expected as u32,
                                         calculated: calculated as u32,
@@ -674,22 +692,15 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     fsm.on_checksum_mismatch(Instant::now());
                                 }
 
-                                *delivery_ordinal += 1;
-                                let ctx_resync = EventContext {
-                                    venue: VenueId::Bitfinex,
-                                    symbol: &sym,
+                                let _ = sink.emit_alert(
+                                    VenueId::Bitfinex,
+                                    &sym,
                                     tag,
                                     exchange_ts,
                                     received_ts,
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        *delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx_resync, IntegrityAlert::ResyncStarted);
+                                    None,
+                                    IntegrityAlert::ResyncStarted,
+                                );
 
                                 // Resubscribe channel in-place
                                 let un_msg = build_unsubscribe(chan_id);
@@ -715,40 +726,51 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                             fsm.on_snapshot();
                         }
 
-                        *delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Bitfinex,
-                            symbol: &sym,
+                        let ctx = sink.next_context(
+                            VenueId::Bitfinex,
+                            &sym,
                             tag,
                             exchange_ts,
                             received_ts,
-                            connection_id,
-                            delivery: DeliveryStamp::new(
-                                run_id,
-                                u64::from(connection_id),
-                                *delivery_ordinal,
-                            ),
-                            source_sequence: None,
-                        };
-
-                        let _ = sink.alert(
-                            &ctx,
-                            IntegrityAlert::ResyncCompleted {
-                                last_update_id: None,
-                            },
+                            None,
                         );
 
+                        let mut snapshot_succeeded = false;
                         if sink.begin_book(&ctx, BookKind::Snapshot).is_ok() {
+                            let mut levels_ok = true;
                             for l in &levels {
                                 if let Ok((side, pl)) = normalize_book_level(l) {
                                     let raw_text = RawLevelText {
                                         price: l.price_str(),
                                         volume: l.amount_str(),
                                     };
-                                    let _ = sink.level_raw(side, pl.price, pl.volume, raw_text);
+                                    if sink.level_raw(side, pl.price, pl.volume, raw_text).is_err() {
+                                        levels_ok = false;
+                                        break;
+                                    }
                                 }
                             }
-                            let _ = sink.end_book(&ctx, None);
+                            if levels_ok && sink.end_book(&ctx, None).is_ok() {
+                                snapshot_succeeded = true;
+                            }
+                        }
+
+                        if snapshot_succeeded {
+                            // ResyncCompleted must be emitted strictly AFTER begin_book and end_book,
+                            // consuming a fresh monotonic delivery ordinal.
+                            let _ = sink.emit_alert(
+                                VenueId::Bitfinex,
+                                &sym,
+                                tag,
+                                exchange_ts,
+                                received_ts,
+                                None,
+                                IntegrityAlert::ResyncCompleted {
+                                    last_update_id: None,
+                                },
+                            );
+                        } else if sink.is_failed() {
+                            return Err(true);
                         }
                     }
                 }
@@ -759,21 +781,14 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
 
                     let is_in_sync = fsms.get(&sym).is_some_and(|f| f.is_in_sync());
                     if is_in_sync {
-                        *delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Bitfinex,
-                            symbol: &sym,
+                        let ctx = sink.next_context(
+                            VenueId::Bitfinex,
+                            &sym,
                             tag,
                             exchange_ts,
                             received_ts,
-                            connection_id,
-                            delivery: DeliveryStamp::new(
-                                run_id,
-                                u64::from(connection_id),
-                                *delivery_ordinal,
-                            ),
-                            source_sequence: None,
-                        };
+                            None,
+                        );
 
                         if sink.begin_book(&ctx, BookKind::Delta).is_ok() {
                             if let Ok((side, pl)) = normalize_book_level(&level) {
@@ -785,6 +800,9 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                             }
                             let _ = sink.end_book(&ctx, None);
                         }
+                        if sink.is_failed() {
+                            return Err(true);
+                        }
                     } else {
                         trace!(connection_id, %sym, "Dropping book update while not in sync");
                     }
@@ -792,22 +810,18 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                 RawPayload::Trade { trade, .. } => {
                     if trades_enabled {
                         if let Ok(t) = normalize_trade(&trade, received_ts) {
-                            *delivery_ordinal += 1;
-                            let ctx = EventContext {
-                                venue: VenueId::Bitfinex,
-                                symbol: &sym,
+                            let ctx = sink.next_context(
+                                VenueId::Bitfinex,
+                                &sym,
                                 tag,
                                 exchange_ts,
                                 received_ts,
-                                connection_id,
-                                delivery: DeliveryStamp::new(
-                                    run_id,
-                                    u64::from(connection_id),
-                                    *delivery_ordinal,
-                                ),
-                                source_sequence: None,
-                            };
+                                None,
+                            );
                             let _ = sink.trade(&ctx, &t);
+                            if sink.is_failed() {
+                                return Err(true);
+                            }
                         }
                     }
                 }
@@ -815,22 +829,18 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                     if trades_enabled {
                         for trade in &trades {
                             if let Ok(t) = normalize_trade(trade, received_ts) {
-                                *delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Bitfinex,
-                                    symbol: &sym,
+                                let ctx = sink.next_context(
+                                    VenueId::Bitfinex,
+                                    &sym,
                                     tag,
                                     exchange_ts,
                                     received_ts,
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        *delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
+                                    None,
+                                );
                                 let _ = sink.trade(&ctx, &t);
+                                if sink.is_failed() {
+                                    return Err(true);
+                                }
                             }
                         }
                     }

@@ -9,6 +9,7 @@ pub fn now_nanos() -> mdc_core::UnixNanos {
 }
 
 pub(crate) mod catalog_util;
+pub(crate) mod sink_util;
 
 #[cfg(any(
     feature = "binance",

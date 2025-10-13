@@ -27,7 +27,7 @@ impl<S: StreamingSink> Connection<S> {
             scratch: BitfinexConnectionScratch::new(),
             book: BitfinexChecksumBook::new(25),
             sink,
-            run_id: RunId::from_bytes([1; 16]),
+            run_id: RunId::from_u128(1),
             symbol: Symbol::from("tBTCUSD"),
             tag: 0,
             delivery_ordinal: 0,

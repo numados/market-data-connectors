@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use mdc_core::{
     CapabilityBounds, ConsumerRequirements, DiscoveryCapability, EmbargoTracker, IdentityScope,
     IntegrityCapability, MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode,
-    ReplayCapability, SideSemantics, StreamingSink, Symbol, SymbolTag, TimestampCapability,
+    ReplayCapability, RunId, SideSemantics, StreamingSink, Symbol, SymbolTag, TimestampCapability,
     TradeCapability, VenueId,
 };
 use tokio::sync::mpsc;
@@ -55,6 +55,7 @@ pub struct BinanceConnector<S> {
     rest_client: BinanceRestClient,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
+    run_id: Option<RunId>,
 }
 
 impl<S: StreamingSink + Clone> BinanceConnector<S> {
@@ -80,6 +81,10 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let mut join_set = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
@@ -144,6 +149,7 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
                     rest_client,
                     task_cmd_rx,
                     cancel_conn,
+                    run_id,
                 )
                 .await;
             });
@@ -169,6 +175,7 @@ pub struct BinanceConnectorBuilder<S> {
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: Option<S>,
     embargo: Option<Arc<Mutex<EmbargoTracker>>>,
+    run_id: Option<RunId>,
 }
 
 impl<S> BinanceConnectorBuilder<S> {
@@ -179,7 +186,14 @@ impl<S> BinanceConnectorBuilder<S> {
             symbols: Vec::new(),
             sink: None,
             embargo: None,
+            run_id: None,
         }
+    }
+
+    /// Injects a specific `RunId` session token (primarily for tests).
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
     }
 
     /// Sets the symbols to subscribe to (with default tag 0).
@@ -232,6 +246,7 @@ impl<M: MarketDataSink + Clone> BinanceConnectorBuilder<Owned<M>> {
             symbols: self.symbols,
             sink: Some(Owned::new(sink)),
             embargo: self.embargo,
+            run_id: self.run_id,
         }
     }
 }
@@ -270,6 +285,7 @@ impl<S: StreamingSink + Clone> BinanceConnectorBuilder<S> {
             rest_client,
             command_tx,
             command_rx,
+            run_id: self.run_id,
         };
 
         Ok((connector, handle))

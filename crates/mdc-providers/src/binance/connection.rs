@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, CooldownPolicy, DeliveryStamp, DeltaDecision, DisconnectKind, EventContext,
-    IntegrityAlert, MarketEvent, ResyncController, ResyncDecision, ResyncFailure, ResyncPolicy,
-    RunId, SequenceRange, Side, SilenceWatchdog, SnapshotOutcome, StreamingSink, Symbol, SymbolTag,
-    UnixNanos, VenueId, WatchdogAction,
+    BookKind, CooldownPolicy, DeltaDecision, DisconnectKind, IntegrityAlert, MarketEvent,
+    ResyncController, ResyncDecision, ResyncFailure, ResyncPolicy, RunId, SequenceRange, Side,
+    SilenceWatchdog, SnapshotOutcome, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId,
+    WatchdogAction,
 };
 use tokio::sync::{Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::Message;
@@ -61,13 +61,13 @@ pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,
     config: BinanceConfig,
-    mut sink: S,
+    sink: S,
     rest_client: BinanceRestClient,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    run_id: RunId,
 ) {
-    let run_id = RunId::from_bytes([0xba, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal = 0u64;
+    let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
 
     let tag_map: HashMap<Symbol, SymbolTag> = symbols.iter().cloned().collect();
     let mut controllers: HashMap<Symbol, ResyncController> = symbols
@@ -90,8 +90,13 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut is_paused = false;
 
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
+        }
+
+        sink.next_generation();
+        for ctrl in controllers.values_mut() {
+            ctrl.reset();
         }
 
         while is_paused {
@@ -146,25 +151,28 @@ pub async fn run_connection_task<S: StreamingSink>(
             now,
         );
 
+        let mut disconnect_emitted = false;
+
         // Reset controllers, emit ResyncStarted, and trigger initial snapshots
         for (sym, tag) in &symbols {
             if let Some(ctrl) = controllers.get_mut(sym) {
                 ctrl.reset();
             }
 
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Binance,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            if sink
+                .emit_alert(
+                    VenueId::Binance,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
+                break 'reconnect_loop;
+            }
             policy.on_started(sym, now);
 
             // Spawn snapshot request
@@ -189,19 +197,13 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Binance,
-                            symbol: sym,
-                            tag: *tag,
-                            exchange_ts: None,
-                            received_ts: crate::now_nanos(),
-                            connection_id,
-                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                            source_sequence: None,
-                        };
-                        let _ = sink.alert(
-                            &ctx,
+                        let _ = sink.emit_alert(
+                            VenueId::Binance,
+                            sym,
+                            *tag,
+                            None,
+                            crate::now_nanos(),
+                            None,
                             IntegrityAlert::ConnectionLost {
                                 reason: DisconnectKind::Shutdown,
                             },
@@ -218,18 +220,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                             if let Some(ctrl) = controllers.get_mut(&sym) {
                                 ctrl.reset();
                                 if let Some(&tag) = tag_map.get(&sym) {
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Binance,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: None,
-                                        received_ts: crate::now_nanos(),
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::Binance,
+                                            &sym,
+                                            tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            IntegrityAlert::ResyncStarted,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
                                     policy.on_started(&sym, now);
                                     spawn_snapshot_request(
                                         sym,
@@ -245,18 +249,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                             for (sym, tag) in &symbols {
                                 if let Some(ctrl) = controllers.get_mut(sym) {
                                     ctrl.reset();
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Binance,
-                                        symbol: sym,
-                                        tag: *tag,
-                                        exchange_ts: None,
-                                        received_ts: crate::now_nanos(),
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::Binance,
+                                            sym,
+                                            *tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            IntegrityAlert::ResyncStarted,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
                                     policy.on_started(sym, now);
                                     spawn_snapshot_request(
                                         sym.clone(),
@@ -274,19 +280,24 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Some(Command::Pause) => {
                             is_paused = true;
+                            disconnect_emitted = true;
                             for (sym, tag) in &symbols {
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Binance,
-                                    symbol: sym,
-                                    tag: *tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, IntegrityAlert::ConnectionLost { reason: DisconnectKind::Paused });
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Binance,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::Paused,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break 'reconnect_loop;
+                                }
                             }
                             let _ = ws_stream.close(None).await;
                             break 'frame_loop;
@@ -305,8 +316,32 @@ pub async fn run_connection_task<S: StreamingSink>(
                             debug!(connection_id, "Watchdog triggered ping");
                             let _ = ws_stream.send(Message::Ping(Vec::new())).await;
                         }
-                        WatchdogAction::Reconnect { silent_for: _ } => {
-                            warn!(connection_id, "Watchdog timeout: forcing reconnect");
+                        WatchdogAction::Reconnect { silent_for } => {
+                            warn!(connection_id, ?silent_for, "Watchdog timeout: forcing reconnect");
+                            disconnect_emitted = true;
+                            let elapsed_ms = silent_for.as_millis() as u64;
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::Binance,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::Binance,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             break 'frame_loop;
                         }
                         WatchdogAction::Healthy => {}
@@ -317,18 +352,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                 snap_res_opt = snapshot_rx.recv() => {
                     if let Some((sym, res)) = snap_res_opt {
                         let tag = tag_map.get(&sym).copied().unwrap_or_default();
-                        delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Binance,
-                            symbol: &sym,
-                            tag,
-                            exchange_ts: None,
-                            received_ts: crate::now_nanos(),
-                            connection_id,
-                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                            source_sequence: None,
-                        };
-
                         match res {
                             Ok(raw_snapshot) => {
                                 let snapshot = normalize_snapshot(&raw_snapshot);
@@ -338,7 +361,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     venue: VenueId::Binance,
                                     symbol: sym.clone(),
                                     tag,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                    delivery: sink.next_stamp(),
                                     source_sequence: raw_snapshot.last_update_id.into(),
                                     kind: snapshot,
                                 };
@@ -348,60 +371,77 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         Ok(SnapshotOutcome::Synchronized { snapshot, replay }) => {
                                             policy.on_completed(&sym, now);
                                             // 1. Emit snapshot
-                                            let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+                                            let last_id = snapshot.kind.last_update_id.unwrap_or(0);
+                                            let ctx = sink.next_context(
+                                                VenueId::Binance,
+                                                &sym,
+                                                tag,
+                                                None,
+                                                crate::now_nanos(),
+                                                Some(last_id),
+                                            );
+                                            if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                                                break 'frame_loop;
+                                            }
                                             for level in &snapshot.kind.bids {
-                                                let _ = sink.level(Side::Bid, level.price, level.volume);
+                                                if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
                                             for level in &snapshot.kind.asks {
-                                                let _ = sink.level(Side::Ask, level.price, level.volume);
+                                                if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
-                                            let last_id = snapshot.kind.last_update_id.unwrap_or(0);
-                                            let _ = sink.end_book(&ctx, Some(SequenceRange::new(last_id, last_id)));
+                                            if sink.end_book(&ctx, Some(SequenceRange::new(last_id, last_id))).is_err() {
+                                                break 'frame_loop;
+                                            }
 
                                             // 2. Replay buffered deltas
                                             for delta in replay {
-                                                delivery_ordinal += 1;
-                                                let delta_ctx = EventContext {
-                                                    venue: VenueId::Binance,
-                                                    symbol: &sym,
+                                                let delta_ctx = sink.next_context(
+                                                    VenueId::Binance,
+                                                    &sym,
                                                     tag,
-                                                    exchange_ts: delta.exchange_ts,
-                                                    received_ts: delta.received_ts,
-                                                    connection_id,
-                                                    delivery: DeliveryStamp::new(
-                                                        run_id,
-                                                        connection_id as u64,
-                                                        delivery_ordinal,
-                                                    ),
-                                                    source_sequence: delta.source_sequence,
-                                                };
-                                                let _ = sink.begin_book(&delta_ctx, BookKind::Delta);
+                                                    delta.exchange_ts,
+                                                    delta.received_ts,
+                                                    delta.source_sequence,
+                                                );
+                                                if sink.begin_book(&delta_ctx, BookKind::Delta).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                                 for level in &delta.kind.bids {
-                                                    let _ = sink.level(Side::Bid, level.price, level.volume);
+                                                    if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
                                                 for level in &delta.kind.asks {
-                                                    let _ = sink.level(Side::Ask, level.price, level.volume);
+                                                    if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
-                                                let _ = sink.end_book(&delta_ctx, delta.kind.sequence);
+                                                if sink.end_book(&delta_ctx, delta.kind.sequence).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
 
                                             // 3. Emit ResyncCompleted
-                                            delivery_ordinal += 1;
-                                            let alert_ctx = EventContext {
-                                                venue: VenueId::Binance,
-                                                symbol: &sym,
-                                                tag,
-                                                exchange_ts: None,
-                                                received_ts: crate::now_nanos(),
-                                                connection_id,
-                                                delivery: DeliveryStamp::new(
-                                                    run_id,
-                                                    connection_id as u64,
-                                                    delivery_ordinal,
-                                                ),
-                                                source_sequence: None,
-                                            };
-                                            let _ = sink.alert(&alert_ctx, IntegrityAlert::ResyncCompleted { last_update_id: Some(last_id) });
+                                            if sink
+                                                .emit_alert(
+                                                    VenueId::Binance,
+                                                    &sym,
+                                                    tag,
+                                                    None,
+                                                    crate::now_nanos(),
+                                                    None,
+                                                    IntegrityAlert::ResyncCompleted {
+                                                        last_update_id: Some(last_id),
+                                                    },
+                                                )
+                                                .is_err()
+                                            {
+                                                break 'frame_loop;
+                                            }
                                         }
                                         Ok(SnapshotOutcome::StaleSnapshot { .. }) => {
                                             debug!(%sym, "Stale REST snapshot received; scheduling refetch");
@@ -484,29 +524,33 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 let range = SequenceRange::new(header.first_update_id, header.last_update_id);
                                 let exchange_ts = Some(UnixNanos::from_millis(header.event_time_ms));
 
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Binance,
-                                    symbol: &sym,
-                                    tag,
-                                    exchange_ts,
-                                    received_ts,
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: Some(header.last_update_id),
-                                };
-
                                 if let Some(ctrl) = controllers.get_mut(&sym) {
                                     match ctrl.check_delta(range) {
                                         DeltaDecision::Emit => {
-                                            let _ = sink.begin_book(&ctx, BookKind::Delta);
+                                            let ctx = sink.next_context(
+                                                VenueId::Binance,
+                                                &sym,
+                                                tag,
+                                                exchange_ts,
+                                                received_ts,
+                                                Some(header.last_update_id),
+                                            );
+                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                break 'frame_loop;
+                                            }
                                             for level in &scratch.bids {
-                                                let _ = sink.level(Side::Bid, level.price, level.volume);
+                                                if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
                                             for level in &scratch.asks {
-                                                let _ = sink.level(Side::Ask, level.price, level.volume);
+                                                if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
-                                            let _ = sink.end_book(&ctx, Some(range));
+                                            if sink.end_book(&ctx, Some(range)).is_err() {
+                                                break 'frame_loop;
+                                            }
                                         }
                                         DeltaDecision::Drop => {}
                                         DeltaDecision::Buffer => {
@@ -521,13 +565,26 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 venue: VenueId::Binance,
                                                 symbol: sym.clone(),
                                                 tag,
-                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                                delivery: sink.next_stamp(),
                                                 source_sequence: Some(header.last_update_id),
                                                 kind: delta,
                                             };
                                             if let Err(e) = ctrl.buffer(event) {
                                                 warn!(%sym, error = ?e, "Buffer overflow during delta buffering; requesting snapshot");
-                                                let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                                if sink
+                                                    .emit_alert(
+                                                        VenueId::Binance,
+                                                        &sym,
+                                                        tag,
+                                                        exchange_ts,
+                                                        received_ts,
+                                                        Some(header.last_update_id),
+                                                        IntegrityAlert::ResyncStarted,
+                                                    )
+                                                    .is_err()
+                                                {
+                                                    break 'frame_loop;
+                                                }
                                                 policy.on_started(&sym, now);
                                                 spawn_snapshot_request(
                                                     sym,
@@ -540,8 +597,34 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         }
                                         DeltaDecision::GapDetected { alert } => {
                                             warn!(%sym, ?alert, "Sequence gap detected; starting resynchronization");
-                                            let _ = sink.alert(&ctx, alert);
-                                            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                            if sink
+                                                .emit_alert(
+                                                    VenueId::Binance,
+                                                    &sym,
+                                                    tag,
+                                                    exchange_ts,
+                                                    received_ts,
+                                                    Some(header.last_update_id),
+                                                    alert,
+                                                )
+                                                .is_err()
+                                            {
+                                                break 'frame_loop;
+                                            }
+                                            if sink
+                                                .emit_alert(
+                                                    VenueId::Binance,
+                                                    &sym,
+                                                    tag,
+                                                    exchange_ts,
+                                                    received_ts,
+                                                    Some(header.last_update_id),
+                                                    IntegrityAlert::ResyncStarted,
+                                                )
+                                                .is_err()
+                                            {
+                                                break 'frame_loop;
+                                            }
                                             policy.on_started(&sym, now);
                                             spawn_snapshot_request(
                                                 sym,
@@ -563,19 +646,18 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 };
                                 let sym = Symbol::from(raw_ticker.symbol);
                                 let tag = tag_map.get(&sym).copied().unwrap_or_default();
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Binance,
-                                    symbol: &sym,
+                                let ctx = sink.next_context(
+                                    VenueId::Binance,
+                                    &sym,
                                     tag,
-                                    exchange_ts: None,
+                                    None,
                                     received_ts,
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: Some(raw_ticker.update_id),
-                                };
+                                    Some(raw_ticker.update_id),
+                                );
                                 let ticker = normalize_book_ticker(&raw_ticker);
-                                let _ = sink.book_ticker(&ctx, &ticker);
+                                if sink.book_ticker(&ctx, &ticker).is_err() {
+                                    break 'frame_loop;
+                                }
                             } else if env.stream.ends_with("@trade") {
                                 let raw_trade: RawTrade<'_> = match serde_json::from_str(env.data.get()) {
                                     Ok(t) => t,
@@ -587,18 +669,17 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 let sym = Symbol::from(raw_trade.symbol);
                                 let tag = tag_map.get(&sym).copied().unwrap_or_default();
                                 if let Ok((exchange_ts, trade)) = normalize_trade(&raw_trade) {
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::Binance,
-                                        symbol: &sym,
+                                    let ctx = sink.next_context(
+                                        VenueId::Binance,
+                                        &sym,
                                         tag,
-                                        exchange_ts: Some(exchange_ts),
+                                        Some(exchange_ts),
                                         received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(raw_trade.trade_id),
-                                    };
-                                    let _ = sink.trade(&ctx, &trade);
+                                        Some(raw_trade.trade_id),
+                                    );
+                                    if sink.trade(&ctx, &trade).is_err() {
+                                        break 'frame_loop;
+                                    }
                                 }
                             }
                         }
@@ -613,26 +694,36 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         }
 
-        // Connection dropped or broken: alert ConnectionLost and reconnect
-        for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Binance,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
-                IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::Closed,
-                },
-            );
+        if sink.is_failed() {
+            break 'reconnect_loop;
         }
+
+        // Connection dropped or broken: alert ConnectionLost and reconnect
+        if !disconnect_emitted {
+            for (sym, tag) in &symbols {
+                if sink
+                    .emit_alert(
+                        VenueId::Binance,
+                        sym,
+                        *tag,
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ConnectionLost {
+                            reason: DisconnectKind::Closed,
+                        },
+                    )
+                    .is_err()
+                {
+                    break 'reconnect_loop;
+                }
+            }
+        }
+
+        if sink.is_failed() {
+            break 'reconnect_loop;
+        }
+
         if !is_paused {
             reconnect_attempt += 1;
         } else {

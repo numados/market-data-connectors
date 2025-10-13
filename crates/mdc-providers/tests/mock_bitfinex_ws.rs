@@ -115,7 +115,7 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let mut has_resync_completed = false;
     let mut has_delta = false;
 
-    for ev in events {
+    for ev in &events {
         match ev {
             RecordedEvent::Alert {
                 alert: IntegrityAlert::ResyncStarted,
@@ -155,6 +155,43 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
         "Must emit ResyncCompleted after valid snapshot"
     );
     assert!(has_delta, "Must emit L2Delta from depth_update");
+
+    // ResyncCompleted must appear strictly after EndBook of snapshot.
+    let end_book_pos = events
+        .iter()
+        .position(|ev| matches!(ev, RecordedEvent::EndBook { .. }))
+        .expect("snapshot EndBook must be present");
+    let resync_completed_pos = events
+        .iter()
+        .position(|ev| {
+            matches!(
+                ev,
+                RecordedEvent::Alert {
+                    alert: IntegrityAlert::ResyncCompleted { .. },
+                    ..
+                }
+            )
+        })
+        .expect("ResyncCompleted must be present");
+
+    assert!(
+        resync_completed_pos > end_book_pos,
+        "ResyncCompleted (pos {resync_completed_pos}) must be emitted strictly after EndBook (pos {end_book_pos})"
+    );
+
+    // Verify all delivery stamps are strictly monotonic
+    let stamps = sink.delivery_stamps();
+    assert!(!stamps.is_empty());
+    for w in stamps.windows(2) {
+        if w[0].connection_generation == w[1].connection_generation {
+            assert!(
+                w[1].ordinal > w[0].ordinal,
+                "Delivery ordinal must be strictly monotonic: {} <= {}",
+                w[1].ordinal,
+                w[0].ordinal
+            );
+        }
+    }
 
     cancel.cancel();
     let _ = run_task.await;
@@ -380,7 +417,7 @@ async fn test_ws_silence_watchdog_ping_and_reconnect() {
 
     let cancel = CancellationToken::new();
     let cancel_child = cancel.child_token();
-    let (_handle, runner) = connector.run(sink, cancel_child);
+    let (_handle, runner) = connector.run(sink.clone(), cancel_child);
     let run_task = tokio::spawn(runner);
 
     // Initial connection
@@ -394,6 +431,20 @@ async fn test_ws_silence_watchdog_ping_and_reconnect() {
     assert!(
         ws.connection_count() >= 2,
         "Silence watchdog must trigger reconnect when no data frames arrive"
+    );
+
+    let alerts = sink.alerts();
+    assert!(
+        alerts
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::SilenceTimeout { elapsed_ms } if *elapsed_ms >= 100)),
+        "Must emit SilenceTimeout alert with measured silence elapsed, got alerts: {alerts:?}"
+    );
+    assert!(
+        alerts
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::ConnectionLost { reason: mdc_core::DisconnectKind::SilenceTimeout })),
+        "Must emit ConnectionLost(SilenceTimeout), got alerts: {alerts:?}"
     );
 
     cancel.cancel();

@@ -9,7 +9,7 @@ use mdc_core::model::capabilities::{
     CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
     ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
 };
-use mdc_core::model::{Symbol, SymbolTag};
+use mdc_core::model::{RunId, Symbol, SymbolTag};
 use mdc_core::sink::StreamingSink;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -59,6 +59,12 @@ impl BitfinexConnectorBuilder {
         Self {
             config: BitfinexConfig::default(),
         }
+    }
+
+    /// Injects a specific `RunId` session token (primarily for tests).
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.config.run_id = Some(run_id);
+        self
     }
 
     /// Returns the provider capabilities for Bitfinex.
