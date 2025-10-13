@@ -14,6 +14,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::sink_util::ConnectionSink;
+
 use crate::kraken::checksum::{ChecksumVerdict, KrakenChecksumBook};
 use crate::kraken::config::KrakenConfig;
 use crate::kraken::control::Command;
@@ -86,12 +88,12 @@ pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,
     config: KrakenConfig,
-    mut sink: S,
+    sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    run_id: RunId,
 ) {
-    let run_id = RunId::from_bytes([0x4b, 0x72, 0x61, 0x6b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal = 0u64;
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
 
     let tag_map: HashMap<Symbol, SymbolTag> = symbols.iter().cloned().collect();
     let symbol_list: Vec<Symbol> = symbols.iter().map(|(s, _)| s.clone()).collect();
@@ -107,7 +109,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut asks_scratch: Vec<PriceLevel> = Vec::with_capacity(config.depth);
 
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
         }
 
@@ -122,6 +124,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                 }
             }
         }
+
+        sink.next_generation();
 
         if reconnect_attempt > 0 {
             let mult = 1u32.checked_shl(reconnect_attempt.min(4) - 1).unwrap_or(16);
@@ -179,18 +183,20 @@ pub async fn run_connection_task<S: StreamingSink>(
             books.insert(sym.clone(), KrakenChecksumBook::new(config.depth));
 
             let tag = *tag_map.get(sym).unwrap_or(&0);
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
-                symbol: sym,
-                tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            if sink
+                .emit_alert(
+                    VenueId::Kraken,
+                    sym,
+                    tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
+                break 'reconnect_loop;
+            }
         }
 
         // Send initial subscriptions chunked at resubscribe_batch_size
@@ -228,23 +234,13 @@ pub async fn run_connection_task<S: StreamingSink>(
                             info!(connection_id, "Pausing Kraken connector");
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Kraken,
-                                    symbol: sym,
+                                let _ = sink.emit_alert(
+                                    VenueId::Kraken,
+                                    sym,
                                     tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(
-                                    &ctx,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Paused,
                                     },
@@ -265,7 +261,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Resync(symbol)) => {
                             if let Some(fsm) = fsms.get_mut(&symbol) {
                                 fsm.request_resync(Instant::now());
-                                pending_resubscribe.insert(symbol);
+                                pending_resubscribe.insert(symbol.clone());
+                                let tag = *tag_map.get(&symbol).unwrap_or(&0);
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Kraken,
+                                        &symbol,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ResyncStarted,
+                                    )
+                                    .is_err()
+                                {
+                                    break 'message_loop;
+                                }
                             }
                         }
                         Some(Command::ResyncAll) => {
@@ -274,6 +285,21 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 if let Some(fsm) = fsms.get_mut(sym) {
                                     fsm.request_resync(now);
                                     pending_resubscribe.insert(sym.clone());
+                                    let tag = *tag_map.get(sym).unwrap_or(&0);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::Kraken,
+                                            sym,
+                                            tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            IntegrityAlert::ResyncStarted,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'message_loop;
+                                    }
                                 }
                             }
                         }
@@ -296,6 +322,30 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         WatchdogAction::Reconnect { silent_for } => {
                             warn!(connection_id, ?silent_for, "Silence watchdog timeout; forcing reconnect");
+                            let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
+                            for sym in &symbol_list {
+                                let tag = *tag_map.get(sym).unwrap_or(&0);
+                                let _ = sink.emit_alert(
+                                    VenueId::Kraken,
+                                    sym,
+                                    tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::Kraken,
+                                    sym,
+                                    tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             break 'message_loop;
                         }
                         WatchdogAction::Healthy => {}
@@ -306,46 +356,39 @@ pub async fn run_connection_task<S: StreamingSink>(
                         match fsm.poll(now) {
                             PollOutcome::TimeoutQuarantined { .. } => {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Kraken,
-                                    symbol: sym,
-                                    tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(
-                                    &ctx,
-                                    IntegrityAlert::Quarantined {
-                                        retry_in_ms: config.quarantine_duration.as_millis().min(u64::MAX as u128) as u64,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Kraken,
+                                        sym,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::Quarantined {
+                                            retry_in_ms: config.quarantine_duration.as_millis().min(u64::MAX as u128) as u64,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break 'message_loop;
+                                }
                             }
                             PollOutcome::QuarantineExpiredTriggerResubscribe => {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Kraken,
-                                    symbol: sym,
-                                    tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(
-                                        run_id,
-                                        u64::from(connection_id),
-                                        delivery_ordinal,
-                                    ),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Kraken,
+                                        sym,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ResyncStarted,
+                                    )
+                                    .is_err()
+                                {
+                                    break 'message_loop;
+                                }
                                 pending_resubscribe.insert(sym.clone());
                             }
                             PollOutcome::None => {}
@@ -393,8 +436,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 config.checksum_policy,
                                 received_ts,
                                 connection_id,
-                                run_id,
-                                &mut delivery_ordinal,
                                 &tag_map,
                                 &mut fsms,
                                 &mut books,
@@ -414,8 +455,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     config.checksum_policy,
                                     received_ts,
                                     connection_id,
-                                    run_id,
-                                    &mut delivery_ordinal,
                                     &tag_map,
                                     &mut fsms,
                                     &mut books,
@@ -440,28 +479,28 @@ pub async fn run_connection_task<S: StreamingSink>(
                     }
                 }
             }
+
+            if sink.is_failed() {
+                break 'reconnect_loop;
+            }
         }
 
-        // On socket drop, notify embedder of connection loss for all active symbols
-        for sym in &symbol_list {
-            let tag = *tag_map.get(sym).unwrap_or(&0);
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
-                symbol: sym,
-                tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
-                IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::TransportError,
-                },
-            );
+        // On socket drop, notify embedder of connection loss for all active symbols if sink not already failed
+        if !sink.is_failed() {
+            for sym in &symbol_list {
+                let tag = *tag_map.get(sym).unwrap_or(&0);
+                let _ = sink.emit_alert(
+                    VenueId::Kraken,
+                    sym,
+                    tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ConnectionLost {
+                        reason: DisconnectKind::TransportError,
+                    },
+                );
+            }
         }
     }
 }
@@ -473,15 +512,13 @@ fn handle_frame_text<S: StreamingSink>(
     checksum_policy: ChecksumPolicy,
     received_ts: UnixNanos,
     connection_id: u32,
-    run_id: RunId,
-    delivery_ordinal: &mut u64,
     tag_map: &HashMap<Symbol, SymbolTag>,
     fsms: &mut HashMap<Symbol, SymbolFsm>,
     books: &mut HashMap<Symbol, KrakenChecksumBook>,
     pending_resubscribe: &mut HashSet<Symbol>,
     bids_scratch: &mut Vec<PriceLevel>,
     asks_scratch: &mut Vec<PriceLevel>,
-    sink: &mut S,
+    sink: &mut ConnectionSink<S>,
 ) {
     let raw_msg = match RawMessage::parse(text) {
         Ok(m) => m,
@@ -527,9 +564,6 @@ fn handle_frame_text<S: StreamingSink>(
                         &symbol,
                         tag,
                         received_ts,
-                        connection_id,
-                        run_id,
-                        delivery_ordinal,
                         fsm,
                         book,
                         pending_resubscribe,
@@ -542,9 +576,6 @@ fn handle_frame_text<S: StreamingSink>(
                         &symbol,
                         tag,
                         received_ts,
-                        connection_id,
-                        run_id,
-                        delivery_ordinal,
                         fsm,
                         book,
                         pending_resubscribe,
@@ -560,22 +591,17 @@ fn handle_frame_text<S: StreamingSink>(
                 let symbol = Symbol::from(raw_trade.symbol);
                 let tag = *tag_map.get(&symbol).unwrap_or(&0);
                 if let Ok((exchange_ts, trade)) = normalize_trade(&raw_trade) {
-                    *delivery_ordinal += 1;
-                    let ctx = EventContext {
-                        venue: VenueId::Kraken,
-                        symbol: &symbol,
+                    let ctx = sink.next_context(
+                        VenueId::Kraken,
+                        &symbol,
                         tag,
-                        exchange_ts: Some(exchange_ts),
+                        Some(exchange_ts),
                         received_ts,
-                        connection_id,
-                        delivery: DeliveryStamp::new(
-                            run_id,
-                            u64::from(connection_id),
-                            *delivery_ordinal,
-                        ),
-                        source_sequence: None,
-                    };
-                    let _ = sink.trade(&ctx, &trade);
+                        None,
+                    );
+                    if sink.trade(&ctx, &trade).is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -591,13 +617,10 @@ fn handle_snapshot<S: StreamingSink>(
     symbol: &Symbol,
     tag: SymbolTag,
     received_ts: UnixNanos,
-    connection_id: u32,
-    run_id: RunId,
-    delivery_ordinal: &mut u64,
     fsm: &mut SymbolFsm,
     book: &mut KrakenChecksumBook,
     pending_resubscribe: &mut HashSet<Symbol>,
-    sink: &mut S,
+    sink: &mut ConnectionSink<S>,
 ) {
     book.clear();
     if book.apply(&data.asks, &data.bids).is_err() {
@@ -631,48 +654,45 @@ fn handle_snapshot<S: StreamingSink>(
     match fsm.on_snapshot(is_valid) {
         SnapshotOutcome::Accepted => {
             pending_resubscribe.remove(symbol);
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
-                symbol,
-                tag,
-                exchange_ts: None,
-                received_ts,
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), *delivery_ordinal),
-                source_sequence: None,
-            };
+            let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
 
-            let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+            if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                return;
+            }
             for lvl in book.top(Side::Bid, book.depth()) {
-                let _ = sink.level(Side::Bid, lvl.price, lvl.volume);
+                if sink.level(Side::Bid, lvl.price, lvl.volume).is_err() {
+                    return;
+                }
             }
             for lvl in book.top(Side::Ask, book.depth()) {
-                let _ = sink.level(Side::Ask, lvl.price, lvl.volume);
+                if sink.level(Side::Ask, lvl.price, lvl.volume).is_err() {
+                    return;
+                }
             }
-            let _ = sink.end_book(&ctx, None);
-            let _ = sink.alert(
-                &ctx,
+            if sink.end_book(&ctx, None).is_err() {
+                return;
+            }
+            let _ = sink.emit_alert(
+                VenueId::Kraken,
+                symbol,
+                tag,
+                None,
+                crate::now_nanos(),
+                None,
                 IntegrityAlert::ResyncCompleted {
                     last_update_id: None,
                 },
             );
         }
         SnapshotOutcome::RejectedBadChecksum => {
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
-                symbol,
-                tag,
-                exchange_ts: None,
-                received_ts,
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), *delivery_ordinal),
-                source_sequence: None,
-            };
             if let Some(expected) = data.checksum {
-                let _ = sink.alert(
-                    &ctx,
+                let _ = sink.emit_alert(
+                    VenueId::Kraken,
+                    symbol,
+                    tag,
+                    None,
+                    received_ts,
+                    None,
                     IntegrityAlert::ChecksumMismatch {
                         expected,
                         calculated: book.checksum(),
@@ -691,15 +711,12 @@ fn handle_update<S: StreamingSink>(
     symbol: &Symbol,
     tag: SymbolTag,
     received_ts: UnixNanos,
-    connection_id: u32,
-    run_id: RunId,
-    delivery_ordinal: &mut u64,
     fsm: &mut SymbolFsm,
     book: &mut KrakenChecksumBook,
     pending_resubscribe: &mut HashSet<Symbol>,
     bids_scratch: &mut Vec<PriceLevel>,
     asks_scratch: &mut Vec<PriceLevel>,
-    sink: &mut S,
+    sink: &mut ConnectionSink<S>,
 ) {
     if !fsm.is_in_sync() {
         return;
@@ -732,18 +749,8 @@ fn handle_update<S: StreamingSink>(
     match fsm.on_update(is_valid, expected, calculated, now) {
         UpdateOutcome::Accepted => {
             let exchange_ts = data.timestamp.and_then(|ts| parse_rfc3339_nanos(ts).ok());
-
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
-                symbol,
-                tag,
-                exchange_ts,
-                received_ts,
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), *delivery_ordinal),
-                source_sequence: None,
-            };
+            let ctx =
+                sink.next_context(VenueId::Kraken, symbol, tag, exchange_ts, received_ts, None);
 
             bids_scratch.clear();
             populate_scratch_levels(&data.bids, bids_scratch);
@@ -751,28 +758,40 @@ fn handle_update<S: StreamingSink>(
             asks_scratch.clear();
             populate_scratch_levels(&data.asks, asks_scratch);
 
-            let _ = sink.begin_book(&ctx, BookKind::Delta);
+            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                return;
+            }
             for (lvl, raw) in bids_scratch.iter().zip(&data.bids) {
-                let _ = sink.level_raw(
-                    Side::Bid,
-                    lvl.price,
-                    lvl.volume,
-                    RawLevelText {
-                        price: raw.price.get(),
-                        volume: raw.qty.get(),
-                    },
-                );
+                if sink
+                    .level_raw(
+                        Side::Bid,
+                        lvl.price,
+                        lvl.volume,
+                        RawLevelText {
+                            price: raw.price.get(),
+                            volume: raw.qty.get(),
+                        },
+                    )
+                    .is_err()
+                {
+                    return;
+                }
             }
             for (lvl, raw) in asks_scratch.iter().zip(&data.asks) {
-                let _ = sink.level_raw(
-                    Side::Ask,
-                    lvl.price,
-                    lvl.volume,
-                    RawLevelText {
-                        price: raw.price.get(),
-                        volume: raw.qty.get(),
-                    },
-                );
+                if sink
+                    .level_raw(
+                        Side::Ask,
+                        lvl.price,
+                        lvl.volume,
+                        RawLevelText {
+                            price: raw.price.get(),
+                            volume: raw.qty.get(),
+                        },
+                    )
+                    .is_err()
+                {
+                    return;
+                }
             }
             let _ = sink.end_book(&ctx, None);
         }
@@ -784,26 +803,27 @@ fn handle_update<S: StreamingSink>(
                 symbol = symbol.as_str(),
                 expected, calculated, "Kraken checksum mismatch; resubscribing"
             );
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Kraken,
+            let _ = sink.emit_alert(
+                VenueId::Kraken,
                 symbol,
                 tag,
-                exchange_ts: None,
+                None,
                 received_ts,
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, u64::from(connection_id), *delivery_ordinal),
-                source_sequence: None,
-            };
-
-            let _ = sink.alert(
-                &ctx,
+                None,
                 IntegrityAlert::ChecksumMismatch {
                     expected,
                     calculated,
                 },
             );
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            let _ = sink.emit_alert(
+                VenueId::Kraken,
+                symbol,
+                tag,
+                None,
+                received_ts,
+                None,
+                IntegrityAlert::ResyncStarted,
+            );
             pending_resubscribe.insert(symbol.clone());
         }
         UpdateOutcome::DroppedNotSynchronized => {}

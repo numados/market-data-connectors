@@ -23,6 +23,8 @@ pub struct CoinbaseAdvancedConfig {
     pub silence_timeout: Duration,
     /// Sequence enforcement policy (Required or Optional). Default: Required.
     pub sequence_policy: mdc_core::SequencePolicy,
+    /// Injected session run token (generated if not provided).
+    pub run_id: Option<mdc_core::RunId>,
 }
 
 impl Default for CoinbaseAdvancedConfig {
@@ -37,6 +39,7 @@ impl Default for CoinbaseAdvancedConfig {
             connection_timeout: Duration::from_secs(10),
             silence_timeout: Duration::from_secs(15),
             sequence_policy: mdc_core::SequencePolicy::Required,
+            run_id: None,
         }
     }
 }
@@ -149,6 +152,12 @@ impl CoinbaseAdvancedConfigBuilder {
     /// Sets the silence watchdog timeout.
     pub fn silence_timeout(mut self, timeout: Duration) -> Self {
         self.config.silence_timeout = timeout;
+        self
+    }
+
+    /// Injects a specific `RunId` session token (primarily for tests).
+    pub fn run_id(mut self, run_id: mdc_core::RunId) -> Self {
+        self.config.run_id = Some(run_id);
         self
     }
 

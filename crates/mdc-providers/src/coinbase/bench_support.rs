@@ -24,7 +24,7 @@ impl<S: StreamingSink> Connection<S> {
         Self {
             scratch: CoinbaseConnectionScratch::with_capacity(256),
             sink,
-            run_id: RunId::from_bytes([1; 16]),
+            run_id: RunId::from_u128(1),
             symbol: Symbol::from("BTC-USD"),
             tag: 0,
             delivery_ordinal: 0,

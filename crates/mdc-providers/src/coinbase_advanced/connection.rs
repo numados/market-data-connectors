@@ -4,9 +4,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, DeliveryStamp, DisconnectKind, EventContext, GlobalSequenceCheck, IntegrityAlert,
-    RunId, SequencePolicy, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId,
-    WatchdogAction,
+    BookKind, DisconnectKind, GlobalSequenceCheck, IntegrityAlert, RunId, SequencePolicy, Side,
+    SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId, WatchdogAction,
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
@@ -14,6 +13,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+use crate::sink_util::ConnectionSink;
 
 use crate::coinbase_advanced::config::CoinbaseAdvancedConfig;
 use crate::coinbase_advanced::control::Command;
@@ -40,12 +41,12 @@ pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,
     config: CoinbaseAdvancedConfig,
-    mut sink: S,
+    sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    run_id: RunId,
 ) {
-    let run_id = RunId::from_bytes([0xc0, 0x1b, 0xad, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal = 0u64;
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
 
     let mut fsm = CoinbaseAdvancedFsm::new(symbols.clone(), config.resync_timeout);
     let mut scratch = CoinbaseAdvancedScratch::with_capacity(1_024);
@@ -56,7 +57,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let product_strs: Vec<&str> = symbols.iter().map(|(s, _)| s.as_str()).collect();
 
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
         }
 
@@ -65,12 +66,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
                     match cmd {
-                        Some(Command::Resume) => {
+                        Some(Command::Resume | Command::Reconnect) => {
                             is_paused = false;
-                            break;
-                        }
-                        Some(Command::Reconnect) => {
-                            is_paused = false;
+                            reconnect_attempt = 0;
                             break;
                         }
                         _ => {}
@@ -78,6 +76,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                 }
             }
         }
+
+        sink.next_generation();
 
         if reconnect_attempt > 0 {
             let backoff = compute_backoff(reconnect_attempt);
@@ -134,18 +134,20 @@ pub async fn run_connection_task<S: StreamingSink>(
         // Reset FSM and emit ResyncStarted for all products
         fsm.reset();
         for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::CoinbaseAdvanced,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            if sink
+                .emit_alert(
+                    VenueId::CoinbaseAdvanced,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
+                break 'reconnect_loop;
+            }
         }
 
         // Send subscribe frames in order: level2, heartbeats, optional market_trades
@@ -192,18 +194,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                     match cmd_opt {
                         Some(Command::ResyncProduct(sym)) => {
                             if let Some((tag, alert)) = fsm.trigger_manual_resync(&sym) {
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::CoinbaseAdvanced,
-                                    symbol: &sym,
-                                    tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, alert);
+                                if sink
+                                    .emit_alert(
+                                        VenueId::CoinbaseAdvanced,
+                                        &sym,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        alert,
+                                    )
+                                    .is_err()
+                                {
+                                    break 'frame_loop;
+                                }
 
                                 let sym_str = sym.as_str();
                                 let unsub = build_unsubscribe_frame("level2", &[sym_str]);
@@ -216,18 +220,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::ResyncAll) => {
                             let (should_send, alerts) = fsm.trigger_resync_all(Instant::now());
                             for (sym, tag, alert) in alerts {
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::CoinbaseAdvanced,
-                                    symbol: &sym,
-                                    tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, alert);
+                                if sink
+                                    .emit_alert(
+                                        VenueId::CoinbaseAdvanced,
+                                        &sym,
+                                        tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        alert,
+                                    )
+                                    .is_err()
+                                {
+                                    break 'frame_loop;
+                                }
                             }
 
                             if should_send {
@@ -244,12 +250,29 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
 
                         Some(Command::Pause) => {
+                            info!(connection_id, "Operator paused connector; invalidating books and halting connection");
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::CoinbaseAdvanced,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::Paused,
+                                    },
+                                );
+                            }
+                            let _ = ws_tx.close().await;
                             is_paused = true;
-                            info!(connection_id, "Operator paused connector");
+                            reconnect_attempt = 0;
+                            break 'frame_loop;
                         }
 
                         Some(Command::Resume) => {
                             is_paused = false;
+                            reconnect_attempt = 0;
                             info!(connection_id, "Operator resumed connector");
                         }
 
@@ -270,6 +293,29 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 ?silent_for,
                                 "Silence watchdog timeout on Coinbase Advanced; forcing reconnect"
                             );
+                            let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::CoinbaseAdvanced,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::CoinbaseAdvanced,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             break 'frame_loop;
                         }
                     }
@@ -336,31 +382,35 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 let (should_resubscribe, alerts) = fsm.on_gap(expected, received, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(received),
-                                    };
-                                    let _ = sink.alert(&ctx, gap_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            received_ts,
+                                            Some(received),
+                                            gap_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
 
-                                    delivery_ordinal += 1;
-                                    let start_ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: None,
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(&start_ctx, start_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            start_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
                                 }
 
                                 if should_resubscribe {
@@ -381,31 +431,35 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 let (should_resubscribe, alerts) = fsm.on_gap(u64::MAX, seq, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(seq),
-                                    };
-                                    let _ = sink.alert(&ctx, gap_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            received_ts,
+                                            Some(seq),
+                                            gap_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
 
-                                    delivery_ordinal += 1;
-                                    let start_ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: None,
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(&start_ctx, start_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            start_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
                                 }
 
                                 if should_resubscribe {
@@ -427,31 +481,35 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 let (should_resubscribe, alerts) = fsm.on_gap(expected, reset_to, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
-                                    delivery_ordinal += 1;
-                                    let ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: Some(reset_to),
-                                    };
-                                    let _ = sink.alert(&ctx, gap_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            received_ts,
+                                            Some(reset_to),
+                                            gap_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
 
-                                    delivery_ordinal += 1;
-                                    let start_ctx = EventContext {
-                                        venue: VenueId::CoinbaseAdvanced,
-                                        symbol: &sym,
-                                        tag,
-                                        exchange_ts: None,
-                                        received_ts,
-                                        connection_id,
-                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                        source_sequence: None,
-                                    };
-                                    let _ = sink.alert(&start_ctx, start_alert);
+                                    if sink
+                                        .emit_alert(
+                                            VenueId::CoinbaseAdvanced,
+                                            &sym,
+                                            tag,
+                                            None,
+                                            crate::now_nanos(),
+                                            None,
+                                            start_alert,
+                                        )
+                                        .is_err()
+                                    {
+                                        break 'frame_loop;
+                                    }
                                 }
 
                                 if should_resubscribe {
@@ -473,22 +531,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                         );
                         let (should_resubscribe, alerts) = fsm.trigger_resync_all(now);
                         for (sym, tag, start_alert) in alerts {
-                            delivery_ordinal += 1;
-                            let start_ctx = EventContext {
-                                venue: VenueId::CoinbaseAdvanced,
-                                symbol: &sym,
-                                tag,
-                                exchange_ts: env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
-                                received_ts,
-                                connection_id,
-                                delivery: DeliveryStamp::new(
-                                    run_id,
-                                    connection_id as u64,
-                                    delivery_ordinal,
-                                ),
-                                source_sequence: None,
-                            };
-                            let _ = sink.alert(&start_ctx, start_alert);
+                            if sink
+                                .emit_alert(
+                                    VenueId::CoinbaseAdvanced,
+                                    &sym,
+                                    tag,
+                                    env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                    received_ts,
+                                    None,
+                                    start_alert,
+                                )
+                                .is_err()
+                            {
+                                break 'frame_loop;
+                            }
                         }
 
                         if should_resubscribe {
@@ -498,10 +554,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                             let _ = ws_tx.send(Message::Text(sub)).await;
                         }
 
-                        continue 'frame_loop;
-                    }
-
-                    if is_paused {
                         continue 'frame_loop;
                     }
 
@@ -532,40 +584,42 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             match header.l2_kind {
                                                 Some(L2EventKind::Snapshot) => {
                                                     if let Ok((exchange_ts, snapshot)) = normalize_snapshot_from_scratch(&scratch, header.timestamp) {
-                                                        delivery_ordinal += 1;
-                                                        let ctx = EventContext {
-                                                            venue: VenueId::CoinbaseAdvanced,
-                                                            symbol: &sym,
+                                                        let ctx = sink.next_context(
+                                                            VenueId::CoinbaseAdvanced,
+                                                            &sym,
                                                             tag,
-                                                            exchange_ts: Some(exchange_ts),
+                                                            Some(exchange_ts),
                                                             received_ts,
-                                                            connection_id,
-                                                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                            source_sequence: header.sequence_num,
-                                                        };
+                                                            header.sequence_num,
+                                                        );
 
-                                                        let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+                                                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                                                            continue 'frame_loop;
+                                                        }
                                                         for l in &snapshot.bids {
-                                                            let _ = sink.level(Side::Bid, l.price, l.volume);
+                                                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                                continue 'frame_loop;
+                                                            }
                                                         }
                                                         for l in &snapshot.asks {
-                                                            let _ = sink.level(Side::Ask, l.price, l.volume);
+                                                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                                continue 'frame_loop;
+                                                            }
                                                         }
-                                                        let _ = sink.end_book(&ctx, None);
+                                                        if sink.end_book(&ctx, None).is_err() {
+                                                            continue 'frame_loop;
+                                                        }
 
                                                         if let Some(completed_alert) = fsm.on_snapshot(&sym) {
-                                                            delivery_ordinal += 1;
-                                                            let comp_ctx = EventContext {
-                                                                venue: VenueId::CoinbaseAdvanced,
-                                                                symbol: &sym,
+                                                            let _ = sink.emit_alert(
+                                                                VenueId::CoinbaseAdvanced,
+                                                                &sym,
                                                                 tag,
-                                                                exchange_ts: None,
-                                                                received_ts: crate::now_nanos(),
-                                                                connection_id,
-                                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                                source_sequence: None,
-                                                            };
-                                                            let _ = sink.alert(&comp_ctx, completed_alert);
+                                                                None,
+                                                                crate::now_nanos(),
+                                                                None,
+                                                                completed_alert,
+                                                            );
                                                         }
                                                     }
                                                 }
@@ -573,24 +627,27 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 Some(L2EventKind::Update) => {
                                                     if fsm.is_in_sync(&sym) {
                                                         if let Ok((exchange_ts, delta)) = normalize_delta_from_scratch(&scratch, header.timestamp) {
-                                                            delivery_ordinal += 1;
-                                                            let ctx = EventContext {
-                                                                venue: VenueId::CoinbaseAdvanced,
-                                                                symbol: &sym,
+                                                            let ctx = sink.next_context(
+                                                                VenueId::CoinbaseAdvanced,
+                                                                &sym,
                                                                 tag,
-                                                                exchange_ts: Some(exchange_ts),
+                                                                Some(exchange_ts),
                                                                 received_ts,
-                                                                connection_id,
-                                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                                source_sequence: header.sequence_num,
-                                                            };
+                                                                header.sequence_num,
+                                                            );
 
-                                                            let _ = sink.begin_book(&ctx, BookKind::Delta);
+                                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                                continue 'frame_loop;
+                                                            }
                                                             for l in &delta.bids {
-                                                                let _ = sink.level(Side::Bid, l.price, l.volume);
+                                                                if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                                    continue 'frame_loop;
+                                                                }
                                                             }
                                                             for l in &delta.asks {
-                                                                let _ = sink.level(Side::Ask, l.price, l.volume);
+                                                                if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                                    continue 'frame_loop;
+                                                                }
                                                             }
                                                             let _ = sink.end_book(&ctx, None);
                                                         }
@@ -618,18 +675,17 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             let sym = Symbol::from(t.product_id);
                                             if let Some(tag) = fsm.tag(&sym) {
                                                 if let Ok((exchange_ts, canonical_trade)) = normalize_trade(t) {
-                                                    delivery_ordinal += 1;
-                                                    let ctx = EventContext {
-                                                        venue: VenueId::CoinbaseAdvanced,
-                                                        symbol: &sym,
+                                                    let ctx = sink.next_context(
+                                                        VenueId::CoinbaseAdvanced,
+                                                        &sym,
                                                         tag,
-                                                        exchange_ts: Some(exchange_ts),
+                                                        Some(exchange_ts),
                                                         received_ts,
-                                                        connection_id,
-                                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                        source_sequence: env.sequence_num,
-                                                    };
-                                                    let _ = sink.trade(&ctx, &canonical_trade);
+                                                        env.sequence_num,
+                                                    );
+                                                    if sink.trade(&ctx, &canonical_trade).is_err() {
+                                                        continue 'frame_loop;
+                                                    }
                                                 }
                                             }
                                         }
@@ -644,47 +700,42 @@ pub async fn run_connection_task<S: StreamingSink>(
                     }
                 }
             }
+
+            if sink.is_failed() {
+                break 'reconnect_loop;
+            }
         }
 
-        // Emit ConnectionLost when socket breaks
-        for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::CoinbaseAdvanced,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
-                IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::Closed,
-                },
-            );
+        // Emit ConnectionLost when socket breaks (if not cleanly paused)
+        if !is_paused && !sink.is_failed() {
+            for (sym, tag) in &symbols {
+                let _ = sink.emit_alert(
+                    VenueId::CoinbaseAdvanced,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ConnectionLost {
+                        reason: DisconnectKind::Closed,
+                    },
+                );
+            }
+            reconnect_attempt += 1;
+        } else {
+            reconnect_attempt = 0;
         }
-
-        reconnect_attempt += 1;
     }
 
-    if cancel.is_cancelled() {
+    if cancel.is_cancelled() && !sink.is_failed() {
         for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::CoinbaseAdvanced,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
+            let _ = sink.emit_alert(
+                VenueId::CoinbaseAdvanced,
+                sym,
+                *tag,
+                None,
+                crate::now_nanos(),
+                None,
                 IntegrityAlert::ConnectionLost {
                     reason: DisconnectKind::Shutdown,
                 },

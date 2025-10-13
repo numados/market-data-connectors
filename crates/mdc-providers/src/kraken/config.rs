@@ -54,6 +54,8 @@ pub struct KrakenConfig {
     pub initial_backoff: Duration,
     /// Maximum reconnect backoff duration. Default: 15 seconds.
     pub max_backoff: Duration,
+    /// Injected session run token (generated if not provided).
+    pub run_id: Option<mdc_core::RunId>,
 }
 
 impl Default for KrakenConfig {
@@ -72,6 +74,7 @@ impl Default for KrakenConfig {
             watchdog_reconnect_after: Duration::from_secs(30),
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(15),
+            run_id: None,
         }
     }
 }

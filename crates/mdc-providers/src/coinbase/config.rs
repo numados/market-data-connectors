@@ -27,6 +27,20 @@ pub struct CoinbaseConfig {
     pub max_backoff: Duration,
     /// Channels and streams configuration.
     pub streams: CoinbaseStreams,
+    /// Injected session run token (generated if not provided).
+    pub run_id: Option<mdc_core::RunId>,
+}
+
+impl CoinbaseConfig {
+    /// Validates configuration invariants.
+    pub fn validate(&self) -> Result<(), mdc_core::MdcError> {
+        if self.streams.depth && !self.streams.heartbeat {
+            return Err(mdc_core::MdcError::Protocol(
+                "Coinbase depth stream requires heartbeat stream to be enabled for watchdog integrity".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Channel and stream subscription switches for Coinbase Exchange.
@@ -64,6 +78,7 @@ impl Default for CoinbaseConfig {
             initial_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(30),
             streams: CoinbaseStreams::default(),
+            run_id: None,
         }
     }
 }

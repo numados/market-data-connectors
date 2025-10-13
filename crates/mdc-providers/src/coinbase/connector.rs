@@ -3,7 +3,7 @@ use mdc_core::model::capabilities::{
     CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
     ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
 };
-use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use mdc_core::{MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -72,6 +72,10 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let run_id = self.config.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let mut join_set = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
@@ -127,8 +131,16 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
             });
 
             join_set.spawn(async move {
-                run_connection_task(connection_id, chunk, config, sink, task_cmd_rx, cancel_conn)
-                    .await;
+                run_connection_task(
+                    connection_id,
+                    chunk,
+                    config,
+                    sink,
+                    task_cmd_rx,
+                    cancel_conn,
+                    run_id,
+                )
+                .await;
             });
         }
 
@@ -191,6 +203,12 @@ impl<S> CoinbaseConnectorBuilder<S> {
         self.sink = Some(sink);
         self
     }
+
+    /// Injects a specific `RunId` session token (primarily for tests).
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.config.run_id = Some(run_id);
+        self
+    }
 }
 
 impl<M: MarketDataSink + Clone> CoinbaseConnectorBuilder<Owned<M>> {
@@ -207,6 +225,8 @@ impl<M: MarketDataSink + Clone> CoinbaseConnectorBuilder<Owned<M>> {
 impl<S: StreamingSink + Clone> CoinbaseConnectorBuilder<S> {
     /// Builds the `CoinbaseConnector` and returns it along with its `ConnectorHandle`.
     pub fn build(self) -> Result<(CoinbaseConnector<S>, ConnectorHandle), MdcError> {
+        self.config.validate()?;
+
         let sink = self
             .sink
             .ok_or_else(|| MdcError::Protocol("Streaming sink is required".into()))?;

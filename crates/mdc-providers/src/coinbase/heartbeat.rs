@@ -42,6 +42,12 @@ impl HeartbeatMonitor {
         }
     }
 
+    /// Arms the monitor for a symbol upon subscription acknowledgment so that silence is measured
+    /// from subscription rather than leaving an unmonitored window before the first heartbeat arrives.
+    pub fn arm(&mut self, symbol: Symbol, now: Instant) {
+        self.last.entry(symbol).or_insert((now, 0));
+    }
+
     /// Handles arrival of a heartbeat message for a symbol.
     ///
     /// Evaluates silence duration and sequence jumps, records the new heartbeat state, and returns
@@ -59,18 +65,24 @@ impl HeartbeatMonitor {
                 return HeartbeatVerdict::Timeout { silent_for };
             }
 
-            if let Some(threshold) = self.gap_threshold {
-                if sequence > prev_seq {
-                    let gap = sequence - prev_seq;
-                    if gap > threshold {
-                        self.last.insert(symbol.clone(), (now, sequence));
-                        return HeartbeatVerdict::SequenceGap { gap };
+            if prev_seq > 0 {
+                if let Some(threshold) = self.gap_threshold {
+                    if sequence > prev_seq {
+                        let gap = sequence - prev_seq;
+                        if gap > threshold {
+                            self.last.insert(symbol.clone(), (now, sequence));
+                            return HeartbeatVerdict::SequenceGap { gap };
+                        }
                     }
                 }
             }
 
             self.last.insert(symbol.clone(), (now, sequence));
-            HeartbeatVerdict::Healthy
+            if prev_seq == 0 {
+                HeartbeatVerdict::First
+            } else {
+                HeartbeatVerdict::Healthy
+            }
         } else {
             self.last.insert(symbol.clone(), (now, sequence));
             HeartbeatVerdict::First
@@ -180,5 +192,24 @@ mod tests {
         // At t0 + 6.1s: both timed out
         let poll_6_1s: Vec<_> = monitor.poll(t0 + Duration::from_millis(6100)).collect();
         assert_eq!(poll_6_1s.len(), 2);
+    }
+
+    #[test]
+    fn test_heartbeat_monitor_arm() {
+        let t0 = Instant::now();
+        let timeout = Duration::from_millis(5000);
+        let mut monitor = HeartbeatMonitor::new(timeout, Some(3000));
+        let btc = Symbol::from("BTC-USD");
+
+        monitor.arm(btc.clone(), t0);
+
+        // Poll after 5.1s -> timed out even before first heartbeat arrived!
+        let poll: Vec<_> = monitor.poll(t0 + Duration::from_millis(5100)).collect();
+        assert_eq!(poll.len(), 1);
+        assert_eq!(poll[0].0, btc);
+
+        // If first heartbeat arrives within timeout, returns First
+        let t1 = t0 + Duration::from_millis(1000);
+        assert_eq!(monitor.on_heartbeat(&btc, 5000, t1), HeartbeatVerdict::First);
     }
 }

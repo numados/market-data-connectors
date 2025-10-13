@@ -1,6 +1,8 @@
 //! Main Coinbase Advanced Trade WebSocket market data connector and builder.
 
-use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use mdc_core::{
+    MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -54,6 +56,10 @@ impl<S: StreamingSink + Clone> CoinbaseAdvancedConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let run_id = self.config.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let mut join_set = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
@@ -108,8 +114,16 @@ impl<S: StreamingSink + Clone> CoinbaseAdvancedConnector<S> {
             });
 
             join_set.spawn(async move {
-                run_connection_task(connection_id, chunk, config, sink, task_cmd_rx, cancel_conn)
-                    .await;
+                run_connection_task(
+                    connection_id,
+                    chunk,
+                    config,
+                    sink,
+                    task_cmd_rx,
+                    cancel_conn,
+                    run_id,
+                )
+                .await;
             });
         }
 
@@ -203,6 +217,12 @@ impl<S> CoinbaseAdvancedConnectorBuilder<S> {
     /// Sets the maximum number of symbols per WebSocket connection.
     pub fn symbols_per_connection(mut self, n: usize) -> Self {
         self.config.symbols_per_connection = n;
+        self
+    }
+
+    /// Injects a specific `RunId` session token (primarily for tests).
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.config.run_id = Some(run_id);
         self
     }
 
