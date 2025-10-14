@@ -358,6 +358,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                             let ts = crate::now_nanos();
                             match gzip_decoder.decompress(bytes) {
                                 Ok(decompressed) => (decompressed, ts),
+                                Err(e @ crate::huobi::gzip::GzipError::FrameTooLarge { .. }) => {
+                                    warn!(
+                                        connection_id,
+                                        error = %e,
+                                        "Decompressed frame exceeded size cap; reconnecting"
+                                    );
+                                    break 'frame_loop;
+                                }
                                 Err(e) => {
                                     warn!(
                                         connection_id,
@@ -761,6 +769,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                 None,
                 IntegrityAlert::ConnectionLost {
                     reason: DisconnectKind::TransportError,
+                },
+            );
+        }
+    }
+
+    if cancel.is_cancelled() {
+        for (sym, tag) in &symbols {
+            let _ = sink.emit_alert(
+                VenueId::Huobi,
+                sym,
+                *tag,
+                None,
+                crate::now_nanos(),
+                None,
+                IntegrityAlert::ConnectionLost {
+                    reason: DisconnectKind::Shutdown,
                 },
             );
         }

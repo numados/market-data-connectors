@@ -18,6 +18,13 @@ pub enum GzipError {
     #[error("truncated gzip header extension")]
     TruncatedHeader,
 
+    /// Decompressed size exceeded configured frame size limit.
+    #[error("decompressed frame size exceeded limit of {limit} bytes")]
+    FrameTooLarge {
+        /// Configured limit in bytes.
+        limit: usize,
+    },
+
     /// Decompression failed in flate2 decompressor.
     #[error("decompression failed: {0}")]
     DecompressFailed(String),
@@ -32,6 +39,9 @@ pub enum GzipError {
     },
 }
 
+/// Default maximum decompressed frame size allowed (1 MiB).
+pub const DEFAULT_MAX_DECOMPRESSED_FRAME_SIZE: usize = 1024 * 1024;
+
 /// Reusable gzip frame decoder.
 ///
 /// Keeps an internal decompression scratch buffer and reuses a [`flate2::Decompress`]
@@ -39,6 +49,7 @@ pub enum GzipError {
 pub struct GzipDecoder {
     decompressor: Decompress,
     buffer: Vec<u8>,
+    max_frame_size: usize,
 }
 
 impl fmt::Debug for GzipDecoder {
@@ -46,27 +57,47 @@ impl fmt::Debug for GzipDecoder {
         f.debug_struct("GzipDecoder")
             .field("buffer_capacity", &self.buffer.capacity())
             .field("buffer_len", &self.buffer.len())
+            .field("max_frame_size", &self.max_frame_size)
             .finish()
     }
 }
 
 impl Default for GzipDecoder {
     fn default() -> Self {
-        Self::with_capacity(64 * 1024)
+        Self::with_capacity_and_limit(64 * 1024, DEFAULT_MAX_DECOMPRESSED_FRAME_SIZE)
     }
 }
 
 impl GzipDecoder {
-    /// Creates a new `GzipDecoder` with default 64 KiB scratch capacity.
+    /// Creates a new `GzipDecoder` with default 64 KiB scratch capacity and 1 MiB limit.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a new `GzipDecoder` pre-allocating `capacity` bytes for uncompressed output.
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_limit(capacity, DEFAULT_MAX_DECOMPRESSED_FRAME_SIZE)
+    }
+
+    /// Creates a new `GzipDecoder` with pre-allocated `capacity` and custom `max_frame_size`.
+    pub fn with_capacity_and_limit(capacity: usize, max_frame_size: usize) -> Self {
         Self {
             decompressor: Decompress::new(false),
-            buffer: Vec::with_capacity(capacity),
+            buffer: Vec::with_capacity(capacity.min(max_frame_size)),
+            max_frame_size,
+        }
+    }
+
+    /// Returns the configured maximum decompressed frame size.
+    pub fn max_frame_size(&self) -> usize {
+        self.max_frame_size
+    }
+
+    /// Sets the maximum decompressed frame size.
+    pub fn set_max_frame_size(&mut self, max_frame_size: usize) {
+        self.max_frame_size = max_frame_size;
+        if self.buffer.capacity() > self.max_frame_size {
+            self.buffer.shrink_to(self.max_frame_size);
         }
     }
 
@@ -153,25 +184,70 @@ impl GzipDecoder {
         ];
         let expected_size = u32::from_le_bytes(isize_bytes) as usize;
 
+        // Cap enforced before reserve/inflation, completely ignoring trailer ISIZE as an allocation hint
+        if expected_size > self.max_frame_size {
+            return Err(GzipError::FrameTooLarge {
+                limit: self.max_frame_size,
+            });
+        }
+
         let deflate_data = &input[pos..trailer_start];
 
         self.buffer.clear();
-        if self.buffer.capacity() < expected_size {
-            let add = expected_size.saturating_sub(self.buffer.capacity());
-            self.buffer.reserve(add);
+        if self.buffer.capacity() > self.max_frame_size {
+            self.buffer.shrink_to(self.max_frame_size);
         }
 
         self.decompressor.reset(false);
 
-        let status = self
-            .decompressor
-            .decompress_vec(deflate_data, &mut self.buffer, FlushDecompress::Finish)
-            .map_err(|e| GzipError::DecompressFailed(e.to_string()))?;
+        let mut chunk = [0u8; 16384];
+        loop {
+            let before_in = self.decompressor.total_in() as usize;
+            let before_out = self.decompressor.total_out() as usize;
 
-        if status != Status::StreamEnd && status != Status::Ok {
-            return Err(GzipError::DecompressFailed(format!(
-                "unexpected decompress status: {status:?}"
-            )));
+            if before_in > deflate_data.len() {
+                return Err(GzipError::DecompressFailed(
+                    "decompressor read past deflate data boundary".to_string(),
+                ));
+            }
+
+            let in_slice = &deflate_data[before_in..];
+            let status = self
+                .decompressor
+                .decompress(in_slice, &mut chunk, FlushDecompress::Finish)
+                .map_err(|e| GzipError::DecompressFailed(e.to_string()))?;
+
+            let after_out = self.decompressor.total_out() as usize;
+            let written = after_out.saturating_sub(before_out);
+
+            if self.buffer.len().saturating_add(written) > self.max_frame_size {
+                return Err(GzipError::FrameTooLarge {
+                    limit: self.max_frame_size,
+                });
+            }
+
+            self.buffer.extend_from_slice(&chunk[..written]);
+
+            match status {
+                Status::StreamEnd => break,
+                Status::Ok => {
+                    let after_in = self.decompressor.total_in() as usize;
+                    if after_in == before_in && written == 0 {
+                        return Err(GzipError::DecompressFailed(
+                            "decompressor made no forward progress".to_string(),
+                        ));
+                    }
+                }
+                Status::BufError => {
+                    return Err(GzipError::DecompressFailed(
+                        "unexpected buffer error during decompression".to_string(),
+                    ));
+                }
+            }
+        }
+
+        if self.buffer.capacity() > self.max_frame_size {
+            self.buffer.shrink_to(self.max_frame_size);
         }
 
         if self.buffer.len() != expected_size {
@@ -270,5 +346,40 @@ mod tests {
             decoder.decompress(&[0x1f, 0x8b]),
             Err(GzipError::TooShort(2))
         );
+    }
+
+    #[test]
+    fn test_forged_trailer_huge_isize_does_not_grow_capacity() {
+        let gz = include_bytes!("../../tests/fixtures/huobi/depth_update.json.gz");
+        let mut forged = gz.to_vec();
+        let len = forged.len();
+        // Overwrite ISIZE with ~2 GiB
+        forged[len - 4] = 0xff;
+        forged[len - 3] = 0xff;
+        forged[len - 2] = 0xff;
+        forged[len - 1] = 0x7f;
+
+        let mut decoder = GzipDecoder::with_capacity(4096);
+        let cap_before = decoder.capacity();
+
+        let res = decoder.decompress(&forged);
+        assert_eq!(
+            res,
+            Err(GzipError::FrameTooLarge {
+                limit: DEFAULT_MAX_DECOMPRESSED_FRAME_SIZE,
+            })
+        );
+        // Ensure capacity never expanded to 2 GiB
+        assert_eq!(decoder.capacity(), cap_before);
+    }
+
+    #[test]
+    fn test_frame_exceeds_custom_cap() {
+        let gz = include_bytes!("../../tests/fixtures/huobi/depth_update.json.gz");
+        let mut decoder = GzipDecoder::with_capacity_and_limit(1024, 64);
+
+        let res = decoder.decompress(gz);
+        assert_eq!(res, Err(GzipError::FrameTooLarge { limit: 64 }));
+        assert!(decoder.capacity() <= 64);
     }
 }
