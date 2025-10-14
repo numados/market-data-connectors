@@ -61,9 +61,7 @@ impl VwdRestClient {
         let request_url =
             build_snapquote_url(&config.base_url, config.account_path.expose_secret(), &keys)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .build()
+        let client = crate::http::build_standard_http_client(config.request_timeout)
             .map_err(|e| MdcError::Transport(Box::new(e)))?;
 
         Ok(Self {
@@ -89,10 +87,10 @@ impl VwdRestClient {
             return Err(SourceErrorKind::HttpStatus(status.as_u16()));
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| SourceErrorKind::Transport)?;
+        let body =
+            crate::http::read_response_bytes_capped(response, crate::http::DEFAULT_REST_SNAPSHOT_CAP)
+                .await
+                .map_err(|_| SourceErrorKind::Transport)?;
 
         let received_ts = crate::now_nanos();
 

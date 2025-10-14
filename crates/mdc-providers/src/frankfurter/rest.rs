@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use mdc_core::{MdcError, UnixNanos, integrity::embargo::parse_retry_after};
+use mdc_core::{MdcError, UnixNanos};
 use url::Url;
 
 use crate::frankfurter::config::FrankfurterConfig;
@@ -58,35 +58,21 @@ pub struct FrankfurterRestClient {
     client: reqwest::Client,
     base_url: Url,
     provider: String,
+    timeout: Duration,
     body_cap_bytes: usize,
 }
 
 impl FrankfurterRestClient {
     /// Creates a new `FrankfurterRestClient` from configuration.
     pub fn new(config: &FrankfurterConfig) -> Result<Self, MdcError> {
-        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().is_empty() {
-                return attempt.follow();
-            }
-            let initial = attempt.previous()[0].origin();
-            let current = attempt.url().origin();
-            if initial == current {
-                attempt.follow()
-            } else {
-                attempt.error("foreign-origin redirect disallowed")
-            }
-        });
-
-        let client = reqwest::Client::builder()
-            .timeout(config.request_timeout)
-            .redirect(redirect_policy)
-            .build()
+        let client = crate::http::build_standard_http_client(config.request_timeout)
             .map_err(|e| MdcError::Transport(Box::new(e)))?;
 
         Ok(Self {
             client,
             base_url: config.base_url.clone(),
             provider: config.provider.clone(),
+            timeout: config.request_timeout,
             body_cap_bytes: config.body_cap_bytes,
         })
     }
@@ -97,6 +83,7 @@ impl FrankfurterRestClient {
             client,
             base_url: config.base_url.clone(),
             provider: config.provider.clone(),
+            timeout: config.request_timeout,
             body_cap_bytes: config.body_cap_bytes,
         }
     }
@@ -112,53 +99,25 @@ impl FrankfurterRestClient {
             Err(_) => return Err(HttpPollError::Transport),
         };
 
-        let response = self
-            .client
-            .get(url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(|err| {
-                if err.is_redirect() {
-                    HttpPollError::ForeignRedirect
-                } else {
-                    HttpPollError::Transport
-                }
-            })?;
-
-        let received_ts = crate::now_nanos();
-        let status = response.status();
-
-        if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| parse_retry_after(Some(s)));
-
-            return Err(HttpPollError::HttpStatus {
-                status: status.as_u16(),
-                retry_after,
-            });
-        }
-
-        // Check declared Content-Length header against body cap
-        if let Some(content_len) = response.content_length() {
-            if content_len > self.body_cap_bytes as u64 {
-                return Err(HttpPollError::OversizedBody);
+        match crate::http::execute_http_get(&self.client, url, self.timeout, self.body_cap_bytes).await {
+            Ok(succ) => Ok(PollResponse {
+                received_ts: succ.received_ts,
+                body: succ.body,
+            }),
+            Err(crate::http::HttpError::ForeignRedirect(_)) => Err(HttpPollError::ForeignRedirect),
+            Err(crate::http::HttpError::RateLimit { status, retry_after }) => {
+                Err(HttpPollError::HttpStatus { status, retry_after })
             }
+            Err(crate::http::HttpError::HttpStatus {
+                status,
+                retry_after,
+                ..
+            }) => Err(HttpPollError::HttpStatus { status, retry_after }),
+            Err(crate::http::HttpError::ResponseTooLarge { .. }) => {
+                Err(HttpPollError::OversizedBody)
+            }
+            Err(_) => Err(HttpPollError::Transport),
         }
-
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| HttpPollError::Transport)?;
-
-        if body.len() > self.body_cap_bytes {
-            return Err(HttpPollError::OversizedBody);
-        }
-
-        Ok(PollResponse { received_ts, body })
     }
 }
 

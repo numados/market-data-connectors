@@ -33,6 +33,19 @@ pub(crate) mod rest_quote_util;
     feature = "frankfurter",
     feature = "vwd",
 ))]
+pub mod http;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
+    feature = "frankfurter",
+    feature = "vwd",
+))]
 pub mod catalog_client;
 
 #[cfg(any(

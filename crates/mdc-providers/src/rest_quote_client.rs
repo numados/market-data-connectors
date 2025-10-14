@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use mdc_core::ArcError;
-use mdc_core::integrity::embargo::parse_retry_after;
 use mdc_core::model::{Symbol, UnixNanos, VenueId};
 use mdc_core::rest_quote::{
     BoxFuture, RestQuoteError, RestQuoteRequest, RestQuoteSnapshot, RestQuoteSource,
@@ -47,22 +45,7 @@ impl HttpRestQuoteClient {
                 reason: format!("invalid default endpoint URL '{default_endpoint}': {e}"),
             })?;
 
-        let redirect_policy = reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().is_empty() {
-                return attempt.follow();
-            }
-            let initial = attempt.previous()[0].origin();
-            let current = attempt.url().origin();
-            if initial == current {
-                attempt.follow()
-            } else {
-                attempt.error("foreign-origin redirect disallowed")
-            }
-        });
-
-        let client = reqwest::Client::builder()
-            .redirect(redirect_policy)
-            .build()
+        let client = crate::http::build_standard_http_client(Duration::from_secs(30))
             .map_err(|e| RestQuoteError::Unsupported {
                 provider,
                 reason: format!("failed to build reqwest client: {e}"),
@@ -144,121 +127,27 @@ impl RestQuoteSource for HttpRestQuoteClient {
 
             let target_url = (self.url_builder)(self.target_url(), &request.symbols)?;
 
-            let response_res = self
-                .client
-                .get(target_url)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .timeout(self.timeout)
-                .send()
-                .await;
-
-            let response = match response_res {
-                Ok(resp) => resp,
-                Err(err) => {
-                    if err.is_timeout() {
-                        return Err(RestQuoteError::Timeout {
-                            provider: self.provider,
-                        });
-                    }
-                    if err.is_redirect() {
-                        return Err(RestQuoteError::Transport {
-                            provider: self.provider,
-                            message: "foreign-origin redirect disallowed".to_string(),
-                            source: Some(ArcError::new(err)),
-                        });
-                    }
-                    return Err(RestQuoteError::Transport {
-                        provider: self.provider,
-                        message: format!("network transport error: {err}"),
-                        source: Some(ArcError::new(err)),
-                    });
-                }
-            };
-
-            let status = response.status();
-
-            if status.as_u16() == 429 || status.as_u16() == 418 {
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| parse_retry_after(Some(s)));
-
-                return Err(RestQuoteError::RateLimit {
-                    provider: self.provider,
-                    retry_after,
-                });
-            }
-
-            if !status.is_success() {
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| parse_retry_after(Some(s)));
-
-                let msg = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "failed to read error body".to_string());
-
-                return Err(RestQuoteError::HttpStatus {
-                    provider: self.provider,
-                    status: status.as_u16(),
-                    message: msg,
-                    retry_after,
-                    source: None,
-                });
-            }
-
-            if let Some(content_len) = response.content_length() {
-                if content_len > request.max_response_bytes as u64 {
-                    return Err(RestQuoteError::ResponseTooLarge {
-                        provider: self.provider,
-                        max: request.max_response_bytes,
-                        actual: content_len as usize,
-                    });
-                }
-            }
-
-            let body_bytes = match response.bytes().await {
-                Ok(b) => b,
-                Err(err) => {
-                    if err.is_timeout() {
-                        return Err(RestQuoteError::Timeout {
-                            provider: self.provider,
-                        });
-                    }
-                    return Err(RestQuoteError::Transport {
-                        provider: self.provider,
-                        message: format!("failed to read response body: {err}"),
-                        source: Some(ArcError::new(err)),
-                    });
-                }
-            };
-
-            if body_bytes.len() > request.max_response_bytes as usize {
-                return Err(RestQuoteError::ResponseTooLarge {
-                    provider: self.provider,
-                    max: request.max_response_bytes,
-                    actual: body_bytes.len(),
-                });
-            }
-
-            let received_ts = crate::now_nanos();
+            let fetch_success = crate::http::execute_http_get(
+                &self.client,
+                target_url,
+                self.timeout,
+                request.max_response_bytes as usize,
+            )
+            .await
+            .map_err(|e| e.into_rest_quote_error(self.provider))?;
 
             let payload_str =
-                std::str::from_utf8(&body_bytes).map_err(|e| RestQuoteError::InvalidEnvelope {
+                std::str::from_utf8(&fetch_success.body).map_err(|e| RestQuoteError::InvalidEnvelope {
                     provider: self.provider,
                     reason: format!("response body is not valid UTF-8: {e}"),
                 })?;
 
             let results =
-                (self.decoder)(self.provider, &request.symbols, payload_str, received_ts)?;
+                (self.decoder)(self.provider, &request.symbols, payload_str, fetch_success.received_ts)?;
 
             Ok(RestQuoteSnapshot {
                 configuration_generation: request.configuration_generation,
-                received_ts,
+                received_ts: fetch_success.received_ts,
                 results,
             })
         })
