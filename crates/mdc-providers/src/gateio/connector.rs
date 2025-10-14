@@ -3,7 +3,7 @@ use mdc_core::model::capabilities::{
     CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
     ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
 };
-use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use mdc_core::{MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -46,6 +46,7 @@ pub struct GateioConnector<S> {
     config: GateioConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: S,
+    run_id: Option<RunId>,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
 }
@@ -86,6 +87,10 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let mut join_set = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
@@ -140,8 +145,16 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
             });
 
             join_set.spawn(async move {
-                run_connection_task(connection_id, chunk, config, sink, task_cmd_rx, cancel_conn)
-                    .await;
+                run_connection_task(
+                    connection_id,
+                    chunk,
+                    config,
+                    sink,
+                    task_cmd_rx,
+                    cancel_conn,
+                    run_id,
+                )
+                .await;
             });
         }
 
@@ -164,6 +177,7 @@ pub struct GateioConnectorBuilder<S> {
     config: GateioConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: Option<S>,
+    run_id: Option<RunId>,
 }
 
 impl<S> GateioConnectorBuilder<S> {
@@ -173,7 +187,14 @@ impl<S> GateioConnectorBuilder<S> {
             config,
             symbols: Vec::new(),
             sink: None,
+            run_id: None,
         }
+    }
+
+    /// Explicitly sets the `RunId` for this connector session.
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
     }
 
     /// Returns the provider capabilities for Gate.io.
@@ -240,6 +261,7 @@ impl<M: MarketDataSink + Clone> GateioConnectorBuilder<Owned<M>> {
             config: self.config,
             symbols: self.symbols,
             sink: Some(Owned::new(sink)),
+            run_id: self.run_id,
         }
     }
 }
@@ -268,6 +290,7 @@ impl<S: StreamingSink + Clone> GateioConnectorBuilder<S> {
             config: self.config,
             symbols: self.symbols,
             sink,
+            run_id: self.run_id,
             command_tx,
             command_rx,
         };

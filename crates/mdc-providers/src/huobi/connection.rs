@@ -10,7 +10,7 @@ use mdc_core::model::{
     Side, Symbol, SymbolTag, UnixNanos, VenueId,
 };
 use mdc_core::resync::{DeltaDecision, SnapshotOutcome};
-use mdc_core::sink::{BookKind, EventContext, StreamingSink};
+use mdc_core::sink::{BookKind, StreamingSink};
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
@@ -28,18 +28,19 @@ use crate::huobi::raw::{
     build_req_snapshot_frame, build_sub_mbp_frame, build_sub_trades_frame,
     extract_symbol_from_channel,
 };
+use crate::sink_util::ConnectionSink;
 
 /// Runs the Huobi connection task until cancelled.
 pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,
     config: HuobiConfig,
-    mut sink: S,
+    sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    run_id: RunId,
 ) {
-    let run_id = RunId::from_bytes([0x68, 0x75, 0x6f, 0x62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal = 0u64;
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
@@ -52,7 +53,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut is_paused = false;
 
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
         }
 
@@ -107,6 +108,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         };
 
+        sink.next_generation();
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
         // Queue all symbols for snapshot requests and reset FSMs
@@ -120,18 +122,15 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
             pending_snapshots.push_back(sym.clone());
 
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Huobi,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+            let _ = sink.emit_alert(
+                VenueId::Huobi,
+                sym,
+                *tag,
+                None,
+                crate::now_nanos(),
+                None,
+                IntegrityAlert::ResyncStarted,
+            );
         }
 
         // Send initial subscriptions
@@ -189,19 +188,13 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Huobi,
-                            symbol: sym,
-                            tag: *tag,
-                            exchange_ts: None,
-                            received_ts: crate::now_nanos(),
-                            connection_id,
-                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                            source_sequence: None,
-                        };
-                        let _ = sink.alert(
-                            &ctx,
+                        let _ = sink.emit_alert(
+                            VenueId::Huobi,
+                            sym,
+                            *tag,
+                            None,
+                            crate::now_nanos(),
+                            None,
                             IntegrityAlert::ConnectionLost {
                                 reason: DisconnectKind::Shutdown,
                             },
@@ -215,18 +208,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::ResyncSymbol(sym)) => {
                             if let Some(fsm) = fsms.get_mut(&sym) {
                                 let alert = fsm.trigger_resync(Instant::now());
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Huobi,
-                                    symbol: &sym,
-                                    tag: fsm.tag(),
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, alert);
+                                let _ = sink.emit_alert(
+                                    VenueId::Huobi,
+                                    &sym,
+                                    fsm.tag(),
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    alert,
+                                );
                                 if !pending_snapshots.contains(&sym) {
                                     pending_snapshots.push_back(sym);
                                 }
@@ -247,6 +237,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Some(Command::Pause) => {
                             is_paused = true;
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::Huobi,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::Paused,
+                                    },
+                                );
+                            }
+                            break 'frame_loop;
                         }
                         Some(Command::Resume) => {
                             is_paused = false;
@@ -264,9 +268,33 @@ pub async fn run_connection_task<S: StreamingSink>(
                         WatchdogAction::SendPing => {
                             let _ = ws_tx.send(Message::Ping(vec![])).await;
                         }
-                        WatchdogAction::Reconnect { .. } => {
+                        WatchdogAction::Reconnect { silent_for } => {
+                            let elapsed_ms = silent_for.as_millis() as u64;
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::Huobi,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::Huobi,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             warn!(
                                 connection_id,
+                                elapsed_ms,
                                 "Silence watchdog timeout on Huobi feed; forcing reconnect"
                             );
                             break 'frame_loop;
@@ -388,12 +416,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 let header_res = MbpSeed::new(&mut scratch).deserialize(&mut de);
                                                 match header_res {
                                                     Ok(header) => {
-                                                        delivery_ordinal += 1;
-                                                        let delivery = DeliveryStamp::new(
-                                                            run_id,
-                                                            connection_id as u64,
-                                                            delivery_ordinal,
-                                                        );
+                                                        let delivery = sink.next_stamp();
                                                         match fsm.on_snapshot(
                                                             &header,
                                                             &scratch,
@@ -407,47 +430,33 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 ..
                                                             }) => {
                                                                 // Emit snapshot
-                                                                delivery_ordinal += 1;
-                                                                let ctx = EventContext {
-                                                                    venue: VenueId::Huobi,
-                                                                    symbol: &active_symbol,
-                                                                    tag: fsm.tag(),
-                                                                    exchange_ts: ts.map(UnixNanos::from_millis),
+                                                                let snap_ctx = sink.next_context(
+                                                                    VenueId::Huobi,
+                                                                    &active_symbol,
+                                                                    fsm.tag(),
+                                                                    ts.map(UnixNanos::from_millis),
                                                                     received_ts,
-                                                                    connection_id,
-                                                                    delivery: DeliveryStamp::new(
-                                                                        run_id,
-                                                                        connection_id as u64,
-                                                                        delivery_ordinal,
-                                                                    ),
-                                                                    source_sequence: Some(header.seq_num),
-                                                                };
-                                                                let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+                                                                    Some(header.seq_num),
+                                                                );
+                                                                let _ = sink.begin_book(&snap_ctx, BookKind::Snapshot);
                                                                 for l in &scratch.bids {
                                                                     let _ = sink.level(Side::Bid, l.price, l.volume);
                                                                 }
                                                                 for l in &scratch.asks {
                                                                     let _ = sink.level(Side::Ask, l.price, l.volume);
                                                                 }
-                                                                let _ = sink.end_book(&ctx, None);
+                                                                let _ = sink.end_book(&snap_ctx, None);
 
                                                                 // Replay buffered deltas
                                                                 for replayed_event in replay {
-                                                                    delivery_ordinal += 1;
-                                                                    let rep_ctx = EventContext {
-                                                                        venue: VenueId::Huobi,
-                                                                        symbol: &active_symbol,
-                                                                        tag: fsm.tag(),
-                                                                        exchange_ts: replayed_event.exchange_ts,
-                                                                        received_ts: replayed_event.received_ts,
-                                                                        connection_id,
-                                                                        delivery: DeliveryStamp::new(
-                                                                            run_id,
-                                                                            connection_id as u64,
-                                                                            delivery_ordinal,
-                                                                        ),
-                                                                        source_sequence: replayed_event.source_sequence,
-                                                                    };
+                                                                    let rep_ctx = sink.next_context(
+                                                                        VenueId::Huobi,
+                                                                        &active_symbol,
+                                                                        fsm.tag(),
+                                                                        replayed_event.exchange_ts,
+                                                                        replayed_event.received_ts,
+                                                                        replayed_event.source_sequence,
+                                                                    );
                                                                     let _ = sink.begin_book(&rep_ctx, BookKind::Delta);
                                                                     for l in &replayed_event.kind.bids {
                                                                         let _ = sink.level(Side::Bid, l.price, l.volume);
@@ -458,24 +467,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                     let _ = sink.end_book(&rep_ctx, replayed_event.kind.sequence);
                                                                 }
 
-                                                                // Alert ResyncCompleted
-                                                                delivery_ordinal += 1;
-                                                                let comp_ctx = EventContext {
-                                                                    venue: VenueId::Huobi,
-                                                                    symbol: &active_symbol,
-                                                                    tag: fsm.tag(),
-                                                                    exchange_ts: None,
-                                                                    received_ts: crate::now_nanos(),
-                                                                    connection_id,
-                                                                    delivery: DeliveryStamp::new(
-                                                                        run_id,
-                                                                        connection_id as u64,
-                                                                        delivery_ordinal,
-                                                                    ),
-                                                                    source_sequence: None,
-                                                                };
-                                                                let _ = sink.alert(
-                                                                    &comp_ctx,
+                                                                // Alert ResyncCompleted strictly after snapshot and replay
+                                                                let _ = sink.emit_alert(
+                                                                    VenueId::Huobi,
+                                                                    &active_symbol,
+                                                                    fsm.tag(),
+                                                                    None,
+                                                                    crate::now_nanos(),
+                                                                    None,
                                                                     IntegrityAlert::ResyncCompleted {
                                                                         last_update_id: Some(header.seq_num),
                                                                     },
@@ -561,21 +560,14 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                                 match fsm.check_delta(range) {
                                                     DeltaDecision::Emit => {
-                                                        delivery_ordinal += 1;
-                                                        let ctx = EventContext {
-                                                            venue: VenueId::Huobi,
-                                                            symbol: &symbol,
-                                                            tag: fsm.tag(),
-                                                            exchange_ts: Some(UnixNanos::from_millis(ts)),
+                                                        let ctx = sink.next_context(
+                                                            VenueId::Huobi,
+                                                            &symbol,
+                                                            fsm.tag(),
+                                                            Some(UnixNanos::from_millis(ts)),
                                                             received_ts,
-                                                            connection_id,
-                                                            delivery: DeliveryStamp::new(
-                                                                run_id,
-                                                                connection_id as u64,
-                                                                delivery_ordinal,
-                                                            ),
-                                                            source_sequence: Some(header.seq_num),
-                                                        };
+                                                            Some(header.seq_num),
+                                                        );
                                                         let _ = sink.begin_book(&ctx, BookKind::Delta);
                                                         for l in &scratch.bids {
                                                             let _ = sink.level(Side::Bid, l.price, l.volume);
@@ -586,7 +578,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         let _ = sink.end_book(&ctx, Some(range));
                                                     }
                                                     DeltaDecision::Buffer => {
-                                                        delivery_ordinal += 1;
                                                         let event = MarketEvent {
                                                             venue: VenueId::Huobi,
                                                             symbol: symbol.clone(),
@@ -594,9 +585,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             received_ts,
                                                             tag: fsm.tag(),
                                                             delivery: DeliveryStamp::new(
-                                                                run_id,
-                                                                connection_id as u64,
-                                                                delivery_ordinal,
+                                                                sink.run_id(),
+                                                                sink.generation(),
+                                                                0,
                                                             ),
                                                             source_sequence: Some(header.seq_num),
                                                             kind: L2Delta {
@@ -612,22 +603,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 "Buffer overflow while buffering Huobi deltas; triggering resync"
                                                             );
                                                             let start_alert = fsm.trigger_resync(now);
-                                                            delivery_ordinal += 1;
-                                                            let start_ctx = EventContext {
-                                                                venue: VenueId::Huobi,
-                                                                symbol: &symbol,
-                                                                tag: fsm.tag(),
-                                                                exchange_ts: None,
-                                                                received_ts: crate::now_nanos(),
-                                                                connection_id,
-                                                                delivery: DeliveryStamp::new(
-                                                                    run_id,
-                                                                    connection_id as u64,
-                                                                    delivery_ordinal,
-                                                                ),
-                                                                source_sequence: None,
-                                                            };
-                                                            let _ = sink.alert(&start_ctx, start_alert);
+                                                            let _ = sink.emit_alert(
+                                                                VenueId::Huobi,
+                                                                &symbol,
+                                                                fsm.tag(),
+                                                                None,
+                                                                crate::now_nanos(),
+                                                                None,
+                                                                start_alert,
+                                                            );
 
                                                             if !pending_snapshots.contains(&symbol) {
                                                                 pending_snapshots.push_back(symbol);
@@ -638,40 +622,26 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         // Stale or duplicate delta; dropped silently
                                                     }
                                                     DeltaDecision::GapDetected { alert } => {
-                                                        delivery_ordinal += 1;
-                                                        let gap_ctx = EventContext {
-                                                            venue: VenueId::Huobi,
-                                                            symbol: &symbol,
-                                                            tag: fsm.tag(),
-                                                            exchange_ts: Some(UnixNanos::from_millis(ts)),
+                                                        let _ = sink.emit_alert(
+                                                            VenueId::Huobi,
+                                                            &symbol,
+                                                            fsm.tag(),
+                                                            Some(UnixNanos::from_millis(ts)),
                                                             received_ts,
-                                                            connection_id,
-                                                            delivery: DeliveryStamp::new(
-                                                                run_id,
-                                                                connection_id as u64,
-                                                                delivery_ordinal,
-                                                            ),
-                                                            source_sequence: Some(header.seq_num),
-                                                        };
-                                                        let _ = sink.alert(&gap_ctx, alert);
+                                                            Some(header.seq_num),
+                                                            alert,
+                                                        );
 
                                                         let start_alert = fsm.trigger_resync(now);
-                                                        delivery_ordinal += 1;
-                                                        let start_ctx = EventContext {
-                                                            venue: VenueId::Huobi,
-                                                            symbol: &symbol,
-                                                            tag: fsm.tag(),
-                                                            exchange_ts: None,
-                                                            received_ts: crate::now_nanos(),
-                                                            connection_id,
-                                                            delivery: DeliveryStamp::new(
-                                                                run_id,
-                                                                connection_id as u64,
-                                                                delivery_ordinal,
-                                                            ),
-                                                            source_sequence: None,
-                                                        };
-                                                        let _ = sink.alert(&start_ctx, start_alert);
+                                                        let _ = sink.emit_alert(
+                                                            VenueId::Huobi,
+                                                            &symbol,
+                                                            fsm.tag(),
+                                                            None,
+                                                            crate::now_nanos(),
+                                                            None,
+                                                            start_alert,
+                                                        );
 
                                                         if !pending_snapshots.contains(&symbol) {
                                                             pending_snapshots.push_back(symbol);
@@ -706,21 +676,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         if let Ok(trade_tick) = serde_json::from_str::<RawTradeTick<'_>>(tick_raw.get()) {
                                             for item in trade_tick.data {
                                                 if let Ok((ex_ts, trade)) = normalize_trade(&item) {
-                                                    delivery_ordinal += 1;
-                                                    let ctx = EventContext {
-                                                        venue: VenueId::Huobi,
-                                                        symbol: &symbol,
-                                                        tag: fsm.tag(),
-                                                        exchange_ts: Some(ex_ts),
+                                                    let ctx = sink.next_context(
+                                                        VenueId::Huobi,
+                                                        &symbol,
+                                                        fsm.tag(),
+                                                        Some(ex_ts),
                                                         received_ts,
-                                                        connection_id,
-                                                        delivery: DeliveryStamp::new(
-                                                            run_id,
-                                                            connection_id as u64,
-                                                            delivery_ordinal,
-                                                        ),
-                                                        source_sequence: None,
-                                                    };
+                                                        None,
+                                                    );
                                                     let _ = sink.trade(&ctx, &trade);
                                                 }
                                             }
@@ -765,25 +728,37 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                         HuobiMessageKind::Other => {}
                     }
+
+                    if sink.is_failed() {
+                        break 'frame_loop;
+                    }
                 }
             }
         }
 
+        if sink.is_failed() {
+            warn!(connection_id, "Sink failed; terminating connection task");
+            break 'reconnect_loop;
+        }
+
+        if is_paused {
+            reconnect_attempt = 0;
+            continue 'reconnect_loop;
+        }
+
+        if cancel.is_cancelled() {
+            break 'reconnect_loop;
+        }
+
         // On connection drop/disconnect, emit ConnectionLost for all symbols
         for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Huobi,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
+            let _ = sink.emit_alert(
+                VenueId::Huobi,
+                sym,
+                *tag,
+                None,
+                crate::now_nanos(),
+                None,
                 IntegrityAlert::ConnectionLost {
                     reason: DisconnectKind::TransportError,
                 },

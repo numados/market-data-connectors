@@ -8,7 +8,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use mdc_core::{BookKind, IntegrityAlert, Side, SourceErrorKind};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, Side, SourceErrorKind};
 use mdc_providers::vwd::config::{VwdConfig, VwdCredentials, VwdSymbol};
 use mdc_providers::vwd::connector::VwdConnector;
 use mdc_testkit::{MockRest, RecordedEvent, RecordingSink, load_fixture};
@@ -431,9 +431,22 @@ async fn test_rest_control_pause_resume() {
     tokio::time::sleep(Duration::from_millis(120)).await;
     let count_during_pause = sink.events().len();
     assert_eq!(
-        count_before, count_during_pause,
-        "No new events should be emitted while paused"
+        count_during_pause,
+        count_before + 1,
+        "Only the pause alert should be emitted while paused"
     );
+    let has_paused = sink.events().iter().any(|ev| {
+        matches!(
+            ev,
+            RecordedEvent::Alert {
+                alert: IntegrityAlert::ConnectionLost {
+                    reason: DisconnectKind::Paused,
+                },
+                ..
+            }
+        )
+    });
+    assert!(has_paused, "Pause must emit ConnectionLost {{ reason: DisconnectKind::Paused }}");
 
     // Resume polling
     handle.resume().await.expect("resume");

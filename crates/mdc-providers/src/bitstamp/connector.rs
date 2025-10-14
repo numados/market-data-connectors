@@ -6,7 +6,7 @@ use mdc_core::model::capabilities::{
     CapabilityBounds, IdentityScope, IntegrityCapability, ProviderCapabilities, QuoteMode,
     ReplayCapability, SideSemantics, TimestampCapability, TradeCapability,
 };
-use mdc_core::{MarketDataSink, MdcError, Owned, StreamingSink, Symbol, SymbolTag, VenueId};
+use mdc_core::{MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +51,7 @@ pub struct BitstampConnector<S> {
     symbols: Vec<(Symbol, SymbolTag)>,
     embargo: Arc<Mutex<EmbargoTracker>>,
     sink: S,
+    run_id: Option<RunId>,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
 }
@@ -126,6 +127,11 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
         )
         .map_err(|e| MdcError::Transport(Box::new(std::io::Error::other(e.to_string()))))?;
 
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
+
         for (i, chunk) in chunks.into_iter().enumerate() {
             let connection_id = (i + 1) as u32;
             let sink = self.sink.clone();
@@ -154,6 +160,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
 
             join_set.spawn(async move {
                 run_connection_task(
+                    run_id,
                     connection_id,
                     chunk,
                     config,
@@ -186,6 +193,7 @@ pub struct BitstampConnectorBuilder<S> {
     symbols: Vec<(Symbol, SymbolTag)>,
     embargo: Option<Arc<Mutex<EmbargoTracker>>>,
     sink: Option<S>,
+    run_id: Option<RunId>,
 }
 
 impl<S> BitstampConnectorBuilder<S> {
@@ -196,7 +204,14 @@ impl<S> BitstampConnectorBuilder<S> {
             symbols: Vec::new(),
             embargo: None,
             sink: None,
+            run_id: None,
         }
+    }
+
+    /// Sets the runtime execution run ID.
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
     }
 
     /// Returns the provider capabilities for Bitstamp.
@@ -261,6 +276,7 @@ impl<M: MarketDataSink + Clone> BitstampConnectorBuilder<Owned<M>> {
             symbols: self.symbols,
             embargo: self.embargo,
             sink: Some(Owned::new(sink)),
+            run_id: self.run_id,
         }
     }
 }
@@ -288,6 +304,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnectorBuilder<S> {
             symbols: self.symbols,
             embargo,
             sink,
+            run_id: self.run_id,
             command_tx,
             command_rx,
         };

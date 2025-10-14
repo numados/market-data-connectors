@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use mdc_core::{
-    BookKind, BookTicker, DeliveryStamp, EventContext, IntegrityAlert, PriceLevel, RunId, Side,
+    BookKind, BookTicker, DisconnectKind, IntegrityAlert, PriceLevel, RunId, Side,
     SourceErrorKind, StreamingSink, Symbol, SymbolTag, VenueId,
 };
 use serde::de::DeserializeSeed;
@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::sink_util::ConnectionSink;
 use crate::vwd::config::VwdConfig;
 use crate::vwd::control::Command;
 use crate::vwd::normalize::normalize_symbol_from_scratch;
@@ -32,8 +33,9 @@ pub fn calculate_jittered_interval(base: Duration, step: u64) -> Duration {
 
 /// Runs the continuous VWD REST polling loop.
 pub async fn run_connection_task<S: StreamingSink>(
+    run_id: RunId,
     config: VwdConfig,
-    mut sink: S,
+    sink: S,
     mut cmd_rx: mpsc::Receiver<Command>,
     cancel_token: CancellationToken,
 ) {
@@ -45,8 +47,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
     };
 
-    let run_id = RunId::from_bytes([0x76, 0x77, 0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal: u64 = 0;
+    let mut sink = ConnectionSink::new(sink, run_id, 1);
     let mut paused = false;
     let mut scratch = VwdScratch::with_capacity(32);
     let mut stale_map: HashMap<Symbol, bool> = HashMap::new();
@@ -63,18 +64,29 @@ pub async fn run_connection_task<S: StreamingSink>(
         &mut sink,
         &mut scratch,
         &mut stale_map,
-        &mut delivery_ordinal,
-        run_id,
     )
     .await;
 
-    while !cancel_token.is_cancelled() {
+    while !cancel_token.is_cancelled() && !sink.is_failed() {
         let sleep_duration = calculate_jittered_interval(config.poll_interval, step);
         step = step.wrapping_add(1);
 
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 debug!(venue = "vwd", "polling task cancelled");
+                for sym in &config.symbols {
+                    let _ = sink.emit_alert(
+                        VenueId::Vwd,
+                        &sym.symbol,
+                        SymbolTag::default(),
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ConnectionLost {
+                            reason: DisconnectKind::Shutdown,
+                        },
+                    );
+                }
                 break;
             }
             cmd = cmd_rx.recv() => {
@@ -87,14 +99,26 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 &mut sink,
                                 &mut scratch,
                                 &mut stale_map,
-                                &mut delivery_ordinal,
-                                run_id,
                             ).await;
                         }
                     }
                     Some(Command::Pause) => {
                         debug!(venue = "vwd", "polling task paused");
                         paused = true;
+                        for sym in &config.symbols {
+                            let _ = sink.emit_alert(
+                                VenueId::Vwd,
+                                &sym.symbol,
+                                SymbolTag::default(),
+                                None,
+                                crate::now_nanos(),
+                                None,
+                                IntegrityAlert::ConnectionLost {
+                                    reason: DisconnectKind::Paused,
+                                },
+                            );
+                            stale_map.insert(sym.symbol.clone(), true);
+                        }
                     }
                     Some(Command::Resume) => {
                         debug!(venue = "vwd", "polling task resumed");
@@ -105,8 +129,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                             &mut sink,
                             &mut scratch,
                             &mut stale_map,
-                            &mut delivery_ordinal,
-                            run_id,
                         ).await;
                     }
                     None => {
@@ -123,8 +145,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                         &mut sink,
                         &mut scratch,
                         &mut stale_map,
-                        &mut delivery_ordinal,
-                        run_id,
                     ).await;
                 }
             }
@@ -135,12 +155,13 @@ pub async fn run_connection_task<S: StreamingSink>(
 async fn execute_poll_cycle<S: StreamingSink>(
     client: &VwdRestClient,
     config: &VwdConfig,
-    sink: &mut S,
+    sink: &mut ConnectionSink<S>,
     scratch: &mut VwdScratch,
     stale_map: &mut HashMap<Symbol, bool>,
-    delivery_ordinal: &mut u64,
-    run_id: RunId,
 ) {
+    if sink.is_failed() {
+        return;
+    }
     let poll_result = client.fetch_snap_quotes().await;
 
     let poll_resp = match poll_result {
@@ -148,18 +169,15 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Err(err_kind) => {
             // Transport or HTTP status failure affects ALL symbols
             for sym in &config.symbols {
-                *delivery_ordinal += 1;
-                let ctx = EventContext {
-                    venue: VenueId::Vwd,
-                    symbol: &sym.symbol,
-                    tag: SymbolTag::default(),
-                    exchange_ts: None,
-                    received_ts: crate::now_nanos(),
-                    connection_id: 1,
-                    delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                    source_sequence: None,
-                };
-                let _ = sink.alert(&ctx, IntegrityAlert::SourceError { kind: err_kind });
+                let _ = sink.emit_alert(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::SourceError { kind: err_kind },
+                );
                 stale_map.insert(sym.symbol.clone(), true);
             }
             return;
@@ -170,19 +188,13 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Ok(s) => s,
         Err(_) => {
             for sym in &config.symbols {
-                *delivery_ordinal += 1;
-                let ctx = EventContext {
-                    venue: VenueId::Vwd,
-                    symbol: &sym.symbol,
-                    tag: SymbolTag::default(),
-                    exchange_ts: None,
-                    received_ts: poll_resp.received_ts,
-                    connection_id: 1,
-                    delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                    source_sequence: None,
-                };
-                let _ = sink.alert(
-                    &ctx,
+                let _ = sink.emit_alert(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    None,
+                    poll_resp.received_ts,
+                    None,
                     IntegrityAlert::SourceError {
                         kind: SourceErrorKind::Parse,
                     },
@@ -199,19 +211,13 @@ async fn execute_poll_cycle<S: StreamingSink>(
         .is_err()
     {
         for sym in &config.symbols {
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Vwd,
-                symbol: &sym.symbol,
-                tag: SymbolTag::default(),
-                exchange_ts: None,
-                received_ts: poll_resp.received_ts,
-                connection_id: 1,
-                delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
+            let _ = sink.emit_alert(
+                VenueId::Vwd,
+                &sym.symbol,
+                SymbolTag::default(),
+                None,
+                poll_resp.received_ts,
+                None,
                 IntegrityAlert::SourceError {
                     kind: SourceErrorKind::Parse,
                 },
@@ -223,19 +229,13 @@ async fn execute_poll_cycle<S: StreamingSink>(
 
     if scratch.quotes.is_empty() {
         for sym in &config.symbols {
-            *delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Vwd,
-                symbol: &sym.symbol,
-                tag: SymbolTag::default(),
-                exchange_ts: None,
-                received_ts: poll_resp.received_ts,
-                connection_id: 1,
-                delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
+            let _ = sink.emit_alert(
+                VenueId::Vwd,
+                &sym.symbol,
+                SymbolTag::default(),
+                None,
+                poll_resp.received_ts,
+                None,
                 IntegrityAlert::SourceError {
                     kind: SourceErrorKind::MissingQuote,
                 },
@@ -247,19 +247,16 @@ async fn execute_poll_cycle<S: StreamingSink>(
 
     // Process each configured symbol individually
     for sym in &config.symbols {
-        *delivery_ordinal += 1;
         match normalize_symbol_from_scratch(sym, scratch, config.significant_digits) {
             Ok(norm) => {
-                let ctx = EventContext {
-                    venue: VenueId::Vwd,
-                    symbol: &sym.symbol,
-                    tag: SymbolTag::default(),
-                    exchange_ts: norm.exchange_ts,
-                    received_ts: poll_resp.received_ts,
-                    connection_id: 1,
-                    delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                    source_sequence: None,
-                };
+                let ctx = sink.next_context(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    norm.exchange_ts,
+                    poll_resp.received_ts,
+                    None,
+                );
 
                 // Emit full L2Snapshot
                 let _ = sink.begin_book(&ctx, BookKind::Snapshot);
@@ -279,8 +276,13 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 // If symbol was stale, emit ResyncCompleted alert
                 let was_stale = stale_map.get(&sym.symbol).copied().unwrap_or(true);
                 if was_stale {
-                    let _ = sink.alert(
-                        &ctx,
+                    let _ = sink.emit_alert(
+                        VenueId::Vwd,
+                        &sym.symbol,
+                        SymbolTag::default(),
+                        norm.exchange_ts,
+                        poll_resp.received_ts,
+                        None,
                         IntegrityAlert::ResyncCompleted {
                             last_update_id: None,
                         },
@@ -289,17 +291,15 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 }
             }
             Err(err_kind) => {
-                let ctx = EventContext {
-                    venue: VenueId::Vwd,
-                    symbol: &sym.symbol,
-                    tag: SymbolTag::default(),
-                    exchange_ts: None,
-                    received_ts: poll_resp.received_ts,
-                    connection_id: 1,
-                    delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
-                    source_sequence: None,
-                };
-                let _ = sink.alert(&ctx, IntegrityAlert::SourceError { kind: err_kind });
+                let _ = sink.emit_alert(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    None,
+                    poll_resp.received_ts,
+                    None,
+                    IntegrityAlert::SourceError { kind: err_kind },
+                );
                 stale_map.insert(sym.symbol.clone(), true);
             }
         }

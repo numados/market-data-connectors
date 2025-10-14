@@ -10,7 +10,7 @@ use mdc_core::model::{
     SymbolTag, UnixNanos, VenueId,
 };
 use mdc_core::resync::{DeltaDecision, SnapshotOutcome};
-use mdc_core::sink::{BookKind, EventContext, StreamingSink};
+use mdc_core::sink::{BookKind, StreamingSink};
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
@@ -20,6 +20,7 @@ use tracing::{info, warn};
 
 use crate::gateio::config::GateioConfig;
 use crate::gateio::control::Command;
+use crate::sink_util::ConnectionSink;
 use crate::gateio::fsm::SymbolFsm;
 use crate::gateio::normalize::normalize_trade;
 use crate::gateio::raw::{
@@ -85,12 +86,12 @@ pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,
     config: GateioConfig,
-    mut sink: S,
+    sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    run_id: RunId,
 ) {
-    let run_id = RunId::from_bytes([0x6a, 0x7e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-    let mut delivery_ordinal = 0u64;
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
@@ -102,7 +103,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut is_paused = false;
 
     'reconnect_loop: loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sink.is_failed() {
             break 'reconnect_loop;
         }
 
@@ -157,6 +158,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         };
 
+        sink.next_generation();
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
         // Reset FSMs upon new connection
@@ -205,19 +207,13 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        delivery_ordinal += 1;
-                        let ctx = EventContext {
-                            venue: VenueId::Gateio,
-                            symbol: sym,
-                            tag: *tag,
-                            exchange_ts: None,
-                            received_ts: crate::now_nanos(),
-                            connection_id,
-                            delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                            source_sequence: None,
-                        };
-                        let _ = sink.alert(
-                            &ctx,
+                        let _ = sink.emit_alert(
+                            VenueId::Gateio,
+                            sym,
+                            *tag,
+                            None,
+                            crate::now_nanos(),
+                            None,
                             IntegrityAlert::ConnectionLost {
                                 reason: DisconnectKind::Shutdown,
                             },
@@ -235,9 +231,33 @@ pub async fn run_connection_task<S: StreamingSink>(
                         WatchdogAction::SendPing => {
                             let _ = ws_tx.send(Message::Ping(vec![])).await;
                         }
-                        WatchdogAction::Reconnect { .. } => {
+                        WatchdogAction::Reconnect { silent_for } => {
+                            let elapsed_ms = silent_for.as_millis() as u64;
+                            for (sym, tag) in &symbols {
+                                let _ = sink.emit_alert(
+                                    VenueId::Gateio,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                );
+                                let _ = sink.emit_alert(
+                                    VenueId::Gateio,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::SilenceTimeout,
+                                    },
+                                );
+                            }
                             warn!(
                                 connection_id,
+                                elapsed_ms,
                                 "Silence watchdog timeout on Gate.io feed; forcing reconnect"
                             );
                             break 'frame_loop;
@@ -252,18 +272,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                             if let Some(fsm) = fsms.get_mut(&sym) {
                                 let now = Instant::now();
                                 let alert = fsm.trigger_resync(now);
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Gateio,
-                                    symbol: &sym,
-                                    tag: fsm.tag(),
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(&ctx, alert);
+                                let _ = sink.emit_alert(
+                                    VenueId::Gateio,
+                                    &sym,
+                                    fsm.tag(),
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    alert,
+                                );
 
                                 let now_secs = current_unix_secs();
                                 let un_frame = build_obu_unsubscribe_frame(sym.as_str(), config.orderbook_levels, now_secs);
@@ -279,21 +296,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Pause) => {
                             is_paused = true;
                             for (sym, tag) in &symbols {
-                                delivery_ordinal += 1;
-                                let ctx = EventContext {
-                                    venue: VenueId::Gateio,
-                                    symbol: sym,
-                                    tag: *tag,
-                                    exchange_ts: None,
-                                    received_ts: crate::now_nanos(),
-                                    connection_id,
-                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                    source_sequence: None,
-                                };
-                                let _ = sink.alert(
-                                    &ctx,
+                                let _ = sink.emit_alert(
+                                    VenueId::Gateio,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
                                     IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::Shutdown,
+                                        reason: DisconnectKind::Paused,
                                     },
                                 );
                             }
@@ -394,44 +405,38 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                     // Full snapshot
                                     if header.full {
-                                        delivery_ordinal += 1;
-                                        let delivery = DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal);
+                                        let delivery = sink.next_stamp();
                                         let outcome = fsm.on_snapshot(&header, &scratch, delivery, received_ts, now);
                                         match outcome {
                                             Ok(SnapshotOutcome::Synchronized { snapshot, replay }) => {
-                                                let ctx = EventContext {
-                                                    venue: VenueId::Gateio,
-                                                    symbol: &sym,
+                                                let snap_ctx = sink.next_context(
+                                                    VenueId::Gateio,
+                                                    &sym,
                                                     tag,
                                                     exchange_ts,
                                                     received_ts,
-                                                    connection_id,
-                                                    delivery,
-                                                    source_sequence: Some(header.last_id),
-                                                };
+                                                    Some(header.last_id),
+                                                );
 
-                                                let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+                                                let _ = sink.begin_book(&snap_ctx, BookKind::Snapshot);
                                                 for level in &snapshot.kind.bids {
                                                     let _ = sink.level(Side::Bid, level.price, level.volume);
                                                 }
                                                 for level in &snapshot.kind.asks {
                                                     let _ = sink.level(Side::Ask, level.price, level.volume);
                                                 }
-                                                let _ = sink.end_book(&ctx, None);
+                                                let _ = sink.end_book(&snap_ctx, None);
 
                                                 // Replay deltas buffered during resync
                                                 for delta in replay {
-                                                    delivery_ordinal += 1;
-                                                    let delta_ctx = EventContext {
-                                                        venue: VenueId::Gateio,
-                                                        symbol: &sym,
+                                                    let delta_ctx = sink.next_context(
+                                                        VenueId::Gateio,
+                                                        &sym,
                                                         tag,
-                                                        exchange_ts: delta.exchange_ts,
-                                                        received_ts: delta.received_ts,
-                                                        connection_id,
-                                                        delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                        source_sequence: delta.source_sequence,
-                                                    };
+                                                        delta.exchange_ts,
+                                                        delta.received_ts,
+                                                        delta.source_sequence,
+                                                    );
                                                     let _ = sink.begin_book(&delta_ctx, BookKind::Delta);
                                                     for level in &delta.kind.bids {
                                                         let _ = sink.level(Side::Bid, level.price, level.volume);
@@ -442,20 +447,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     let _ = sink.end_book(&delta_ctx, delta.kind.sequence);
                                                 }
 
-                                                // Emit ResyncCompleted
-                                                delivery_ordinal += 1;
-                                                let alert_ctx = EventContext {
-                                                    venue: VenueId::Gateio,
-                                                    symbol: &sym,
+                                                // Emit ResyncCompleted strictly AFTER snapshot and replay
+                                                let _ = sink.emit_alert(
+                                                    VenueId::Gateio,
+                                                    &sym,
                                                     tag,
                                                     exchange_ts,
                                                     received_ts,
-                                                    connection_id,
-                                                    delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                    source_sequence: Some(header.last_id),
-                                                };
-                                                let _ = sink.alert(
-                                                    &alert_ctx,
+                                                    Some(header.last_id),
                                                     IntegrityAlert::ResyncCompleted {
                                                         last_update_id: Some(header.last_id),
                                                     },
@@ -469,6 +468,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 warn!(%sym, error = %e, "Failed to apply snapshot to FSM");
                                             }
                                         }
+                                        if sink.is_failed() {
+                                            break 'frame_loop;
+                                        }
                                         continue;
                                     }
 
@@ -476,17 +478,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     let range = SequenceRange::new(header.first_id, header.last_id);
                                     match fsm.check_delta(range) {
                                         DeltaDecision::Emit => {
-                                            delivery_ordinal += 1;
-                                            let ctx = EventContext {
-                                                venue: VenueId::Gateio,
-                                                symbol: &sym,
+                                            let ctx = sink.next_context(
+                                                VenueId::Gateio,
+                                                &sym,
                                                 tag,
                                                 exchange_ts,
                                                 received_ts,
-                                                connection_id,
-                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                source_sequence: Some(header.last_id),
-                                            };
+                                                Some(header.last_id),
+                                            );
 
                                             let _ = sink.begin_book(&ctx, BookKind::Delta);
                                             for level in &scratch.bids {
@@ -504,14 +503,13 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 bids: scratch.bids.clone(),
                                                 asks: scratch.asks.clone(),
                                             };
-                                            delivery_ordinal += 1;
                                             let event = MarketEvent {
                                                 venue: VenueId::Gateio,
                                                 symbol: sym.clone(),
                                                 exchange_ts,
                                                 received_ts,
                                                 tag,
-                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
+                                                delivery: DeliveryStamp::new(sink.run_id(), sink.generation(), 0),
                                                 source_sequence: Some(header.last_id),
                                                 kind: delta,
                                             };
@@ -522,22 +520,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     "Buffer overflow while buffering Gate.io deltas; triggering resync"
                                                 );
                                                 let alert = fsm.trigger_resync(now);
-                                                delivery_ordinal += 1;
-                                                let ctx = EventContext {
-                                                    venue: VenueId::Gateio,
-                                                    symbol: &sym,
+                                                let _ = sink.emit_alert(
+                                                    VenueId::Gateio,
+                                                    &sym,
                                                     tag,
                                                     exchange_ts,
                                                     received_ts,
-                                                    connection_id,
-                                                    delivery: DeliveryStamp::new(
-                                                        run_id,
-                                                        connection_id as u64,
-                                                        delivery_ordinal,
-                                                    ),
-                                                    source_sequence: Some(header.last_id),
-                                                };
-                                                let _ = sink.alert(&ctx, alert);
+                                                    Some(header.last_id),
+                                                    alert,
+                                                );
 
                                                 if fsm.can_resubscribe(now) {
                                                     let now_secs = current_unix_secs();
@@ -566,19 +557,15 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 "Sequence gap detected on Gate.io feed; resubscribing"
                                             );
                                             let _ = fsm.trigger_resync(now);
-
-                                            delivery_ordinal += 1;
-                                            let ctx = EventContext {
-                                                venue: VenueId::Gateio,
-                                                symbol: &sym,
+                                            let _ = sink.emit_alert(
+                                                VenueId::Gateio,
+                                                &sym,
                                                 tag,
                                                 exchange_ts,
                                                 received_ts,
-                                                connection_id,
-                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                source_sequence: Some(header.last_id),
-                                            };
-                                            let _ = sink.alert(&ctx, alert);
+                                                Some(header.last_id),
+                                                alert,
+                                            );
 
                                             if fsm.can_resubscribe(now) {
                                                 let now_secs = current_unix_secs();
@@ -592,6 +579,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         }
                                     }
                                 }
+                                if sink.is_failed() {
+                                    break 'frame_loop;
+                                }
                                 continue;
                             }
 
@@ -602,17 +592,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         if let Ok((ex_ts, trade)) = normalize_trade(&raw_trade) {
                                             let sym = Symbol::from(raw_trade.currency_pair);
                                             let tag = fsms.get(&sym).map(SymbolFsm::tag).unwrap_or_default();
-                                            delivery_ordinal += 1;
-                                            let ctx = EventContext {
-                                                venue: VenueId::Gateio,
-                                                symbol: &sym,
+                                            let ctx = sink.next_context(
+                                                VenueId::Gateio,
+                                                &sym,
                                                 tag,
-                                                exchange_ts: Some(ex_ts),
+                                                Some(ex_ts),
                                                 received_ts,
-                                                connection_id,
-                                                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                                                source_sequence: None,
-                                            };
+                                                None,
+                                            );
                                             let _ = sink.trade(&ctx, &trade);
                                         }
                                     }
@@ -629,25 +616,37 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Message::Binary(_) | Message::Frame(_) => {}
                     }
+
+                    if sink.is_failed() {
+                        break 'frame_loop;
+                    }
                 }
             }
         }
 
+        if sink.is_failed() {
+            warn!(connection_id, "Sink failed; terminating connection task");
+            break 'reconnect_loop;
+        }
+
+        if is_paused {
+            reconnect_attempt = 0;
+            continue 'reconnect_loop;
+        }
+
+        if cancel.is_cancelled() {
+            break 'reconnect_loop;
+        }
+
         // Connection dropped: emit ConnectionLost and reset FSMs
         for (sym, tag) in &symbols {
-            delivery_ordinal += 1;
-            let ctx = EventContext {
-                venue: VenueId::Gateio,
-                symbol: sym,
-                tag: *tag,
-                exchange_ts: None,
-                received_ts: crate::now_nanos(),
-                connection_id,
-                delivery: DeliveryStamp::new(run_id, connection_id as u64, delivery_ordinal),
-                source_sequence: None,
-            };
-            let _ = sink.alert(
-                &ctx,
+            let _ = sink.emit_alert(
+                VenueId::Gateio,
+                sym,
+                *tag,
+                None,
+                crate::now_nanos(),
+                None,
                 IntegrityAlert::ConnectionLost {
                     reason: DisconnectKind::TransportError,
                 },

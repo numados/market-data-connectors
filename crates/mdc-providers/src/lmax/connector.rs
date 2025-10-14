@@ -1,7 +1,7 @@
 use mdc_core::{
     CapabilityBounds, ConsumerRequirements, DiscoveryCapability, IntegrityCapability,
     MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode, ReplayCapability,
-    RestQuoteCapability, StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability,
+    RestQuoteCapability, RunId, StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability,
     VenueId,
 };
 use tokio::sync::mpsc;
@@ -43,6 +43,7 @@ pub struct LmaxConnector<S> {
     config: LmaxConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: S,
+    run_id: Option<RunId>,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
 }
@@ -83,6 +84,10 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let mut join_set = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
@@ -137,8 +142,16 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
             });
 
             join_set.spawn(async move {
-                run_connection_task(connection_id, chunk, config, sink, task_cmd_rx, cancel_conn)
-                    .await;
+                run_connection_task(
+                    run_id,
+                    connection_id,
+                    chunk,
+                    config,
+                    sink,
+                    task_cmd_rx,
+                    cancel_conn,
+                )
+                .await;
             });
         }
 
@@ -161,6 +174,7 @@ pub struct LmaxConnectorBuilder<S> {
     config: LmaxConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: Option<S>,
+    run_id: Option<RunId>,
 }
 
 impl<S> LmaxConnectorBuilder<S> {
@@ -170,7 +184,14 @@ impl<S> LmaxConnectorBuilder<S> {
             config,
             symbols: Vec::new(),
             sink: None,
+            run_id: None,
         }
+    }
+
+    /// Sets the runtime execution run ID.
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
     }
 
     /// Sets the list of symbols to ingest.
@@ -234,6 +255,7 @@ impl<M: MarketDataSink + Clone> LmaxConnectorBuilder<Owned<M>> {
             config: self.config,
             symbols: self.symbols,
             sink: Some(Owned::new(sink)),
+            run_id: self.run_id,
         }
     }
 }
@@ -256,6 +278,7 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnectorBuilder<S> {
             config: self.config,
             symbols: self.symbols,
             sink,
+            run_id: self.run_id,
             command_tx,
             command_rx,
         };

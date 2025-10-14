@@ -519,7 +519,7 @@ async fn test_ws_control_pause_resume_cancel() {
             ev,
             RecordedEvent::Alert {
                 alert: IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::Shutdown
+                    reason: DisconnectKind::Paused
                 },
                 ..
             }

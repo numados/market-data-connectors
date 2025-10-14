@@ -1,6 +1,6 @@
 //! High-level connector handle and builder for Frankfurter ECB reference rates.
 
-use mdc_core::StreamingSink;
+use mdc_core::{RunId, StreamingSink};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -14,6 +14,7 @@ use crate::frankfurter::rest::FrankfurterRestClient;
 pub struct FrankfurterConnector {
     config: FrankfurterConfig,
     client: Option<reqwest::Client>,
+    run_id: Option<RunId>,
 }
 
 impl FrankfurterConnector {
@@ -33,6 +34,10 @@ impl FrankfurterConnector {
         sink: S,
         cancel_token: CancellationToken,
     ) -> (ConnectorHandle, tokio::task::JoinHandle<()>) {
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(cmd_tx);
 
@@ -48,6 +53,7 @@ impl FrankfurterConnector {
         };
 
         let join_handle = tokio::spawn(run_connection_task(
+            run_id,
             self.config,
             rest_client,
             sink,
@@ -64,6 +70,7 @@ impl FrankfurterConnector {
 pub struct FrankfurterConnectorBuilder {
     config: FrankfurterConfig,
     client: Option<reqwest::Client>,
+    run_id: Option<RunId>,
 }
 
 impl FrankfurterConnectorBuilder {
@@ -72,6 +79,7 @@ impl FrankfurterConnectorBuilder {
         Self {
             config,
             client: None,
+            run_id: None,
         }
     }
 
@@ -81,12 +89,19 @@ impl FrankfurterConnectorBuilder {
         self
     }
 
+    /// Sets the runtime execution run ID.
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
+    }
+
     /// Validates configuration and builds the [`FrankfurterConnector`].
     pub fn build(self) -> Result<FrankfurterConnector, ConfigError> {
         self.config.validate()?;
         Ok(FrankfurterConnector {
             config: self.config,
             client: self.client,
+            run_id: self.run_id,
         })
     }
 }

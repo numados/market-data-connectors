@@ -23,11 +23,16 @@ pub struct Connection<S> {
 impl<S: StreamingSink> Connection<S> {
     /// Creates a new connection with pre-allocated scratch and gzip decoder capacity.
     pub fn new(sink: S) -> Self {
+        Self::with_run_id(sink, RunId::from_nanos(crate::now_nanos().0 as u128))
+    }
+
+    /// Creates a new connection with a specific `RunId`.
+    pub fn with_run_id(sink: S, run_id: RunId) -> Self {
         Self {
             scratch: HuobiConnectionScratch::with_capacity(1_024),
             decoder: GzipDecoder::with_capacity(64 * 1024),
             sink,
-            run_id: RunId::from_bytes([1; 16]),
+            run_id,
             symbol: Symbol::from("btcusdt"),
             tag: SymbolTag::default(),
             delivery_ordinal: 0,

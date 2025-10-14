@@ -1,6 +1,6 @@
 //! High-level connector handle and builder for VWD FX REST polling.
 
-use mdc_core::StreamingSink;
+use mdc_core::{RunId, StreamingSink};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -12,6 +12,7 @@ use crate::vwd::control::ConnectorHandle;
 #[derive(Debug)]
 pub struct VwdConnector {
     config: VwdConfig,
+    run_id: Option<RunId>,
 }
 
 impl VwdConnector {
@@ -31,10 +32,14 @@ impl VwdConnector {
         sink: S,
         cancel_token: CancellationToken,
     ) -> (ConnectorHandle, tokio::task::JoinHandle<()>) {
+        let run_id = self.run_id.unwrap_or_else(|| {
+            let now = crate::now_nanos().0 as u128;
+            RunId::from_nanos(now)
+        });
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(cmd_tx);
         let join_handle =
-            tokio::spawn(run_connection_task(self.config, sink, cmd_rx, cancel_token));
+            tokio::spawn(run_connection_task(run_id, self.config, sink, cmd_rx, cancel_token));
         (handle, join_handle)
     }
 }
@@ -43,12 +48,22 @@ impl VwdConnector {
 #[derive(Debug)]
 pub struct VwdConnectorBuilder {
     config: VwdConfig,
+    run_id: Option<RunId>,
 }
 
 impl VwdConnectorBuilder {
     /// Creates a new builder for the given config.
     pub fn new(config: VwdConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            run_id: None,
+        }
+    }
+
+    /// Sets the runtime execution run ID.
+    pub fn run_id(mut self, run_id: RunId) -> Self {
+        self.run_id = Some(run_id);
+        self
     }
 
     /// Validates the configuration and builds the [`VwdConnector`].
@@ -56,6 +71,7 @@ impl VwdConnectorBuilder {
         self.config.validate()?;
         Ok(VwdConnector {
             config: self.config,
+            run_id: self.run_id,
         })
     }
 }
