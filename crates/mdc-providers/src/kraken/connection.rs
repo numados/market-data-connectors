@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, ChecksumPolicy, DeliveryStamp, DisconnectKind, EventContext, IntegrityAlert,
+    BookKind, ChecksumPolicy, DisconnectKind, IntegrityAlert,
     PriceLevel, RawLevelText, RunId, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag,
     UnixNanos, VenueId, WatchdogAction,
 };

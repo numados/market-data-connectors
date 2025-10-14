@@ -401,14 +401,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         );
 
                                         // Every book frame is emitted as an authoritative Snapshot
-                                        sink.begin_book(&ctx, BookKind::Snapshot);
+                                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                                            break 'frame_loop;
+                                        }
                                         for level in &scratch.bids {
-                                            sink.level(Side::Bid, level.price, level.volume);
+                                            if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                break 'frame_loop;
+                                            }
                                         }
                                         for level in &scratch.asks {
-                                            sink.level(Side::Ask, level.price, level.volume);
+                                            if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                break 'frame_loop;
+                                            }
                                         }
-                                        sink.end_book(&ctx, None);
+                                        if sink.end_book(&ctx, None).is_err() {
+                                            break 'frame_loop;
+                                        }
 
                                         // Complete resync lifecycle if awaiting initial snapshot
                                         if awaiting_first_snapshot.remove(sym) {
@@ -443,7 +451,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         None,
                                                     );
 
-                                                    sink.trade(&ctx, &canonical_trade);
+                                                    if sink.trade(&ctx, &canonical_trade).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
                                             }
                                         }

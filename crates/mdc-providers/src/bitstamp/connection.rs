@@ -377,14 +377,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     None,
                                 );
 
-                                sink.begin_book(&ctx, BookKind::Snapshot);
+                                if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                                    break 'frame_loop;
+                                }
                                 for level in &snap.bids {
-                                    sink.level(Side::Bid, level[0], level[1]);
+                                    if sink.level(Side::Bid, level[0], level[1]).is_err() {
+                                        break 'frame_loop;
+                                    }
                                 }
                                 for level in &snap.asks {
-                                    sink.level(Side::Ask, level[0], level[1]);
+                                    if sink.level(Side::Ask, level[0], level[1]).is_err() {
+                                        break 'frame_loop;
+                                    }
                                 }
-                                sink.end_book(&ctx, None);
+                                if sink.end_book(&ctx, None).is_err() {
+                                    break 'frame_loop;
+                                }
 
                                 let _ = sink.emit_alert(
                                     VenueId::Bitstamp,
@@ -540,14 +548,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     None,
                                                 );
 
-                                                sink.begin_book(&ctx, BookKind::Delta);
+                                                if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                                 for level in &scratch.bids {
-                                                    sink.level(Side::Bid, level.price, level.volume);
+                                                    if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
                                                 for level in &scratch.asks {
-                                                    sink.level(Side::Ask, level.price, level.volume);
+                                                    if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
-                                                sink.end_book(&ctx, None);
+                                                if sink.end_book(&ctx, None).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
                                             DiffDecision::Drop => {
                                                 if fsm.state() == SyncState::AwaitingSnapshot
@@ -574,7 +590,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     crate::now_nanos(),
                                                     None,
                                                 );
-                                                sink.trade(&ctx, &canonical_trade);
+                                                if sink.trade(&ctx, &canonical_trade).is_err() {
+                                                    break 'frame_loop;
+                                                }
                                             }
                                         }
                                     }
