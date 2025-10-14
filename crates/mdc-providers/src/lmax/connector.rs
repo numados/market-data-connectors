@@ -1,8 +1,8 @@
 use mdc_core::{
     CapabilityBounds, ConsumerRequirements, DiscoveryCapability, IntegrityCapability,
     MarketDataSink, MdcError, Owned, ProviderCapabilities, QuoteMode, ReplayCapability,
-    RestQuoteCapability, RunId, StreamingSink, Symbol, SymbolTag, TimestampCapability, TradeCapability,
-    VenueId,
+    RestQuoteCapability, RunId, StreamingSink, Symbol, SymbolTag, TimestampCapability,
+    TradeCapability, VenueId,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;

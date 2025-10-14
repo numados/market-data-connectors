@@ -65,13 +65,10 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
-                    match cmd {
-                        Some(Command::Resume | Command::Reconnect) => {
-                            is_paused = false;
-                            reconnect_attempt = 0;
-                            break;
-                        }
-                        _ => {}
+                    if let Some(Command::Resume | Command::Reconnect) = cmd {
+                        is_paused = false;
+                        reconnect_attempt = 0;
+                        break;
                     }
                 }
             }

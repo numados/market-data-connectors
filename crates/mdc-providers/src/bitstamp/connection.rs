@@ -45,7 +45,11 @@ pub fn build_subscribe_frame(channel: &str) -> String {
 }
 
 /// Runs a single Bitstamp WebSocket connection worker managing a slice of symbols.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "Internal connection worker receives injected configuration, state channels, and policies"
+)]
 pub async fn run_connection_task<S: StreamingSink>(
     run_id: RunId,
     connection_id: u32,

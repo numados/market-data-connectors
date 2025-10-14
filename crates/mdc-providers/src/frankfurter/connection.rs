@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use mdc_core::{
-    DisconnectKind, IntegrityAlert, ReferenceRate, RunId,
-    SourceErrorKind, StreamingSink, SymbolTag, VenueId,
+    DisconnectKind, IntegrityAlert, ReferenceRate, RunId, SourceErrorKind, StreamingSink,
+    SymbolTag, VenueId,
     integrity::embargo::{EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP},
 };
 use serde::de::DeserializeSeed;
@@ -53,7 +53,11 @@ struct ConnectionTask<S> {
 }
 
 impl<S: StreamingSink> ConnectionTask<S> {
-    fn new(config: FrankfurterConfig, client: FrankfurterRestClient, sink: ConnectionSink<S>) -> Self {
+    fn new(
+        config: FrankfurterConfig,
+        client: FrankfurterRestClient,
+        sink: ConnectionSink<S>,
+    ) -> Self {
         let active_quotes = config.quote_currencies.clone();
         Self {
             config,

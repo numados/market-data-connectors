@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, ChecksumPolicy, DisconnectKind, IntegrityAlert,
-    PriceLevel, RawLevelText, RunId, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag,
-    UnixNanos, VenueId, WatchdogAction,
+    BookKind, ChecksumPolicy, DisconnectKind, IntegrityAlert, PriceLevel, RawLevelText, RunId,
+    Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId, WatchdogAction,
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;

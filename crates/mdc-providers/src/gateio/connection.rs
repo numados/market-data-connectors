@@ -20,13 +20,13 @@ use tracing::{info, warn};
 
 use crate::gateio::config::GateioConfig;
 use crate::gateio::control::Command;
-use crate::sink_util::ConnectionSink;
 use crate::gateio::fsm::SymbolFsm;
 use crate::gateio::normalize::normalize_trade;
 use crate::gateio::raw::{
     GateioConnectionScratch, ObuSeed, RawEnvelope, RawSubAckError, RawSubAckResult, RawTrade,
     SpotPong, SubscribeRequest, extract_symbol,
 };
+use crate::sink_util::ConnectionSink;
 
 /// Helper returning current Unix timestamp in whole seconds.
 pub fn current_unix_secs() -> u64 {

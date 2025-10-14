@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use mdc_core::{
-    BookKind, BookTicker, DisconnectKind, IntegrityAlert, PriceLevel, RunId, Side,
-    SourceErrorKind, StreamingSink, Symbol, SymbolTag, VenueId,
+    BookKind, BookTicker, DisconnectKind, IntegrityAlert, PriceLevel, RunId, Side, SourceErrorKind,
+    StreamingSink, Symbol, SymbolTag, VenueId,
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
@@ -58,14 +58,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut step: u64 = 0;
 
     // Execute first poll immediately upon start
-    execute_poll_cycle(
-        &client,
-        &config,
-        &mut sink,
-        &mut scratch,
-        &mut stale_map,
-    )
-    .await;
+    execute_poll_cycle(&client, &config, &mut sink, &mut scratch, &mut stale_map).await;
 
     while !cancel_token.is_cancelled() && !sink.is_failed() {
         let sleep_duration = calculate_jittered_interval(config.poll_interval, step);

@@ -56,7 +56,11 @@ pub fn build_combined_stream_url(
 }
 
 /// Runs a single connection worker managing up to `symbols_per_connection` symbols.
-#[allow(clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    reason = "Internal connection worker receives injected configuration, state channels, and policies"
+)]
 pub async fn run_connection_task<S: StreamingSink>(
     connection_id: u32,
     symbols: Vec<(Symbol, SymbolTag)>,

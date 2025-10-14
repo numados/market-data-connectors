@@ -38,8 +38,13 @@ impl VwdConnector {
         });
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(cmd_tx);
-        let join_handle =
-            tokio::spawn(run_connection_task(run_id, self.config, sink, cmd_rx, cancel_token));
+        let join_handle = tokio::spawn(run_connection_task(
+            run_id,
+            self.config,
+            sink,
+            cmd_rx,
+            cancel_token,
+        ));
         (handle, join_handle)
     }
 }

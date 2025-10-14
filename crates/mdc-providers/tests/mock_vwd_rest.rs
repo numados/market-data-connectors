@@ -446,7 +446,10 @@ async fn test_rest_control_pause_resume() {
             }
         )
     });
-    assert!(has_paused, "Pause must emit ConnectionLost {{ reason: DisconnectKind::Paused }}");
+    assert!(
+        has_paused,
+        "Pause must emit ConnectionLost {{ reason: DisconnectKind::Paused }}"
+    );
 
     // Resume polling
     handle.resume().await.expect("resume");

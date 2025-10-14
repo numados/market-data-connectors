@@ -3,9 +3,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
-use mdc_core::model::{
-    DisconnectKind, IntegrityAlert, RunId, Side, Symbol, SymbolTag, VenueId,
-};
+use mdc_core::model::{DisconnectKind, IntegrityAlert, RunId, Side, Symbol, SymbolTag, VenueId};
 use mdc_core::sink::{BookKind, StreamingSink};
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;

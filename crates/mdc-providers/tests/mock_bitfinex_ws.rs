@@ -435,15 +435,18 @@ async fn test_ws_silence_watchdog_ping_and_reconnect() {
 
     let alerts = sink.alerts();
     assert!(
-        alerts
-            .iter()
-            .any(|a| matches!(a, IntegrityAlert::SilenceTimeout { elapsed_ms } if *elapsed_ms >= 100)),
+        alerts.iter().any(
+            |a| matches!(a, IntegrityAlert::SilenceTimeout { elapsed_ms } if *elapsed_ms >= 100)
+        ),
         "Must emit SilenceTimeout alert with measured silence elapsed, got alerts: {alerts:?}"
     );
     assert!(
-        alerts
-            .iter()
-            .any(|a| matches!(a, IntegrityAlert::ConnectionLost { reason: mdc_core::DisconnectKind::SilenceTimeout })),
+        alerts.iter().any(|a| matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: mdc_core::DisconnectKind::SilenceTimeout
+            }
+        )),
         "Must emit ConnectionLost(SilenceTimeout), got alerts: {alerts:?}"
     );
 

@@ -77,7 +77,11 @@ impl<S: StreamingSink> ConnectionSink<S> {
     /// Returns the next monotonic delivery stamp for this connection.
     pub fn next_stamp(&mut self) -> DeliveryStamp {
         self.delivery_ordinal = self.delivery_ordinal.saturating_add(1);
-        DeliveryStamp::new(self.run_id, self.connection_generation, self.delivery_ordinal)
+        DeliveryStamp::new(
+            self.run_id,
+            self.connection_generation,
+            self.delivery_ordinal,
+        )
     }
 
     /// Constructs an [`EventContext`] with a fresh monotonic delivery stamp.
@@ -270,7 +274,11 @@ impl<S: StreamingSink> ConnectionSink<S> {
     }
 
     /// Emits an integrity alert to the downstream sink.
-    pub fn alert(&mut self, ctx: &EventContext<'_>, alert: IntegrityAlert) -> Result<(), SinkError> {
+    pub fn alert(
+        &mut self,
+        ctx: &EventContext<'_>,
+        alert: IntegrityAlert,
+    ) -> Result<(), SinkError> {
         if self.failed {
             return Err(SinkError);
         }
@@ -289,6 +297,10 @@ impl<S: StreamingSink> ConnectionSink<S> {
     }
 
     /// Helper to construct context and emit an alert in one call.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Alert emission requires full EventContext parameters plus the alert payload"
+    )]
     pub fn emit_alert(
         &mut self,
         venue: VenueId,
@@ -299,7 +311,14 @@ impl<S: StreamingSink> ConnectionSink<S> {
         source_sequence: Option<u64>,
         alert: IntegrityAlert,
     ) -> Result<(), SinkError> {
-        let ctx = self.next_context(venue, symbol, tag, exchange_ts, received_ts, source_sequence);
+        let ctx = self.next_context(
+            venue,
+            symbol,
+            tag,
+            exchange_ts,
+            received_ts,
+            source_sequence,
+        );
         self.alert(&ctx, alert)
     }
 }
@@ -321,24 +340,56 @@ mod tests {
         conn_sink.next_generation();
         assert_eq!(conn_sink.generation(), 1);
 
-        let ctx1 = conn_sink.next_context(VenueId::Binance, &sym, SymbolTag::default(), None, UnixNanos(1), None);
+        let ctx1 = conn_sink.next_context(
+            VenueId::Binance,
+            &sym,
+            SymbolTag::default(),
+            None,
+            UnixNanos(1),
+            None,
+        );
         assert_eq!(ctx1.delivery.run, run_id);
         assert_eq!(ctx1.delivery.connection_generation, 1);
         assert_eq!(ctx1.delivery.ordinal, 1);
-        conn_sink.alert(&ctx1, IntegrityAlert::ResyncStarted).unwrap();
+        conn_sink
+            .alert(&ctx1, IntegrityAlert::ResyncStarted)
+            .unwrap();
 
-        let ctx2 = conn_sink.next_context(VenueId::Binance, &sym, SymbolTag::default(), None, UnixNanos(2), None);
+        let ctx2 = conn_sink.next_context(
+            VenueId::Binance,
+            &sym,
+            SymbolTag::default(),
+            None,
+            UnixNanos(2),
+            None,
+        );
         assert_eq!(ctx2.delivery.connection_generation, 1);
         assert_eq!(ctx2.delivery.ordinal, 2);
-        conn_sink.alert(&ctx2, IntegrityAlert::ResyncCompleted { last_update_id: None }).unwrap();
+        conn_sink
+            .alert(
+                &ctx2,
+                IntegrityAlert::ResyncCompleted {
+                    last_update_id: None,
+                },
+            )
+            .unwrap();
 
         // Reconnect advances generation
         conn_sink.next_generation();
         assert_eq!(conn_sink.generation(), 2);
-        let ctx3 = conn_sink.next_context(VenueId::Binance, &sym, SymbolTag::default(), None, UnixNanos(3), None);
+        let ctx3 = conn_sink.next_context(
+            VenueId::Binance,
+            &sym,
+            SymbolTag::default(),
+            None,
+            UnixNanos(3),
+            None,
+        );
         assert_eq!(ctx3.delivery.connection_generation, 2);
         assert_eq!(ctx3.delivery.ordinal, 3);
-        conn_sink.alert(&ctx3, IntegrityAlert::ResyncStarted).unwrap();
+        conn_sink
+            .alert(&ctx3, IntegrityAlert::ResyncStarted)
+            .unwrap();
 
         let stamps = sink.delivery_stamps();
         assert_eq!(stamps.len(), 3);
@@ -358,9 +409,18 @@ mod tests {
         let mut conn_sink = ConnectionSink::new(fault_sink.clone(), run_id, 1);
         conn_sink.next_generation();
 
-        let ctx = conn_sink.next_context(VenueId::Binance, &sym, SymbolTag::default(), None, UnixNanos(1), None);
+        let ctx = conn_sink.next_context(
+            VenueId::Binance,
+            &sym,
+            SymbolTag::default(),
+            None,
+            UnixNanos(1),
+            None,
+        );
         conn_sink.begin_book(&ctx, BookKind::Snapshot).unwrap();
-        conn_sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).unwrap();
+        conn_sink
+            .level(Side::Bid, Decimal::ONE, Decimal::ONE)
+            .unwrap();
 
         // Level 2 fails
         let err = conn_sink.level(Side::Ask, Decimal::ONE, Decimal::ONE);
@@ -368,7 +428,11 @@ mod tests {
         assert!(conn_sink.is_failed());
 
         // Subsequent calls fail immediately without touching sink
-        assert!(conn_sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).is_err());
+        assert!(
+            conn_sink
+                .level(Side::Bid, Decimal::ONE, Decimal::ONE)
+                .is_err()
+        );
         assert!(conn_sink.end_book(&ctx, None).is_err());
 
         // SinkFailure was emitted in-band
@@ -376,4 +440,3 @@ mod tests {
         assert!(alerts.contains(&IntegrityAlert::SinkFailure));
     }
 }
-

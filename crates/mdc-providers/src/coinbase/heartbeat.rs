@@ -210,6 +210,9 @@ mod tests {
 
         // If first heartbeat arrives within timeout, returns First
         let t1 = t0 + Duration::from_millis(1000);
-        assert_eq!(monitor.on_heartbeat(&btc, 5000, t1), HeartbeatVerdict::First);
+        assert_eq!(
+            monitor.on_heartbeat(&btc, 5000, t1),
+            HeartbeatVerdict::First
+        );
     }
 }

@@ -744,7 +744,8 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                         price: l.price_str(),
                                         volume: l.amount_str(),
                                     };
-                                    if sink.level_raw(side, pl.price, pl.volume, raw_text).is_err() {
+                                    if sink.level_raw(side, pl.price, pl.volume, raw_text).is_err()
+                                    {
                                         levels_ok = false;
                                         break;
                                     }

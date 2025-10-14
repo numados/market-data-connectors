@@ -1,8 +1,6 @@
 //! Main Coinbase Advanced Trade WebSocket market data connector and builder.
 
-use mdc_core::{
-    MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId,
-};
+use mdc_core::{MarketDataSink, MdcError, Owned, RunId, StreamingSink, Symbol, SymbolTag, VenueId};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
