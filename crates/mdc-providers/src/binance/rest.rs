@@ -106,7 +106,8 @@ impl BinanceRestClient {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-            tracker.on_rate_limited(status, retry_after, now);
+            let receipt_now = Instant::now();
+            tracker.on_rate_limited(status, retry_after, receipt_now);
 
             warn!(
                 symbol,

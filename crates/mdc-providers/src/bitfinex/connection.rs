@@ -1,6 +1,6 @@
 //! Low-level WebSocket connection actor, channel dispatching, and self-healing resync loop for Bitfinex.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -77,6 +77,8 @@ pub async fn run_connection_loop<S: StreamingSink>(
     let mut symbol_to_chan: HashMap<Symbol, u32> = HashMap::new();
     let mut books: HashMap<u32, BitfinexChecksumBook> = HashMap::new();
     let mut scratch = BitfinexConnectionScratch::new();
+    let mut recent_trades: HashSet<u64> = HashSet::with_capacity(2048);
+    let mut recent_trade_ring: VecDeque<u64> = VecDeque::with_capacity(2048);
 
     let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
 
@@ -168,6 +170,8 @@ pub async fn run_connection_loop<S: StreamingSink>(
         books.clear();
         fsms.clear();
         scratch.clear();
+        recent_trades.clear();
+        recent_trade_ring.clear();
 
         // Initialize FSMs and emit ResyncStarted for all configured symbols
         for sym in &symbol_list {
@@ -460,6 +464,8 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 &mut symbol_to_chan,
                                 &mut books,
                                 &mut pending_resubscribe,
+                                &mut recent_trades,
+                                &mut recent_trade_ring,
                                 config.orderbook_depth,
                                 config.streams.trades,
                                 &mut ws_stream,
@@ -486,6 +492,8 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                     &mut symbol_to_chan,
                                     &mut books,
                                     &mut pending_resubscribe,
+                                    &mut recent_trades,
+                                    &mut recent_trade_ring,
                                     config.orderbook_depth,
                                     config.streams.trades,
                                     &mut ws_stream,
@@ -562,6 +570,8 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
     symbol_to_chan: &mut HashMap<Symbol, u32>,
     books: &mut HashMap<u32, BitfinexChecksumBook>,
     _pending_resubscribe: &mut HashSet<Symbol>,
+    recent_trades: &mut HashSet<u64>,
+    recent_trade_ring: &mut VecDeque<u64>,
     orderbook_depth: usize,
     trades_enabled: bool,
     ws_stream: &mut W,
@@ -722,10 +732,6 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                             let _ = book.apply(l);
                         }
 
-                        if let Some(fsm) = fsms.get_mut(&sym) {
-                            fsm.on_snapshot();
-                        }
-
                         let ctx = sink.next_context(
                             VenueId::Bitfinex,
                             &sym,
@@ -757,6 +763,10 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                         }
 
                         if snapshot_succeeded {
+                            if let Some(fsm) = fsms.get_mut(&sym) {
+                                fsm.on_snapshot();
+                            }
+
                             // ResyncCompleted must be emitted strictly AFTER begin_book and end_book,
                             // consuming a fresh monotonic delivery ordinal.
                             let _ = sink.emit_alert(
@@ -809,7 +819,15 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                     }
                 }
                 RawPayload::Trade { trade, .. } => {
-                    if trades_enabled {
+                    if trades_enabled && !recent_trades.contains(&trade.id) {
+                        if recent_trade_ring.len() >= 2048 {
+                            if let Some(oldest) = recent_trade_ring.pop_front() {
+                                recent_trades.remove(&oldest);
+                            }
+                        }
+                        recent_trade_ring.push_back(trade.id);
+                        recent_trades.insert(trade.id);
+
                         if let Ok(t) = normalize_trade(&trade, received_ts) {
                             let ctx = sink.next_context(
                                 VenueId::Bitfinex,
@@ -829,18 +847,28 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                 RawPayload::TradeSnapshot { trades, .. } => {
                     if trades_enabled {
                         for trade in &trades {
-                            if let Ok(t) = normalize_trade(trade, received_ts) {
-                                let ctx = sink.next_context(
-                                    VenueId::Bitfinex,
-                                    &sym,
-                                    tag,
-                                    exchange_ts,
-                                    received_ts,
-                                    None,
-                                );
-                                let _ = sink.trade(&ctx, &t);
-                                if sink.is_failed() {
-                                    return Err(true);
+                            if !recent_trades.contains(&trade.id) {
+                                if recent_trade_ring.len() >= 2048 {
+                                    if let Some(oldest) = recent_trade_ring.pop_front() {
+                                        recent_trades.remove(&oldest);
+                                    }
+                                }
+                                recent_trade_ring.push_back(trade.id);
+                                recent_trades.insert(trade.id);
+
+                                if let Ok(t) = normalize_trade(trade, received_ts) {
+                                    let ctx = sink.next_context(
+                                        VenueId::Bitfinex,
+                                        &sym,
+                                        tag,
+                                        exchange_ts,
+                                        received_ts,
+                                        None,
+                                    );
+                                    let _ = sink.trade(&ctx, &t);
+                                    if sink.is_failed() {
+                                        return Err(true);
+                                    }
                                 }
                             }
                         }

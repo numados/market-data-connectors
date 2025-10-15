@@ -130,7 +130,7 @@ proptest! {
         let now = Instant::now();
         let (should_resub, alerts) = fsm.on_gap(expected, jumped, now);
 
-        prop_assert!(should_resub);
+        prop_assert!(should_resub.is_immediate());
         prop_assert_eq!(alerts.len(), num_products);
 
         // All products must be invalidated (AwaitingSnapshot)

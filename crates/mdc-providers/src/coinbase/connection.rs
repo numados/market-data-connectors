@@ -173,6 +173,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 sym.clone(),
                 SymbolFsm::new(now, config.resubscribe_timeout, config.quarantine_duration),
             );
+            if config.streams.heartbeat {
+                heartbeat_monitor.arm(sym.clone(), now);
+            }
 
             let tag = *tag_map.get(sym).unwrap_or(&0);
             if sink
@@ -261,6 +264,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         break 'message_loop;
                                     }
                                     heartbeat_monitor.reset(&symbol);
+                                    if config.streams.heartbeat {
+                                        heartbeat_monitor.arm(symbol.clone(), Instant::now());
+                                    }
 
                                     let unsub = build_unsubscribe_payload(symbol.as_str(), "level2_batch");
                                     let sub = build_single_subscribe_payload(symbol.as_str(), "level2_batch");
@@ -290,6 +296,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             break 'message_loop;
                                         }
                                         heartbeat_monitor.reset(sym);
+                                        if config.streams.heartbeat {
+                                            heartbeat_monitor.arm(sym.clone(), now);
+                                        }
 
                                         let unsub = build_unsubscribe_payload(sym.as_str(), "level2_batch");
                                         let sub = build_single_subscribe_payload(sym.as_str(), "level2_batch");

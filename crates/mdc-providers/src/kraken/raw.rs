@@ -74,6 +74,8 @@ pub enum RawMessage<'a> {
     Heartbeat,
     /// Connection or engine status message.
     Status,
+    /// Method acknowledgment response (subscribe, unsubscribe, etc.).
+    MethodAck(RawMethodAck<'a>),
     /// Unhandled channel or method response without a `channel` tag.
     Other,
 }
@@ -82,11 +84,12 @@ impl<'a> RawMessage<'a> {
     /// Parses a raw JSON string into a `RawMessage` borrowing directly from the input.
     pub fn parse(s: &'a str) -> Result<Self, serde_json::Error> {
         #[derive(Deserialize)]
-        struct ChannelHeader<'a> {
+        struct EnvelopeHeader<'a> {
             channel: Option<&'a str>,
+            method: Option<&'a str>,
         }
 
-        let header: ChannelHeader<'a> = serde_json::from_str(s)?;
+        let header: EnvelopeHeader<'a> = serde_json::from_str(s)?;
         match header.channel {
             Some("book") => {
                 #[derive(Deserialize)]
@@ -113,6 +116,10 @@ impl<'a> RawMessage<'a> {
             }
             Some("heartbeat") => Ok(RawMessage::Heartbeat),
             Some("status") => Ok(RawMessage::Status),
+            None if header.method.is_some() => {
+                let ack: RawMethodAck<'a> = serde_json::from_str(s)?;
+                Ok(RawMessage::MethodAck(ack))
+            }
             _ => Ok(RawMessage::Other),
         }
     }

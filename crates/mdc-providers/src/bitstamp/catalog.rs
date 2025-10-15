@@ -62,32 +62,32 @@ pub fn parse_bitstamp_catalog(
         // Native ID preference: market_symbol -> url_symbol -> name
         let native_id_str = market
             .market_symbol
-            .or(market.url_symbol)
-            .or_else(|| market.name.clone())
+            .as_deref()
+            .or(market.url_symbol.as_deref())
+            .or(market.name.as_deref())
             .ok_or_else(|| CatalogError::MalformedItem {
                 provider: ProviderKind::Bitstamp,
                 reason: "missing 'market_symbol', 'url_symbol', or 'name'".to_string(),
             })?;
 
         let native_id =
-            NativeInstrumentId::new(&native_id_str).map_err(|e| CatalogError::MalformedItem {
+            NativeInstrumentId::new(native_id_str).map_err(|e| CatalogError::MalformedItem {
                 provider: ProviderKind::Bitstamp,
                 reason: format!("invalid native instrument id '{native_id_str}': {e}"),
             })?;
 
-        // Subscription symbol preference: name (e.g. "BTC/USD") if <= 16 bytes, else native_id if <= 16
-        let subscription_symbol = market
-            .name
+        // Subscription symbol preference: market_symbol / url_symbol (e.g. "btcusd"), usable directly on WebSocket
+        let sub_sym_str = market
+            .market_symbol
             .as_deref()
-            .filter(|s| s.len() <= 16)
-            .map(Symbol::from)
-            .or_else(|| {
-                if native_id_str.len() <= 16 {
-                    Some(Symbol::from(native_id_str.as_str()))
-                } else {
-                    None
-                }
-            });
+            .or(market.url_symbol.as_deref())
+            .unwrap_or(native_id_str);
+
+        let subscription_symbol = if sub_sym_str.len() <= 16 {
+            Some(Symbol::from(sub_sym_str))
+        } else {
+            None
+        };
 
         // Base currency: explicit base_currency or derive from "BASE/QUOTE"
         let base_str = market.base_currency.or_else(|| {
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(items[0].raw_quote.as_ref().unwrap().as_str(), "USD");
         assert_eq!(
             items[0].subscription_symbol.as_ref().unwrap().as_str(),
-            "BTC/USD"
+            "btcusd"
         );
 
         assert_eq!(items[1].native_id.as_str(), "ethusd");

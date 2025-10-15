@@ -47,18 +47,18 @@ proptest! {
     }
 
     #[test]
-    fn property_awaiting_snapshot_drops_all_diffs(
+    fn property_awaiting_snapshot_buffers_all_diffs(
         diff_micros in any::<u64>(),
     ) {
         let sym = Symbol::from("btcusd");
         let fsm = SymbolFsm::new(sym, Duration::from_secs(5));
         prop_assert_eq!(fsm.state(), SyncState::AwaitingSnapshot);
 
-        prop_assert_eq!(fsm.check_diff(diff_micros), DiffDecision::Drop);
+        prop_assert_eq!(fsm.check_diff(diff_micros), DiffDecision::Buffer);
     }
 
     #[test]
-    fn property_resync_trigger_drops_subsequent_diffs(
+    fn property_resync_trigger_buffers_subsequent_diffs(
         snap_micros in 1_000_000_000_000u64..2_000_000_000_000u64,
         newer_offset in 1u64..10_000u64,
     ) {
@@ -74,8 +74,8 @@ proptest! {
         fsm.trigger_resync(now);
         prop_assert_eq!(fsm.state(), SyncState::AwaitingSnapshot);
 
-        // Previously emitted diff now dropped
-        prop_assert_eq!(fsm.check_diff(newer_micros), DiffDecision::Drop);
+        // Previously emitted diff now buffered
+        prop_assert_eq!(fsm.check_diff(newer_micros), DiffDecision::Buffer);
     }
 
     #[test]

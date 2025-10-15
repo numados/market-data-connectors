@@ -207,15 +207,17 @@ impl KrakenChecksumBook {
     }
 
     /// Applies one message's price level updates to the book.
-    ///
-    /// Asks are updated first, then bids. A level with quantity 0 is removed.
-    /// After updates are applied on a side, the side is truncated to `depth`:
-    /// highest prices are dropped from asks, lowest prices are dropped from bids.
-    pub fn apply(
+    /// Applies incremental updates to the checksum book, tracking levels evicted by depth truncation.
+    pub fn apply_with_evictions(
         &mut self,
         asks: &[RawLevel<'_>],
         bids: &[RawLevel<'_>],
+        evicted_asks: &mut Vec<Decimal>,
+        evicted_bids: &mut Vec<Decimal>,
     ) -> Result<(), LevelParseError> {
+        evicted_asks.clear();
+        evicted_bids.clear();
+
         // 1. Apply asks
         for raw in asks {
             let price_str = raw.price.get();
@@ -249,7 +251,9 @@ impl KrakenChecksumBook {
 
         // Truncate asks to depth: asks are sorted ascending, so pop highest prices.
         while self.asks.len() > self.depth {
-            self.asks.pop_last();
+            if let Some((price, _)) = self.asks.pop_last() {
+                evicted_asks.push(price);
+            }
         }
 
         // 2. Apply bids
@@ -285,10 +289,27 @@ impl KrakenChecksumBook {
 
         // Truncate bids to depth: bids are sorted ascending, so pop lowest prices.
         while self.bids.len() > self.depth {
-            self.bids.pop_first();
+            if let Some((price, _)) = self.bids.pop_first() {
+                evicted_bids.push(price);
+            }
         }
 
         Ok(())
+    }
+
+    /// Applies incremental asks and bids updates to the checksum book.
+    ///
+    /// Asks are updated first, then bids. A level with quantity 0 is removed.
+    /// After updates are applied on a side, the side is truncated to `depth`:
+    /// highest prices are dropped from asks, lowest prices are dropped from bids.
+    pub fn apply(
+        &mut self,
+        asks: &[RawLevel<'_>],
+        bids: &[RawLevel<'_>],
+    ) -> Result<(), LevelParseError> {
+        let mut evicted_asks = Vec::new();
+        let mut evicted_bids = Vec::new();
+        self.apply_with_evictions(asks, bids, &mut evicted_asks, &mut evicted_bids)
     }
 
     /// Computes the order book checksum using the configured checksum strategy.

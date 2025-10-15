@@ -745,3 +745,62 @@ async fn test_rest_oversized_body_rejected() {
         "Oversized body must trigger Transport error"
     );
 }
+
+#[tokio::test]
+async fn test_rest_control_set_symbols_rejection() {
+    let mock = MockRest::start().await;
+    let rates_body = load_fixture(RATES_FIXTURE).expect("load fixture");
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(rates_body, "application/json"))
+        .mount(mock.inner())
+        .await;
+
+    let config = FrankfurterConfig::builder()
+        .base_url(mock.url().expect("valid mock url"))
+        .base_currency("EUR")
+        .quote_currencies(vec!["USD".to_string()])
+        .poll_interval(Duration::from_millis(50))
+        .build()
+        .expect("build config");
+
+    let connector = FrankfurterConnector::builder(config)
+        .build()
+        .expect("build connector");
+    let sink = RecordingSink::new();
+    let cancel = CancellationToken::new();
+
+    let (handle, runner) = connector.run(sink.clone(), cancel.child_token());
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // 1. Empty list rejected
+    let res = handle.set_symbols(vec![]).await;
+    assert!(res.is_err(), "Empty quote list must be rejected");
+
+    // 2. Duplicate codes rejected
+    let res = handle
+        .set_symbols(vec!["USD".to_string(), "USD".to_string()])
+        .await;
+    assert!(res.is_err(), "Duplicate quote codes must be rejected");
+
+    // 3. Invalid format (lowercase or not 3 chars) rejected
+    let res = handle.set_symbols(vec!["usd".to_string()]).await;
+    assert!(res.is_err(), "Lowercase quote codes must be rejected");
+
+    let res = handle.set_symbols(vec!["USDT".to_string()]).await;
+    assert!(res.is_err(), "4-letter quote codes must be rejected");
+
+    let res = handle.set_symbols(vec!["US".to_string()]).await;
+    assert!(res.is_err(), "2-letter quote codes must be rejected");
+
+    // 4. Too many quotes rejected
+    let too_many: Vec<String> = (0..=mdc_providers::frankfurter::config::MAX_QUOTE_CODES)
+        .map(|i| format!("C{:02}", i))
+        .collect();
+    let res = handle.set_symbols(too_many).await;
+    assert!(res.is_err(), "Exceeding max quotes must be rejected");
+
+    cancel.cancel();
+    let _ = runner.await;
+}

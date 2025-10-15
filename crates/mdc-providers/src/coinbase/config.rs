@@ -35,7 +35,7 @@ impl CoinbaseConfig {
     /// Validates configuration invariants.
     pub fn validate(&self) -> Result<(), mdc_core::MdcError> {
         if self.streams.depth && !self.streams.heartbeat {
-            return Err(mdc_core::MdcError::Protocol(
+            return Err(mdc_core::MdcError::Config(
                 "Coinbase depth stream requires heartbeat stream to be enabled for watchdog integrity".to_string(),
             ));
         }

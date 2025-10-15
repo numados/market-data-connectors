@@ -765,3 +765,143 @@ async fn test_ws_sequenceless_l2_data_fails_closed() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+#[tokio::test]
+async fn test_multi_event_envelope_dispatches_per_event() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = CoinbaseAdvancedConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+
+    let symbols = vec![Symbol::from("BTC-USD"), Symbol::from("ETH-USD")];
+    let sink = RecordingSink::new();
+
+    let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+        .symbols(symbols)
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Send an envelope containing two snapshots: BTC-USD and ETH-USD
+    let multi_event_payload = serde_json::json!({
+        "channel": "l2_data",
+        "client_id": "",
+        "timestamp": "2023-06-23T00:00:00.123456Z",
+        "sequence_num": 1,
+        "events": [
+            {
+                "type": "snapshot",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-06-23T00:00:00.123456Z",
+                        "price_level": "30000.00",
+                        "new_quantity": "1.50"
+                    },
+                    {
+                        "side": "offer",
+                        "event_time": "2023-06-23T00:00:00.123456Z",
+                        "price_level": "30005.00",
+                        "new_quantity": "2.00"
+                    }
+                ]
+            },
+            {
+                "type": "snapshot",
+                "product_id": "ETH-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-06-23T00:00:00.123456Z",
+                        "price_level": "1900.00",
+                        "new_quantity": "10.00"
+                    },
+                    {
+                        "side": "offer",
+                        "event_time": "2023-06-23T00:00:00.123456Z",
+                        "price_level": "1905.00",
+                        "new_quantity": "12.00"
+                    }
+                ]
+            }
+        ]
+    });
+
+    ws.broadcast_text(multi_event_payload.to_string());
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // Verify: separate books emitted for BTC and ETH
+    let events = sink.events();
+    let mut btc_levels = Vec::new();
+    let mut eth_levels = Vec::new();
+    let mut current_sym: Option<Symbol> = None;
+
+    for e in events {
+        match e {
+            RecordedEvent::BeginBook { symbol, .. } => {
+                current_sym = Some(symbol);
+            }
+            RecordedEvent::Level {
+                side,
+                price,
+                volume,
+            } => {
+                if let Some(ref sym) = current_sym {
+                    if sym.as_str() == "BTC-USD" {
+                        btc_levels.push((side, price, volume));
+                    } else if sym.as_str() == "ETH-USD" {
+                        eth_levels.push((side, price, volume));
+                    }
+                }
+            }
+            RecordedEvent::EndBook { .. } => {
+                current_sym = None;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        btc_levels,
+        vec![
+            (
+                Side::Bid,
+                Decimal::from(30000),
+                Decimal::from_str_exact("1.50").unwrap()
+            ),
+            (
+                Side::Ask,
+                Decimal::from(30005),
+                Decimal::from_str_exact("2.00").unwrap()
+            ),
+        ],
+        "BTC-USD must contain only BTC levels"
+    );
+
+    assert_eq!(
+        eth_levels,
+        vec![
+            (
+                Side::Bid,
+                Decimal::from(1900),
+                Decimal::from_str_exact("10.00").unwrap()
+            ),
+            (
+                Side::Ask,
+                Decimal::from(1905),
+                Decimal::from_str_exact("12.00").unwrap()
+            ),
+        ],
+        "ETH-USD must contain only ETH levels"
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}

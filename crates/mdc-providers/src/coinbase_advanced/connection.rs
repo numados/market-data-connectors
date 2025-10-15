@@ -18,13 +18,10 @@ use crate::sink_util::ConnectionSink;
 
 use crate::coinbase_advanced::config::CoinbaseAdvancedConfig;
 use crate::coinbase_advanced::control::Command;
-use crate::coinbase_advanced::fsm::CoinbaseAdvancedFsm;
-use crate::coinbase_advanced::normalize::{
-    normalize_delta_from_scratch, normalize_snapshot_from_scratch, normalize_trade,
-    parse_rfc3339_nanos,
-};
+use crate::coinbase_advanced::fsm::{CoinbaseAdvancedFsm, ResyncSchedule};
+use crate::coinbase_advanced::normalize::{normalize_trade, parse_rfc3339_nanos};
 use crate::coinbase_advanced::raw::{
-    CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, L2EventKind, RawEnvelope, RawTradeEvent,
+    CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, L2EventKind, RawTradesEnvelope,
     build_subscribe_frame, build_unsubscribe_frame,
 };
 
@@ -180,11 +177,26 @@ pub async fn run_connection_task<S: StreamingSink>(
             SilenceWatchdog::new(config.silence_timeout / 2, config.silence_timeout, now_inst);
         let mut watchdog_ticker = tokio::time::interval(Duration::from_secs(1));
         watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut pending_delayed_resubscribe: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         'frame_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break 'reconnect_loop;
+                }
+
+                _ = async {
+                    match &mut pending_delayed_resubscribe {
+                        Some(sleep) => sleep.await,
+                        None => std::future::pending().await,
+                    }
+                }, if pending_delayed_resubscribe.is_some() => {
+                    pending_delayed_resubscribe = None;
+                    fsm.mark_resync_all(Instant::now());
+                    let unsub = build_unsubscribe_frame("level2", &product_strs);
+                    let sub = build_subscribe_frame("level2", &product_strs);
+                    let _ = ws_tx.send(Message::Text(unsub)).await;
+                    let _ = ws_tx.send(Message::Text(sub)).await;
                 }
 
                 cmd_opt = command_rx.recv() => {
@@ -215,7 +227,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
 
                         Some(Command::ResyncAll) => {
-                            let (should_send, alerts) = fsm.trigger_resync_all(Instant::now());
+                            let (schedule, alerts) = fsm.trigger_resync_all(Instant::now());
                             for (sym, tag, alert) in alerts {
                                 if sink
                                     .emit_alert(
@@ -233,11 +245,18 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 }
                             }
 
-                            if should_send {
-                                let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                let sub = build_subscribe_frame("level2", &product_strs);
-                                let _ = ws_tx.send(Message::Text(unsub)).await;
-                                let _ = ws_tx.send(Message::Text(sub)).await;
+                            match schedule {
+                                ResyncSchedule::Immediate => {
+                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                    let sub = build_subscribe_frame("level2", &product_strs);
+                                    let _ = ws_tx.send(Message::Text(unsub)).await;
+                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                }
+                                ResyncSchedule::Delayed(delay) => {
+                                    if pending_delayed_resubscribe.is_none() {
+                                        pending_delayed_resubscribe = Some(Box::pin(tokio::time::sleep(delay)));
+                                    }
+                                }
                             }
                         }
 
@@ -348,9 +367,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                     let now = Instant::now();
                     watchdog.on_data_frame(now);
 
-                    // Parse envelope
-                    let env: RawEnvelope<'_> = match serde_json::from_str(text) {
-                        Ok(e) => e,
+                    // Parse envelope directly into scratch buffers
+                    let mut de = serde_json::Deserializer::from_str(text);
+                    let header = match CoinbaseAdvancedFrameSeed::new(&mut scratch).deserialize(&mut de) {
+                        Ok(h) => h,
                         Err(err) => {
                             warn!(connection_id, error = %err, "Malformed JSON envelope; skipping");
                             continue 'frame_loop;
@@ -358,7 +378,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                     };
 
                     // Check connection-wide sequence number
-                    if let Some(seq) = env.sequence_num {
+                    if let Some(seq) = header.sequence_num {
                         match fsm.check_sequence(seq) {
                             GlobalSequenceCheck::First | GlobalSequenceCheck::Valid => {}
                             GlobalSequenceCheck::OldDataIgnored => {
@@ -377,14 +397,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     "Connection-wide sequence gap detected on Coinbase Advanced"
                                 );
 
-                                let (should_resubscribe, alerts) = fsm.on_gap(expected, received, now);
+                                let (schedule, alerts) = fsm.on_gap(expected, received, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
                                     if sink
                                         .emit_alert(
                                             VenueId::CoinbaseAdvanced,
                                             &sym,
                                             tag,
-                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
                                             received_ts,
                                             Some(received),
                                             gap_alert,
@@ -410,11 +430,19 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     }
                                 }
 
-                                if should_resubscribe {
-                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                    let sub = build_subscribe_frame("level2", &product_strs);
-                                    let _ = ws_tx.send(Message::Text(unsub)).await;
-                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                match schedule {
+                                    ResyncSchedule::Immediate => {
+                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                        let sub = build_subscribe_frame("level2", &product_strs);
+                                        let _ = ws_tx.send(Message::Text(unsub)).await;
+                                        let _ = ws_tx.send(Message::Text(sub)).await;
+                                    }
+                                    ResyncSchedule::Delayed(delay) => {
+                                        if pending_delayed_resubscribe.is_none() {
+                                            pending_delayed_resubscribe =
+                                                Some(Box::pin(tokio::time::sleep(delay)));
+                                        }
+                                    }
                                 }
 
                                 continue 'frame_loop;
@@ -426,14 +454,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     "Connection-wide sequence exhausted on Coinbase Advanced"
                                 );
 
-                                let (should_resubscribe, alerts) = fsm.on_gap(u64::MAX, seq, now);
+                                let (schedule, alerts) = fsm.on_gap(u64::MAX, seq, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
                                     if sink
                                         .emit_alert(
                                             VenueId::CoinbaseAdvanced,
                                             &sym,
                                             tag,
-                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
                                             received_ts,
                                             Some(seq),
                                             gap_alert,
@@ -459,11 +487,19 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     }
                                 }
 
-                                if should_resubscribe {
-                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                    let sub = build_subscribe_frame("level2", &product_strs);
-                                    let _ = ws_tx.send(Message::Text(unsub)).await;
-                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                match schedule {
+                                    ResyncSchedule::Immediate => {
+                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                        let sub = build_subscribe_frame("level2", &product_strs);
+                                        let _ = ws_tx.send(Message::Text(unsub)).await;
+                                        let _ = ws_tx.send(Message::Text(sub)).await;
+                                    }
+                                    ResyncSchedule::Delayed(delay) => {
+                                        if pending_delayed_resubscribe.is_none() {
+                                            pending_delayed_resubscribe =
+                                                Some(Box::pin(tokio::time::sleep(delay)));
+                                        }
+                                    }
                                 }
 
                                 continue 'frame_loop;
@@ -476,14 +512,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     "Connection-wide sequence reset detected on Coinbase Advanced; forcing resync"
                                 );
 
-                                let (should_resubscribe, alerts) = fsm.on_gap(expected, reset_to, now);
+                                let (schedule, alerts) = fsm.on_gap(expected, reset_to, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
                                     if sink
                                         .emit_alert(
                                             VenueId::CoinbaseAdvanced,
                                             &sym,
                                             tag,
-                                            env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                            header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
                                             received_ts,
                                             Some(reset_to),
                                             gap_alert,
@@ -509,31 +545,39 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     }
                                 }
 
-                                if should_resubscribe {
-                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                    let sub = build_subscribe_frame("level2", &product_strs);
-                                    let _ = ws_tx.send(Message::Text(unsub)).await;
-                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                match schedule {
+                                    ResyncSchedule::Immediate => {
+                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                        let sub = build_subscribe_frame("level2", &product_strs);
+                                        let _ = ws_tx.send(Message::Text(unsub)).await;
+                                        let _ = ws_tx.send(Message::Text(sub)).await;
+                                    }
+                                    ResyncSchedule::Delayed(delay) => {
+                                        if pending_delayed_resubscribe.is_none() {
+                                            pending_delayed_resubscribe =
+                                                Some(Box::pin(tokio::time::sleep(delay)));
+                                        }
+                                    }
                                 }
 
                                 continue 'frame_loop;
                             }
                         }
-                    } else if env.channel == "l2_data"
+                    } else if header.channel == "l2_data"
                         && config.sequence_policy == SequencePolicy::Required
                     {
                         warn!(
                             connection_id,
                             "Missing sequence_num on Coinbase Advanced l2_data channel under Required policy; failing closed"
                         );
-                        let (should_resubscribe, alerts) = fsm.trigger_resync_all(now);
+                        let (schedule, alerts) = fsm.trigger_resync_all(now);
                         for (sym, tag, start_alert) in alerts {
                             if sink
                                 .emit_alert(
                                     VenueId::CoinbaseAdvanced,
                                     &sym,
                                     tag,
-                                    env.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
+                                    header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok()),
                                     received_ts,
                                     None,
                                     start_alert,
@@ -544,18 +588,26 @@ pub async fn run_connection_task<S: StreamingSink>(
                             }
                         }
 
-                        if should_resubscribe {
-                            let unsub = build_unsubscribe_frame("level2", &product_strs);
-                            let sub = build_subscribe_frame("level2", &product_strs);
-                            let _ = ws_tx.send(Message::Text(unsub)).await;
-                            let _ = ws_tx.send(Message::Text(sub)).await;
+                        match schedule {
+                            ResyncSchedule::Immediate => {
+                                let unsub = build_unsubscribe_frame("level2", &product_strs);
+                                let sub = build_subscribe_frame("level2", &product_strs);
+                                let _ = ws_tx.send(Message::Text(unsub)).await;
+                                let _ = ws_tx.send(Message::Text(sub)).await;
+                            }
+                            ResyncSchedule::Delayed(delay) => {
+                                if pending_delayed_resubscribe.is_none() {
+                                    pending_delayed_resubscribe =
+                                        Some(Box::pin(tokio::time::sleep(delay)));
+                                }
+                            }
                         }
 
                         continue 'frame_loop;
                     }
 
                     // Dispatch according to channel
-                    match env.channel {
+                    match header.channel {
                         "heartbeats" => {
                             // Watchdog already stamped above
                         }
@@ -569,105 +621,90 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
 
                         "l2_data" => {
-                            // Use stream deserialization directly into scratch for zero heap allocations
-                            let mut de = serde_json::Deserializer::from_str(text);
-                            let header_res = CoinbaseAdvancedFrameSeed::new(&mut scratch).deserialize(&mut de);
+                            let exchange_ts = header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok());
+                            for ev in &scratch.events {
+                                let sym = &ev.product_id;
+                                let Some(tag) = fsm.tag(sym) else {
+                                    continue;
+                                };
+                                match ev.kind {
+                                    L2EventKind::Snapshot => {
+                                        let ctx = sink.next_context(
+                                            VenueId::CoinbaseAdvanced,
+                                            sym,
+                                            tag,
+                                            exchange_ts,
+                                            received_ts,
+                                            header.sequence_num,
+                                        );
 
-                            match header_res {
-                                Ok(header) => {
-                                    if let Some(p_id) = header.product_id {
-                                        let sym = Symbol::from(p_id);
-                                        if let Some(tag) = fsm.tag(&sym) {
-                                            match header.l2_kind {
-                                                Some(L2EventKind::Snapshot) => {
-                                                    if let Ok((exchange_ts, snapshot)) = normalize_snapshot_from_scratch(&scratch, header.timestamp) {
-                                                        let ctx = sink.next_context(
-                                                            VenueId::CoinbaseAdvanced,
-                                                            &sym,
-                                                            tag,
-                                                            Some(exchange_ts),
-                                                            received_ts,
-                                                            header.sequence_num,
-                                                        );
-
-                                                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
-                                                            continue 'frame_loop;
-                                                        }
-                                                        for l in &snapshot.bids {
-                                                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
-                                                                continue 'frame_loop;
-                                                            }
-                                                        }
-                                                        for l in &snapshot.asks {
-                                                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
-                                                                continue 'frame_loop;
-                                                            }
-                                                        }
-                                                        if sink.end_book(&ctx, None).is_err() {
-                                                            continue 'frame_loop;
-                                                        }
-
-                                                        if let Some(completed_alert) = fsm.on_snapshot(&sym) {
-                                                            let _ = sink.emit_alert(
-                                                                VenueId::CoinbaseAdvanced,
-                                                                &sym,
-                                                                tag,
-                                                                None,
-                                                                crate::now_nanos(),
-                                                                None,
-                                                                completed_alert,
-                                                            );
-                                                        }
-                                                    }
-                                                }
-
-                                                Some(L2EventKind::Update) => {
-                                                    if fsm.is_in_sync(&sym) {
-                                                        if let Ok((exchange_ts, delta)) = normalize_delta_from_scratch(&scratch, header.timestamp) {
-                                                            let ctx = sink.next_context(
-                                                                VenueId::CoinbaseAdvanced,
-                                                                &sym,
-                                                                tag,
-                                                                Some(exchange_ts),
-                                                                received_ts,
-                                                                header.sequence_num,
-                                                            );
-
-                                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
-                                                                continue 'frame_loop;
-                                                            }
-                                                            for l in &delta.bids {
-                                                                if sink.level(Side::Bid, l.price, l.volume).is_err() {
-                                                                    continue 'frame_loop;
-                                                                }
-                                                            }
-                                                            for l in &delta.asks {
-                                                                if sink.level(Side::Ask, l.price, l.volume).is_err() {
-                                                                    continue 'frame_loop;
-                                                                }
-                                                            }
-                                                            let _ = sink.end_book(&ctx, None);
-                                                        }
-                                                    } else {
-                                                        debug!(connection_id, symbol = %sym, "L2 update dropped while awaiting snapshot");
-                                                    }
-                                                }
-
-                                                None => {}
+                                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                                            continue 'frame_loop;
+                                        }
+                                        for l in &scratch.bids[ev.bids_start..ev.bids_end] {
+                                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                continue 'frame_loop;
                                             }
                                         }
+                                        for l in &scratch.asks[ev.asks_start..ev.asks_end] {
+                                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                continue 'frame_loop;
+                                            }
+                                        }
+                                        if sink.end_book(&ctx, None).is_err() {
+                                            continue 'frame_loop;
+                                        }
+
+                                        if let Some(completed_alert) = fsm.on_snapshot(sym) {
+                                            let _ = sink.emit_alert(
+                                                VenueId::CoinbaseAdvanced,
+                                                sym,
+                                                tag,
+                                                None,
+                                                crate::now_nanos(),
+                                                None,
+                                                completed_alert,
+                                            );
+                                        }
                                     }
-                                }
-                                Err(e) => {
-                                    warn!(connection_id, error = %e, "Failed to stream-deserialize l2_data frame");
+
+                                    L2EventKind::Update => {
+                                        if fsm.is_in_sync(sym) {
+                                            let ctx = sink.next_context(
+                                                VenueId::CoinbaseAdvanced,
+                                                sym,
+                                                tag,
+                                                exchange_ts,
+                                                received_ts,
+                                                header.sequence_num,
+                                            );
+
+                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                continue 'frame_loop;
+                                            }
+                                            for l in &scratch.bids[ev.bids_start..ev.bids_end] {
+                                                if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                    continue 'frame_loop;
+                                                }
+                                            }
+                                            for l in &scratch.asks[ev.asks_start..ev.asks_end] {
+                                                if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                    continue 'frame_loop;
+                                                }
+                                            }
+                                            let _ = sink.end_book(&ctx, None);
+                                        } else {
+                                            debug!(connection_id, symbol = %sym, "L2 update dropped while awaiting snapshot");
+                                        }
+                                    }
                                 }
                             }
                         }
 
                         "market_trades" => {
                             if config.streams.market_trades {
-                                for raw_ev in &env.events {
-                                    if let Ok(trade_ev) = serde_json::from_str::<RawTradeEvent<'_>>(raw_ev.get()) {
+                                if let Ok(trades_env) = serde_json::from_str::<RawTradesEnvelope<'_>>(text) {
+                                    for trade_ev in &trades_env.events {
                                         for t in &trade_ev.trades {
                                             let sym = Symbol::from(t.product_id);
                                             if let Some(tag) = fsm.tag(&sym) {
@@ -678,7 +715,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         tag,
                                                         Some(exchange_ts),
                                                         received_ts,
-                                                        env.sequence_num,
+                                                        trades_env.sequence_num.or(header.sequence_num),
                                                     );
                                                     if sink.trade(&ctx, &canonical_trade).is_err() {
                                                         continue 'frame_loop;
@@ -692,7 +729,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
 
                         _ => {
-                            debug!(connection_id, channel = env.channel, "Unhandled channel frame");
+                            debug!(connection_id, channel = header.channel, "Unhandled channel frame");
                         }
                     }
                 }

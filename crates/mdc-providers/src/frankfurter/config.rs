@@ -121,23 +121,7 @@ impl FrankfurterConfig {
             return Err(ConfigError::InvalidBaseCurrency(self.base_currency.clone()));
         }
 
-        if self.quote_currencies.is_empty() {
-            return Err(ConfigError::MissingQuotes);
-        }
-
-        if self.quote_currencies.len() > MAX_QUOTE_CODES {
-            return Err(ConfigError::TooManyQuotes(self.quote_currencies.len()));
-        }
-
-        let mut seen = HashSet::with_capacity(self.quote_currencies.len());
-        for quote in &self.quote_currencies {
-            if !is_valid_currency_code(quote) {
-                return Err(ConfigError::InvalidQuote(quote.clone()));
-            }
-            if !seen.insert(quote) {
-                return Err(ConfigError::DuplicateQuote(quote.clone()));
-            }
-        }
+        validate_quote_currencies(&self.quote_currencies)?;
 
         if self.poll_interval.is_zero() {
             return Err(ConfigError::InvalidPollInterval);
@@ -155,7 +139,31 @@ impl FrankfurterConfig {
     }
 }
 
-fn is_valid_currency_code(code: &str) -> bool {
+/// Validates a list of quote currency codes (non-empty, <= MAX_QUOTE_CODES, 3-letter ASCII uppercase, no duplicates).
+pub fn validate_quote_currencies(quotes: &[String]) -> Result<(), ConfigError> {
+    if quotes.is_empty() {
+        return Err(ConfigError::MissingQuotes);
+    }
+
+    if quotes.len() > MAX_QUOTE_CODES {
+        return Err(ConfigError::TooManyQuotes(quotes.len()));
+    }
+
+    let mut seen = HashSet::with_capacity(quotes.len());
+    for quote in quotes {
+        if !is_valid_currency_code(quote) {
+            return Err(ConfigError::InvalidQuote(quote.clone()));
+        }
+        if !seen.insert(quote) {
+            return Err(ConfigError::DuplicateQuote(quote.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Checks whether a currency code is a valid 3-letter ASCII uppercase string.
+pub fn is_valid_currency_code(code: &str) -> bool {
     code.len() == 3 && code.chars().all(|c| c.is_ascii_uppercase())
 }
 
@@ -298,5 +306,14 @@ mod tests {
             .poll_interval(Duration::ZERO)
             .build();
         assert_eq!(config.unwrap_err(), ConfigError::InvalidPollInterval);
+    }
+
+    #[test]
+    fn test_invalid_quote_code_rejected() {
+        let res = validate_quote_currencies(&[String::from("usd")]);
+        assert_eq!(res.unwrap_err(), ConfigError::InvalidQuote("usd".into()));
+
+        let res = validate_quote_currencies(&[String::from("USDT")]);
+        assert_eq!(res.unwrap_err(), ConfigError::InvalidQuote("USDT".into()));
     }
 }

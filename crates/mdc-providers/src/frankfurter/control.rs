@@ -71,18 +71,8 @@ impl ConnectorHandle {
 
     /// Updates the set of configured quote currency codes for subsequent polls.
     pub async fn set_symbols(&self, quotes: Vec<String>) -> Result<(), ControlError> {
-        if quotes.is_empty() {
-            return Err(ControlError::InvalidSymbols(
-                "quotes list cannot be empty".to_string(),
-            ));
-        }
-        if quotes.len() > crate::frankfurter::config::MAX_QUOTE_CODES {
-            return Err(ControlError::InvalidSymbols(format!(
-                "quotes count {} exceeds maximum of {}",
-                quotes.len(),
-                crate::frankfurter::config::MAX_QUOTE_CODES
-            )));
-        }
+        crate::frankfurter::config::validate_quote_currencies(&quotes)
+            .map_err(|e| ControlError::InvalidSymbols(e.to_string()))?;
         self.sender
             .send(Command::SetSymbols(quotes))
             .await

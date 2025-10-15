@@ -14,6 +14,30 @@ pub enum ProductSyncState {
     InSync,
 }
 
+/// Schedule for sending resubscribe messages after a sequence gap or resync trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResyncSchedule {
+    /// Resubscribe immediately (cooldown elapsed or first trigger).
+    Immediate,
+    /// Cooldown active; resubscribe should be scheduled after `delay`.
+    Delayed(Duration),
+}
+
+impl ResyncSchedule {
+    /// Returns true if resubscribe should be sent immediately.
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, Self::Immediate)
+    }
+
+    /// Returns the delay before resubscribe should be attempted, if delayed.
+    pub fn delay(&self) -> Option<Duration> {
+        match self {
+            Self::Immediate => None,
+            Self::Delayed(d) => Some(*d),
+        }
+    }
+}
+
 /// State machine tracking connection-wide sequence and per-product order book synchronization.
 #[derive(Debug)]
 pub struct CoinbaseAdvancedFsm {
@@ -42,9 +66,15 @@ impl CoinbaseAdvancedFsm {
     /// Resets the FSM on connection establishment or disconnect.
     pub fn reset(&mut self) {
         self.tracker.reset();
+        self.last_resync_all = None;
         for (_, state) in self.products.values_mut() {
             *state = ProductSyncState::AwaitingSnapshot;
         }
+    }
+
+    /// Records that a connection-wide resync was dispatched (updating cooldown timer).
+    pub fn mark_resync_all(&mut self, now: Instant) {
+        self.last_resync_all = Some(now);
     }
 
     /// Checks an incoming envelope sequence number against the connection-wide tracker.
@@ -86,23 +116,33 @@ impl CoinbaseAdvancedFsm {
 
     /// Handles a detected connection-wide sequence gap.
     ///
-    /// Returns `(should_send_resubscribe, alerts)` where:
-    /// - `should_send_resubscribe`: `true` if cooldown permits sending a resubscribe message.
+    /// Returns `(schedule, alerts)` where:
+    /// - `schedule`: `Immediate` if cooldown permits sending a resubscribe message, or `Delayed(Duration)` with retry delay.
     /// - `alerts`: pairs of `(GapDetected, ResyncStarted)` for every product on the connection.
     pub fn on_gap(
         &mut self,
         expected: u64,
         received: u64,
         now: Instant,
-    ) -> (bool, Vec<(Symbol, SymbolTag, [IntegrityAlert; 2])>) {
-        let should_resubscribe = match self.last_resync_all {
-            Some(last) => now.duration_since(last) >= self.cooldown,
-            None => true,
+    ) -> (
+        ResyncSchedule,
+        Vec<(Symbol, SymbolTag, [IntegrityAlert; 2])>,
+    ) {
+        let schedule = match self.last_resync_all {
+            Some(last) => {
+                let elapsed = now.duration_since(last);
+                if elapsed >= self.cooldown {
+                    self.last_resync_all = Some(now);
+                    ResyncSchedule::Immediate
+                } else {
+                    ResyncSchedule::Delayed(self.cooldown.saturating_sub(elapsed))
+                }
+            }
+            None => {
+                self.last_resync_all = Some(now);
+                ResyncSchedule::Immediate
+            }
         };
-
-        if should_resubscribe {
-            self.last_resync_all = Some(now);
-        }
 
         let mut alerts = Vec::with_capacity(self.products.len());
         for (sym, (tag, state)) in &mut self.products {
@@ -117,22 +157,29 @@ impl CoinbaseAdvancedFsm {
             ));
         }
 
-        (should_resubscribe, alerts)
+        (schedule, alerts)
     }
 
     /// Triggers a connection-wide resynchronization.
     pub fn trigger_resync_all(
         &mut self,
         now: Instant,
-    ) -> (bool, Vec<(Symbol, SymbolTag, IntegrityAlert)>) {
-        let should_resubscribe = match self.last_resync_all {
-            Some(last) => now.duration_since(last) >= self.cooldown,
-            None => true,
+    ) -> (ResyncSchedule, Vec<(Symbol, SymbolTag, IntegrityAlert)>) {
+        let schedule = match self.last_resync_all {
+            Some(last) => {
+                let elapsed = now.duration_since(last);
+                if elapsed >= self.cooldown {
+                    self.last_resync_all = Some(now);
+                    ResyncSchedule::Immediate
+                } else {
+                    ResyncSchedule::Delayed(self.cooldown.saturating_sub(elapsed))
+                }
+            }
+            None => {
+                self.last_resync_all = Some(now);
+                ResyncSchedule::Immediate
+            }
         };
-
-        if should_resubscribe {
-            self.last_resync_all = Some(now);
-        }
 
         let mut alerts = Vec::with_capacity(self.products.len());
         for (sym, (tag, state)) in &mut self.products {
@@ -140,7 +187,7 @@ impl CoinbaseAdvancedFsm {
             alerts.push((sym.clone(), *tag, IntegrityAlert::ResyncStarted));
         }
 
-        (should_resubscribe, alerts)
+        (schedule, alerts)
     }
 
     /// Triggers manual resynchronization for a single product.
@@ -213,13 +260,19 @@ mod tests {
         // Inject gap: expected 1, received 3
         let now = Instant::now();
         let (should_send, alerts) = fsm.on_gap(1, 3, now);
-        assert!(should_send);
+        assert!(should_send.is_immediate());
         assert_eq!(alerts.len(), 2);
         assert!(!fsm.is_in_sync(&sym1));
         assert!(!fsm.is_in_sync(&sym2));
 
-        // Cooldown prevents immediate resubscribe repeat
+        // Cooldown prevents immediate resubscribe repeat and returns remaining delay
         let (should_repeat, _) = fsm.on_gap(4, 6, now);
-        assert!(!should_repeat);
+        assert!(!should_repeat.is_immediate());
+        assert!(should_repeat.delay().is_some());
+
+        // reset() clears cooldown so subsequent gap is immediate
+        fsm.reset();
+        let (should_after_reset, _) = fsm.on_gap(7, 9, now);
+        assert!(should_after_reset.is_immediate());
     }
 }

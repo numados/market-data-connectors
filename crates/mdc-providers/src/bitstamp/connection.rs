@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
 use mdc_core::model::{
-    DisconnectKind, IntegrityAlert, RunId, Side, Symbol, SymbolTag, UnixNanos, VenueId,
+    DisconnectKind, IntegrityAlert, PriceLevel, RunId, Side, SourceErrorKind, Symbol, SymbolTag,
+    UnixNanos, VenueId,
 };
 use mdc_core::resync::ResyncFailure;
 use mdc_core::sink::{BookKind, StreamingSink};
@@ -26,6 +27,14 @@ use crate::bitstamp::raw::{
 };
 use crate::bitstamp::rest::{BitstampRestClient, RestError};
 use crate::sink_util::ConnectionSink;
+
+/// Buffered order book diff held while authoritative snapshot retrieval is in flight.
+#[derive(Debug, Clone)]
+struct BufferedDiff {
+    microtimestamp: u64,
+    bids: Vec<PriceLevel>,
+    asks: Vec<PriceLevel>,
+}
 
 /// Builds the channel name for diff order book updates (e.g. `"diff_order_book_btcusd"`).
 pub fn build_diff_order_book_channel(symbol: &str) -> String {
@@ -148,6 +157,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Subscribe to channels and initialize symbols to AwaitingSnapshot
         let mut snapshot_queue: VecDeque<Symbol> = VecDeque::new();
+        let mut buffered_diffs: HashMap<Symbol, VecDeque<BufferedDiff>> = HashMap::new();
 
         for (sym, tag) in &symbols {
             if let Some(fsm) = fsms.get_mut(sym) {
@@ -317,6 +327,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                             if let Some(fsm) = fsms.get_mut(&sym) {
                                 let now = Instant::now();
                                 fsm.trigger_resync(now);
+                                if let Some(buf) = buffered_diffs.get_mut(&sym) {
+                                    buf.clear();
+                                }
 
                                 let tag = symbol_tags.get(&sym).copied().unwrap_or_default();
                                 let _ = sink.emit_alert(
@@ -418,6 +431,39 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 if let Some(fsm) = fsms.get_mut(&sym) {
                                     fsm.on_snapshot(snap.microtimestamp, now);
+                                }
+
+                                // Replay diffs buffered while snapshot was in flight that are newer than snapshot
+                                if let Some(queue) = buffered_diffs.get_mut(&sym) {
+                                    while let Some(diff) = queue.pop_front() {
+                                        if diff.microtimestamp > snap.microtimestamp {
+                                            let diff_ts = Some(UnixNanos::from_micros(diff.microtimestamp));
+                                            let ctx = sink.next_context(
+                                                VenueId::Bitstamp,
+                                                &sym,
+                                                tag,
+                                                diff_ts,
+                                                crate::now_nanos(),
+                                                None,
+                                            );
+                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                break 'frame_loop;
+                                            }
+                                            for level in &diff.bids {
+                                                if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
+                                            }
+                                            for level in &diff.asks {
+                                                if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                                                    break 'frame_loop;
+                                                }
+                                            }
+                                            if sink.end_book(&ctx, None).is_err() {
+                                                break 'frame_loop;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -541,6 +587,36 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     error = %e,
                                                     "Failed to parse Bitstamp diff_order_book frame"
                                                 );
+                                                if fsm.state() != SyncState::AwaitingSnapshot {
+                                                    let tag = symbol_tags.get(sym).copied().unwrap_or_default();
+                                                    let _ = sink.emit_alert(
+                                                        VenueId::Bitstamp,
+                                                        sym,
+                                                        tag,
+                                                        None,
+                                                        crate::now_nanos(),
+                                                        None,
+                                                        IntegrityAlert::SourceError {
+                                                            kind: SourceErrorKind::Parse,
+                                                        },
+                                                    );
+                                                    let _ = sink.emit_alert(
+                                                        VenueId::Bitstamp,
+                                                        sym,
+                                                        tag,
+                                                        None,
+                                                        crate::now_nanos(),
+                                                        None,
+                                                        IntegrityAlert::ResyncStarted,
+                                                    );
+                                                    fsm.trigger_resync(Instant::now());
+                                                    if let Some(buf) = buffered_diffs.get_mut(sym) {
+                                                        buf.clear();
+                                                    }
+                                                    if !snapshot_queue.contains(sym) {
+                                                        snapshot_queue.push_back(sym.clone());
+                                                    }
+                                                }
                                                 continue;
                                             }
                                         };
@@ -575,13 +651,23 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     break 'frame_loop;
                                                 }
                                             }
-                                            DiffDecision::Drop => {
-                                                if fsm.state() == SyncState::AwaitingSnapshot
-                                                    && !snapshot_queue.contains(sym)
-                                                {
+                                            DiffDecision::Buffer => {
+                                                let queue = buffered_diffs
+                                                    .entry(sym.clone())
+                                                    .or_insert_with(|| VecDeque::with_capacity(128));
+                                                if queue.len() >= 1024 {
+                                                    queue.pop_front();
+                                                }
+                                                queue.push_back(BufferedDiff {
+                                                    microtimestamp: header.microtimestamp,
+                                                    bids: scratch.bids.clone(),
+                                                    asks: scratch.asks.clone(),
+                                                });
+                                                if !snapshot_queue.contains(sym) {
                                                     snapshot_queue.push_back(sym.clone());
                                                 }
                                             }
+                                            DiffDecision::Drop => {}
                                         }
                                     }
                                 }

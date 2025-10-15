@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
 use mdc_core::model::{
     DeliveryStamp, DisconnectKind, IntegrityAlert, L2Delta, MarketEvent, RunId, SequenceRange,
-    Side, Symbol, SymbolTag, UnixNanos, VenueId,
+    Side, SourceErrorKind, Symbol, SymbolTag, UnixNanos, VenueId,
 };
 use mdc_core::resync::{DeltaDecision, SnapshotOutcome};
 use mdc_core::sink::{BookKind, StreamingSink};
@@ -417,6 +417,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     let active_symbol = active_sym.clone();
                                     active_snapshot_req = None;
 
+                                    let mut snapshot_success = false;
+
                                     if status == "ok" {
                                         if let Some(data_raw) = env.data {
                                             if let Some(fsm) = fsms.get_mut(&active_symbol) {
@@ -437,6 +439,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 replay,
                                                                 ..
                                                             }) => {
+                                                                snapshot_success = true;
+
                                                                 // Emit snapshot
                                                                 let snap_ctx = sink.next_context(
                                                                     VenueId::Huobi,
@@ -494,8 +498,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                     symbol = %active_symbol,
                                                                     "Stale snapshot received; re-requesting after cooldown"
                                                                 );
-                                                                fsm.record_snapshot_failure(now);
-                                                                pending_snapshots.push_back(active_symbol.clone());
                                                             }
                                                             Ok(SnapshotOutcome::Ignored) => {}
                                                             Err(e) => {
@@ -505,8 +507,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                     error = %e,
                                                                     "Failed to process snapshot outcome"
                                                                 );
-                                                                fsm.record_snapshot_failure(now);
-                                                                pending_snapshots.push_back(active_symbol.clone());
                                                             }
                                                         }
                                                     }
@@ -520,6 +520,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     }
                                                 }
                                             }
+                                        } else {
+                                            warn!(
+                                                connection_id,
+                                                symbol = %active_symbol,
+                                                "Huobi snapshot reply status ok but missing data field"
+                                            );
                                         }
                                     } else {
                                         warn!(
@@ -529,10 +535,36 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             status,
                                             "Snapshot request returned non-ok status"
                                         );
+                                    }
+
+                                    if !snapshot_success {
                                         if let Some(fsm) = fsms.get_mut(&active_symbol) {
                                             fsm.record_snapshot_failure(now);
+                                            let resync_alert = fsm.trigger_resync(now);
+                                            let _ = sink.emit_alert(
+                                                VenueId::Huobi,
+                                                &active_symbol,
+                                                fsm.tag(),
+                                                None,
+                                                crate::now_nanos(),
+                                                None,
+                                                IntegrityAlert::SourceError {
+                                                    kind: SourceErrorKind::Parse,
+                                                },
+                                            );
+                                            let _ = sink.emit_alert(
+                                                VenueId::Huobi,
+                                                &active_symbol,
+                                                fsm.tag(),
+                                                None,
+                                                crate::now_nanos(),
+                                                None,
+                                                resync_alert,
+                                            );
                                         }
-                                        pending_snapshots.push_back(active_symbol);
+                                        if !pending_snapshots.contains(&active_symbol) {
+                                            pending_snapshots.push_back(active_symbol);
+                                        }
                                     }
 
                                     try_send_next_snapshot(
@@ -624,6 +656,16 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             if !pending_snapshots.contains(&symbol) {
                                                                 pending_snapshots.push_back(symbol);
                                                             }
+                                                            try_send_next_snapshot(
+                                                                &mut ws_tx,
+                                                                &mut fsms,
+                                                                &mut pending_snapshots,
+                                                                &mut active_snapshot_req,
+                                                                &mut snapshot_counter,
+                                                                &config,
+                                                                now,
+                                                            )
+                                                            .await;
                                                         }
                                                     }
                                                     DeltaDecision::Drop => {

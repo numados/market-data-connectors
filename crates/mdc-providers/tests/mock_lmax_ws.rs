@@ -412,3 +412,57 @@ async fn test_ws_control_pause_resume() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+#[tokio::test]
+async fn test_lmax_pause_then_cancel() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = LmaxConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.control_pacing = ControlPacing {
+        initial_delay: Duration::from_millis(50),
+        min_command_interval: Duration::from_millis(50),
+        too_many_requests_backoff: Duration::from_millis(50),
+        max_backoff: Duration::from_secs(1),
+    };
+
+    let sink = RecordingSink::new();
+    let (connector, handle) = LmaxConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btc-usd")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    handle.pause().await.expect("send pause");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let events = sink.events();
+    let has_paused = events.iter().any(|e| {
+        matches!(
+            e,
+            RecordedEvent::Alert {
+                alert: IntegrityAlert::ConnectionLost {
+                    reason: DisconnectKind::Paused,
+                },
+                ..
+            }
+        )
+    });
+    assert!(has_paused, "Pause must emit ConnectionLost(Paused)");
+
+    // Cancel while paused without calling resume
+    cancel.cancel();
+
+    // Runner must terminate promptly without hanging
+    let result = tokio::time::timeout(Duration::from_secs(2), runner).await;
+    assert!(
+        result.is_ok(),
+        "Runner must exit promptly on cancellation while paused"
+    );
+}

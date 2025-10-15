@@ -317,6 +317,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     },
                                 );
                             }
+                            let _ = ws_tx.close().await;
                             is_paused = true;
                             break 'frame_loop;
                         }

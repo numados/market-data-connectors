@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use mdc_core::PriceLevel;
+use mdc_core::{PriceLevel, Symbol};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde::de::{
@@ -67,6 +67,19 @@ pub struct RawHeartbeatEvent<'a> {
     pub heartbeat_counter: Option<u64>,
 }
 
+/// Raw message envelope representing market trades from Coinbase Advanced Trade WebSocket feed.
+#[derive(Debug, Deserialize)]
+pub struct RawTradesEnvelope<'a> {
+    /// Channel name.
+    pub channel: &'a str,
+    /// Connection-wide monotonically increasing sequence number.
+    #[serde(default)]
+    pub sequence_num: Option<u64>,
+    /// Trade events array.
+    #[serde(borrow, default)]
+    pub events: Vec<RawTradeEvent<'a>>,
+}
+
 /// Raw public trade execution event payload (`channel == "market_trades"`).
 #[derive(Debug, Deserialize)]
 pub struct RawTradeEvent<'a> {
@@ -117,6 +130,23 @@ pub struct RawErrorEnvelope<'a> {
     pub channel: Option<&'a str>,
 }
 
+/// Single parsed Level 2 event within a multi-event envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedL2Event {
+    /// Product ID for this event.
+    pub product_id: Symbol,
+    /// Kind of L2 event (snapshot or incremental update).
+    pub kind: L2EventKind,
+    /// Start index into `scratch.bids`.
+    pub bids_start: usize,
+    /// End index into `scratch.bids`.
+    pub bids_end: usize,
+    /// Start index into `scratch.asks`.
+    pub asks_start: usize,
+    /// End index into `scratch.asks`.
+    pub asks_end: usize,
+}
+
 /// Pre-allocated scratch buffers for zero-allocation parsing of Coinbase Advanced book frames.
 #[derive(Debug, Default)]
 pub struct CoinbaseAdvancedScratch {
@@ -124,6 +154,8 @@ pub struct CoinbaseAdvancedScratch {
     pub bids: Vec<PriceLevel>,
     /// Asks scratch buffer.
     pub asks: Vec<PriceLevel>,
+    /// Parsed event slices for multi-event envelopes.
+    pub events: Vec<ParsedL2Event>,
 }
 
 impl CoinbaseAdvancedScratch {
@@ -132,13 +164,15 @@ impl CoinbaseAdvancedScratch {
         Self {
             bids: Vec::with_capacity(capacity),
             asks: Vec::with_capacity(capacity),
+            events: Vec::with_capacity(8),
         }
     }
 
-    /// Clears both bid and ask scratch vectors, retaining underlying memory capacity.
+    /// Clears bid, ask, and event scratch vectors, retaining underlying memory capacity.
     pub fn clear(&mut self) {
         self.bids.clear();
         self.asks.clear();
+        self.events.clear();
     }
 }
 
@@ -338,6 +372,8 @@ impl<'de> Visitor<'de> for SingleEventVisitor<'_> {
     {
         let mut product_id: Option<&'de str> = None;
         let mut event_kind: Option<L2EventKind> = None;
+        let bids_start = self.scratch.bids.len();
+        let asks_start = self.scratch.asks.len();
 
         while let Some(key) = map.next_key::<&'de str>()? {
             match key {
@@ -361,6 +397,19 @@ impl<'de> Visitor<'de> for SingleEventVisitor<'_> {
                     let _ = map.next_value::<IgnoredAny>()?;
                 }
             }
+        }
+
+        if let (Some(p_id), Some(k)) = (product_id, event_kind) {
+            let bids_end = self.scratch.bids.len();
+            let asks_end = self.scratch.asks.len();
+            self.scratch.events.push(ParsedL2Event {
+                product_id: Symbol::from(p_id),
+                kind: k,
+                bids_start,
+                bids_end,
+                asks_start,
+                asks_end,
+            });
         }
 
         Ok((product_id, event_kind))

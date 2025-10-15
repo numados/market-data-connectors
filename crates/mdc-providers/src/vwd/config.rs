@@ -59,6 +59,10 @@ pub enum ConfigError {
     /// Malformed base URL.
     #[error("invalid base URL: {0}")]
     InvalidUrl(String),
+
+    /// Scale factor must be positive.
+    #[error("scale factor must be positive")]
+    InvalidScale,
 }
 
 /// Secret authentication credentials for VWD Infront service.
@@ -191,6 +195,11 @@ impl VwdConfig {
             let s = sym.symbol.as_str();
             if s.len() != 6 || !s.is_ascii() {
                 return Err(ConfigError::InvalidSymbol(s.to_string()));
+            }
+            if let Some(scale) = sym.scale {
+                if scale <= Decimal::ZERO {
+                    return Err(ConfigError::InvalidScale);
+                }
             }
         }
 
@@ -411,5 +420,22 @@ mod tests {
         assert!(!config.emit_book_ticker);
         assert_eq!(config.symbols.len(), 1);
         assert!(config.symbols[0].allow_inverse);
+    }
+
+    #[test]
+    fn test_invalid_scale_fails_validation() {
+        let res = VwdConfig::builder()
+            .account_path("acct")
+            .credentials(VwdCredentials::new("user", "pass"))
+            .add_symbol(VwdSymbol::with_scale("EURUSD", Decimal::ZERO))
+            .build();
+        assert_eq!(res.unwrap_err(), ConfigError::InvalidScale);
+
+        let res = VwdConfig::builder()
+            .account_path("acct")
+            .credentials(VwdCredentials::new("user", "pass"))
+            .add_symbol(VwdSymbol::with_scale("EURUSD", Decimal::from(-1)))
+            .build();
+        assert_eq!(res.unwrap_err(), ConfigError::InvalidScale);
     }
 }

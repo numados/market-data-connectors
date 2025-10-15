@@ -6,7 +6,7 @@ use mdc_core::{MdcError, SourceErrorKind, UnixNanos};
 use secrecy::ExposeSecret;
 use url::Url;
 
-use crate::vwd::config::{VwdConfig, VwdSymbol};
+use crate::vwd::config::{VwdConfig, VwdCredentials, VwdSymbol};
 use crate::vwd::normalize::{build_instrument_key, build_inverse_instrument_key};
 
 /// Formats the comma-separated instrument keys parameter from configured symbols.
@@ -50,8 +50,16 @@ pub struct PollResponse {
 pub struct VwdRestClient {
     client: reqwest::Client,
     request_url: Url,
-    username: String,
-    password: String,
+    credentials: VwdCredentials,
+}
+
+impl std::fmt::Debug for VwdRestClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VwdRestClient")
+            .field("request_url", &"[REDACTED]")
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 impl VwdRestClient {
@@ -67,8 +75,7 @@ impl VwdRestClient {
         Ok(Self {
             client,
             request_url,
-            username: config.credentials.username.expose_secret().to_string(),
-            password: config.credentials.password.expose_secret().to_string(),
+            credentials: config.credentials.clone(),
         })
     }
 
@@ -77,7 +84,10 @@ impl VwdRestClient {
         let response = self
             .client
             .get(self.request_url.clone())
-            .basic_auth(&self.username, Some(&self.password))
+            .basic_auth(
+                self.credentials.username.expose_secret(),
+                Some(self.credentials.password.expose_secret()),
+            )
             .send()
             .await
             .map_err(|_| SourceErrorKind::Transport)?;
@@ -127,5 +137,21 @@ mod tests {
             url.as_str(),
             "https://rest-interface.vwd.com/my-account/JSON/QUOTE/SNAPQUOTE/EURUSD.XRATE.SPOT~X"
         );
+    }
+
+    #[test]
+    fn test_vwd_rest_client_debug_redacts_credentials() {
+        let config = VwdConfig::builder()
+            .account_path("super-secret-account")
+            .credentials(VwdCredentials::new("secret-user", "secret-pass"))
+            .add_symbol(VwdSymbol::direct("EURUSD"))
+            .build()
+            .unwrap();
+        let client = VwdRestClient::new(&config).unwrap();
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("super-secret-account"));
+        assert!(!debug.contains("secret-user"));
+        assert!(!debug.contains("secret-pass"));
+        assert!(debug.contains("[REDACTED]"));
     }
 }

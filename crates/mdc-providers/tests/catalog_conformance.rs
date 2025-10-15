@@ -344,7 +344,7 @@ async fn test_conformance_bitstamp_catalog() {
             .as_ref()
             .unwrap()
             .as_str(),
-        "BTC/USD"
+        "btcusd"
     );
 
     assert_eq!(catalog.instruments[1].native_id.as_str(), "ethusd");

@@ -48,44 +48,46 @@ impl<S: StreamingSink> Connection<S> {
             Err(_) => return,
         };
 
-        if header.product_id != Some(self.symbol.as_str()) {
-            return;
-        }
-
-        self.delivery_ordinal = self.delivery_ordinal.saturating_add(1);
-        let ctx = EventContext {
-            venue: VenueId::CoinbaseAdvanced,
-            symbol: &self.symbol,
-            tag: self.tag,
-            exchange_ts: header.timestamp.and_then(|ts| parse_rfc3339_nanos(ts).ok()),
-            received_ts: crate::now_nanos(),
-            connection_id: 1,
-            delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
-            source_sequence: header.sequence_num,
-        };
-
-        match header.l2_kind {
-            Some(L2EventKind::Snapshot) => {
-                let _ = self.sink.begin_book(&ctx, BookKind::Snapshot);
-                for level in &self.scratch.bids {
-                    let _ = self.sink.level(Side::Bid, level.price, level.volume);
-                }
-                for level in &self.scratch.asks {
-                    let _ = self.sink.level(Side::Ask, level.price, level.volume);
-                }
-                let _ = self.sink.end_book(&ctx, None);
+        let exchange_ts = header.timestamp.and_then(|ts| parse_rfc3339_nanos(ts).ok());
+        for ev in &self.scratch.events {
+            if ev.product_id != self.symbol {
+                continue;
             }
-            Some(L2EventKind::Update) => {
-                let _ = self.sink.begin_book(&ctx, BookKind::Delta);
-                for level in &self.scratch.bids {
-                    let _ = self.sink.level(Side::Bid, level.price, level.volume);
+
+            self.delivery_ordinal = self.delivery_ordinal.saturating_add(1);
+            let ctx = EventContext {
+                venue: VenueId::CoinbaseAdvanced,
+                symbol: &self.symbol,
+                tag: self.tag,
+                exchange_ts,
+                received_ts: crate::now_nanos(),
+                connection_id: 1,
+                delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+                source_sequence: header.sequence_num,
+            };
+
+            match ev.kind {
+                L2EventKind::Snapshot => {
+                    let _ = self.sink.begin_book(&ctx, BookKind::Snapshot);
+                    for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
+                        let _ = self.sink.level(Side::Bid, level.price, level.volume);
+                    }
+                    for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
+                        let _ = self.sink.level(Side::Ask, level.price, level.volume);
+                    }
+                    let _ = self.sink.end_book(&ctx, None);
                 }
-                for level in &self.scratch.asks {
-                    let _ = self.sink.level(Side::Ask, level.price, level.volume);
+                L2EventKind::Update => {
+                    let _ = self.sink.begin_book(&ctx, BookKind::Delta);
+                    for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
+                        let _ = self.sink.level(Side::Bid, level.price, level.volume);
+                    }
+                    for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
+                        let _ = self.sink.level(Side::Ask, level.price, level.volume);
+                    }
+                    let _ = self.sink.end_book(&ctx, None);
                 }
-                let _ = self.sink.end_book(&ctx, None);
             }
-            None => {}
         }
     }
 

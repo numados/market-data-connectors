@@ -20,9 +20,11 @@ pub enum SyncState {
 /// Action to take on an incoming order book diff based on its microtimestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffDecision {
+    /// Delta arrived while awaiting snapshot: buffer it for post-snapshot replay.
+    Buffer,
     /// Microtimestamp is strictly greater than snapshot gate: stream delta downstream.
     Emit,
-    /// Microtimestamp is less than or equal to snapshot gate (or awaiting snapshot): drop delta.
+    /// Microtimestamp is less than or equal to snapshot gate: drop delta.
     Drop,
 }
 
@@ -52,7 +54,7 @@ impl SymbolFsm {
     /// Evaluates an incoming diff's microtimestamp against the current gate.
     pub fn check_diff(&self, microtimestamp: u64) -> DiffDecision {
         match self.state {
-            SyncState::AwaitingSnapshot => DiffDecision::Drop,
+            SyncState::AwaitingSnapshot => DiffDecision::Buffer,
             SyncState::InSync { gate_micros } => {
                 if microtimestamp > gate_micros {
                     DiffDecision::Emit
@@ -102,12 +104,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_fsm_initial_state_drops_diffs() {
+    fn test_fsm_initial_state_buffers_diffs() {
         let fsm = SymbolFsm::new(Symbol::from("btcusd"), Duration::from_secs(5));
         assert_eq!(fsm.state(), SyncState::AwaitingSnapshot);
 
-        assert_eq!(fsm.check_diff(100), DiffDecision::Drop);
-        assert_eq!(fsm.check_diff(1700000000000000), DiffDecision::Drop);
+        assert_eq!(fsm.check_diff(100), DiffDecision::Buffer);
+        assert_eq!(fsm.check_diff(1700000000000000), DiffDecision::Buffer);
     }
 
     #[test]
@@ -164,7 +166,7 @@ mod tests {
 
         fsm.trigger_resync(now);
         assert_eq!(fsm.state(), SyncState::AwaitingSnapshot);
-        // Now diffs are dropped again
-        assert_eq!(fsm.check_diff(snap_time + 1), DiffDecision::Drop);
+        // Now diffs are buffered again
+        assert_eq!(fsm.check_diff(snap_time + 1), DiffDecision::Buffer);
     }
 }

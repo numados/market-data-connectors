@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
     BookKind, ChecksumPolicy, DisconnectKind, IntegrityAlert, PriceLevel, RawLevelText, RunId,
-    Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId, WatchdogAction,
+    Side, SilenceWatchdog, SourceErrorKind, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId,
+    WatchdogAction,
 };
+use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -20,7 +22,7 @@ use crate::kraken::config::KrakenConfig;
 use crate::kraken::control::Command;
 use crate::kraken::fsm::{PollOutcome, SnapshotOutcome, SymbolFsm, UpdateOutcome};
 use crate::kraken::normalize::{normalize_trade, parse_rfc3339_nanos};
-use crate::kraken::raw::{RawBookData, RawLevel, RawMessage, RawMethodAck};
+use crate::kraken::raw::{RawBookData, RawLevel, RawMessage};
 
 /// Chunks a slice of symbols into batches of at most `batch_size`.
 pub fn chunk_symbols(symbols: &[Symbol], batch_size: usize) -> Vec<Vec<String>> {
@@ -106,6 +108,8 @@ pub async fn run_connection_task<S: StreamingSink>(
     // Pre-allocated scratch levels to avoid heap allocation on updates
     let mut bids_scratch: Vec<PriceLevel> = Vec::with_capacity(config.depth);
     let mut asks_scratch: Vec<PriceLevel> = Vec::with_capacity(config.depth);
+    let mut evicted_bids: Vec<Decimal> = Vec::with_capacity(16);
+    let mut evicted_asks: Vec<Decimal> = Vec::with_capacity(16);
 
     'reconnect_loop: loop {
         if cancel.is_cancelled() || sink.is_failed() {
@@ -451,6 +455,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 &mut pending_resubscribe,
                                 &mut bids_scratch,
                                 &mut asks_scratch,
+                                &mut evicted_bids,
+                                &mut evicted_asks,
                                 &mut sink,
                             );
                         }
@@ -470,6 +476,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     &mut pending_resubscribe,
                                     &mut bids_scratch,
                                     &mut asks_scratch,
+                                    &mut evicted_bids,
+                                    &mut evicted_asks,
                                     &mut sink,
                                 );
                             }
@@ -527,28 +535,13 @@ fn handle_frame_text<S: StreamingSink>(
     pending_resubscribe: &mut HashSet<Symbol>,
     bids_scratch: &mut Vec<PriceLevel>,
     asks_scratch: &mut Vec<PriceLevel>,
+    evicted_bids: &mut Vec<Decimal>,
+    evicted_asks: &mut Vec<Decimal>,
     sink: &mut ConnectionSink<S>,
 ) {
     let raw_msg = match RawMessage::parse(text) {
         Ok(m) => m,
-        Err(_) => {
-            // Check for method ack e.g. {"method":"subscribe","success":false,...}
-            if let Ok(ack) = serde_json::from_str::<RawMethodAck<'_>>(text) {
-                if !ack.success {
-                    let sym_str = ack
-                        .symbol
-                        .or_else(|| ack.result.as_ref().and_then(|r| r.symbol));
-                    if let Some(s) = sym_str {
-                        let sym = Symbol::from(s);
-                        warn!(connection_id, symbol = s, error = ?ack.error, "Kraken subscription rejected");
-                        if let Some(fsm) = fsms.get_mut(&sym) {
-                            fsm.poll(Instant::now() + Duration::from_secs(10));
-                        }
-                    }
-                }
-            }
-            return;
-        }
+        Err(_) => return,
     };
 
     match raw_msg {
@@ -590,6 +583,8 @@ fn handle_frame_text<S: StreamingSink>(
                         pending_resubscribe,
                         bids_scratch,
                         asks_scratch,
+                        evicted_bids,
+                        evicted_asks,
                         sink,
                     );
                 }
@@ -614,6 +609,36 @@ fn handle_frame_text<S: StreamingSink>(
                 }
             }
         }
+        RawMessage::MethodAck(ack) => {
+            if !ack.success {
+                let sym_str = ack
+                    .symbol
+                    .or_else(|| ack.result.as_ref().and_then(|r| r.symbol));
+                if let Some(s) = sym_str {
+                    let sym = Symbol::from(s);
+                    let tag = *tag_map.get(&sym).unwrap_or(&0);
+                    warn!(
+                        connection_id,
+                        symbol = s,
+                        error = ?ack.error,
+                        "Kraken subscription rejected"
+                    );
+                    if let Some(fsm) = fsms.get_mut(&sym) {
+                        fsm.request_resync(Instant::now());
+                    }
+                    pending_resubscribe.insert(sym.clone());
+                    let ctx =
+                        sink.next_context(VenueId::Kraken, &sym, tag, None, received_ts, None);
+                    let _ = sink.alert(
+                        &ctx,
+                        IntegrityAlert::SourceError {
+                            kind: SourceErrorKind::Parse,
+                        },
+                    );
+                    let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                }
+            }
+        }
         RawMessage::Heartbeat | RawMessage::Status | RawMessage::Other => {}
     }
 }
@@ -632,7 +657,22 @@ fn handle_snapshot<S: StreamingSink>(
     sink: &mut ConnectionSink<S>,
 ) {
     book.clear();
-    if book.apply(&data.asks, &data.bids).is_err() {
+    if let Err(e) = book.apply(&data.asks, &data.bids) {
+        warn!(
+            symbol = symbol.as_str(),
+            error = %e,
+            "Failed to apply Kraken snapshot levels to shadow book; triggering resync"
+        );
+        pending_resubscribe.insert(symbol.clone());
+        fsm.request_resync(Instant::now());
+        let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
+        let _ = sink.alert(
+            &ctx,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse,
+            },
+        );
+        let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
         return;
     }
 
@@ -694,20 +734,20 @@ fn handle_snapshot<S: StreamingSink>(
             );
         }
         SnapshotOutcome::RejectedBadChecksum => {
-            if let Some(expected) = data.checksum {
-                let _ = sink.emit_alert(
-                    VenueId::Kraken,
-                    symbol,
-                    tag,
-                    None,
-                    received_ts,
-                    None,
-                    IntegrityAlert::ChecksumMismatch {
-                        expected,
-                        calculated: book.checksum(),
-                    },
-                );
-            }
+            let expected = data.checksum.unwrap_or(0);
+            let calculated = book.checksum();
+            let _ = sink.emit_alert(
+                VenueId::Kraken,
+                symbol,
+                tag,
+                None,
+                received_ts,
+                None,
+                IntegrityAlert::ChecksumMismatch {
+                    expected,
+                    calculated,
+                },
+            );
         }
     }
 }
@@ -725,13 +765,30 @@ fn handle_update<S: StreamingSink>(
     pending_resubscribe: &mut HashSet<Symbol>,
     bids_scratch: &mut Vec<PriceLevel>,
     asks_scratch: &mut Vec<PriceLevel>,
+    evicted_bids: &mut Vec<Decimal>,
+    evicted_asks: &mut Vec<Decimal>,
     sink: &mut ConnectionSink<S>,
 ) {
     if !fsm.is_in_sync() {
         return;
     }
 
-    if book.apply(&data.asks, &data.bids).is_err() {
+    if let Err(e) = book.apply_with_evictions(&data.asks, &data.bids, evicted_asks, evicted_bids) {
+        warn!(
+            symbol = symbol.as_str(),
+            error = %e,
+            "Failed to apply Kraken update levels to shadow book; triggering resync"
+        );
+        pending_resubscribe.insert(symbol.clone());
+        fsm.request_resync(Instant::now());
+        let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
+        let _ = sink.alert(
+            &ctx,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse,
+            },
+        );
+        let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
         return;
     }
 
@@ -786,6 +843,11 @@ fn handle_update<S: StreamingSink>(
                     return;
                 }
             }
+            for price in evicted_bids.iter() {
+                if sink.level(Side::Bid, *price, Decimal::ZERO).is_err() {
+                    return;
+                }
+            }
             for (lvl, raw) in asks_scratch.iter().zip(&data.asks) {
                 if sink
                     .level_raw(
@@ -799,6 +861,11 @@ fn handle_update<S: StreamingSink>(
                     )
                     .is_err()
                 {
+                    return;
+                }
+            }
+            for price in evicted_asks.iter() {
+                if sink.level(Side::Ask, *price, Decimal::ZERO).is_err() {
                     return;
                 }
             }

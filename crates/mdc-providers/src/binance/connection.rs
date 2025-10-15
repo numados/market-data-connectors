@@ -159,38 +159,40 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         let mut disconnect_emitted = false;
 
-        // Reset controllers, emit ResyncStarted, and trigger initial snapshots
-        for (sym, tag) in &symbols {
-            if let Some(ctrl) = controllers.get_mut(sym) {
-                ctrl.reset();
-            }
+        if config.streams.depth {
+            // Reset controllers, emit ResyncStarted, and trigger initial snapshots
+            for (sym, tag) in &symbols {
+                if let Some(ctrl) = controllers.get_mut(sym) {
+                    ctrl.reset();
+                }
 
-            if sink
-                .emit_alert(
-                    VenueId::Binance,
-                    sym,
-                    *tag,
-                    None,
-                    crate::now_nanos(),
-                    None,
-                    IntegrityAlert::ResyncStarted,
-                )
-                .is_err()
-            {
-                break 'reconnect_loop;
-            }
-            policy.on_started(sym, now);
+                if sink
+                    .emit_alert(
+                        VenueId::Binance,
+                        sym,
+                        *tag,
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ResyncStarted,
+                    )
+                    .is_err()
+                {
+                    break 'reconnect_loop;
+                }
+                policy.on_started(sym, now);
 
-            // Spawn snapshot request
-            spawn_snapshot_request(
-                sym.clone(),
-                rest_client.clone(),
-                Arc::clone(&snapshot_semaphore),
-                snapshot_tx.clone(),
-                cancel.clone(),
-                &mut snapshot_tasks,
-                &mut in_flight_snapshots,
-            );
+                // Spawn snapshot request
+                spawn_snapshot_request(
+                    sym.clone(),
+                    rest_client.clone(),
+                    Arc::clone(&snapshot_semaphore),
+                    snapshot_tx.clone(),
+                    cancel.clone(),
+                    &mut snapshot_tasks,
+                    &mut in_flight_snapshots,
+                );
+            }
         }
 
         let tick_interval = (config.watchdog_ping_after / 2)
@@ -644,6 +646,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             {
                                                 break 'frame_loop;
                                             }
+                                            let delta = mdc_core::L2Delta {
+                                                bids: scratch.bids.clone(),
+                                                asks: scratch.asks.clone(),
+                                                sequence: Some(range),
+                                            };
+                                            let event = MarketEvent {
+                                                exchange_ts,
+                                                received_ts,
+                                                venue: VenueId::Binance,
+                                                symbol: sym.clone(),
+                                                tag,
+                                                delivery: sink.next_stamp(),
+                                                source_sequence: Some(header.last_update_id),
+                                                kind: delta,
+                                            };
+                                            let _ = ctrl.buffer(event);
                                             policy.on_started(&sym, now);
                                             spawn_snapshot_request(
                                                 sym,

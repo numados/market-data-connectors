@@ -79,13 +79,17 @@ pub fn normalize_symbol_quote(
         let mut bid = Decimal::from_str(bid_str).map_err(|_| SourceErrorKind::InvalidQuote)?;
         let mut ask = Decimal::from_str(ask_str).map_err(|_| SourceErrorKind::InvalidQuote)?;
 
-        if bid <= Decimal::ZERO || ask <= Decimal::ZERO {
+        if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
             return Err(SourceErrorKind::InvalidQuote);
         }
 
         if let Some(scale) = vwd_sym.scale {
             bid *= scale;
             ask *= scale;
+        }
+
+        if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
+            return Err(SourceErrorKind::InvalidQuote);
         }
 
         let exchange_ts = extract_exchange_ts(raw_bid.date_time, raw_ask.date_time);
@@ -131,7 +135,7 @@ pub fn normalize_symbol_quote(
             let inv_ask =
                 Decimal::from_str(inv_ask_str).map_err(|_| SourceErrorKind::InvalidQuote)?;
 
-            if inv_bid <= Decimal::ZERO || inv_ask <= Decimal::ZERO {
+            if inv_bid <= Decimal::ZERO || inv_ask <= Decimal::ZERO || inv_bid >= inv_ask {
                 return Err(SourceErrorKind::InvalidQuote);
             }
 
@@ -151,6 +155,10 @@ pub fn normalize_symbol_quote(
             if let Some(scale) = vwd_sym.scale {
                 bid *= scale;
                 ask *= scale;
+            }
+
+            if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
+                return Err(SourceErrorKind::InvalidQuote);
             }
 
             let exchange_ts = extract_exchange_ts(raw_inv_bid.date_time, raw_inv_ask.date_time);
@@ -186,13 +194,17 @@ pub fn normalize_symbol_from_scratch(
         let mut bid = q.bid_price.ok_or(SourceErrorKind::InvalidQuote)?;
         let mut ask = q.ask_price.ok_or(SourceErrorKind::InvalidQuote)?;
 
-        if bid <= Decimal::ZERO || ask <= Decimal::ZERO {
+        if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
             return Err(SourceErrorKind::InvalidQuote);
         }
 
         if let Some(scale) = vwd_sym.scale {
             bid *= scale;
             ask *= scale;
+        }
+
+        if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
+            return Err(SourceErrorKind::InvalidQuote);
         }
 
         let exchange_ts = extract_exchange_ts(q.bid_time.as_deref(), q.ask_time.as_deref());
@@ -219,7 +231,7 @@ pub fn normalize_symbol_from_scratch(
             let inv_bid = q.bid_price.ok_or(SourceErrorKind::InvalidQuote)?;
             let inv_ask = q.ask_price.ok_or(SourceErrorKind::InvalidQuote)?;
 
-            if inv_bid <= Decimal::ZERO || inv_ask <= Decimal::ZERO {
+            if inv_bid <= Decimal::ZERO || inv_ask <= Decimal::ZERO || inv_bid >= inv_ask {
                 return Err(SourceErrorKind::InvalidQuote);
             }
 
@@ -238,6 +250,10 @@ pub fn normalize_symbol_from_scratch(
             if let Some(scale) = vwd_sym.scale {
                 bid *= scale;
                 ask *= scale;
+            }
+
+            if bid <= Decimal::ZERO || ask <= Decimal::ZERO || bid >= ask {
+                return Err(SourceErrorKind::InvalidQuote);
             }
 
             let exchange_ts = extract_exchange_ts(q.bid_time.as_deref(), q.ask_time.as_deref());
@@ -632,5 +648,23 @@ mod tests {
         // Provenance must be min of bid (09:59:00) and ask (09:59:01), NOT last (10:05:00)
         let expected = parse_rfc3339_nanos("2026-09-29T09:59:00.000+02:00").unwrap();
         assert_eq!(norm.exchange_ts, Some(expected));
+    }
+
+    #[test]
+    fn test_normalize_crossed_quote_returns_invalid_quote() {
+        use crate::vwd::raw::{ParsedVwdQuote, VwdScratch};
+
+        let mut scratch = VwdScratch::with_capacity(1);
+        scratch.quotes.push(ParsedVwdQuote {
+            instrument_key: "EURUSD.XRATE.SPOT~X".into(),
+            bid_price: Some(d("1.1000")),
+            ask_price: Some(d("1.0900")), // ask < bid!
+            bid_time: None,
+            ask_time: None,
+        });
+
+        let sym = VwdSymbol::direct("EURUSD");
+        let err = normalize_symbol_from_scratch(&sym, &scratch, 6).unwrap_err();
+        assert_eq!(err, SourceErrorKind::InvalidQuote);
     }
 }
