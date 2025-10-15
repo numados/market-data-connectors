@@ -1048,9 +1048,12 @@ dependencies = [
 name = "mdc-sinks"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
+ "criterion",
  "futures-util",
  "mdc-core",
  "mdc-testkit",
+ "proptest",
  "rust_decimal",
  "serde",
  "thiserror 2.0.21",

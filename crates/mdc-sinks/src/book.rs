@@ -28,10 +28,13 @@ pub enum BookError {
         /// Configured limit.
         max_depth: usize,
     },
+    /// Volume calculation overflowed during level aggregation.
+    #[error("volume overflow at price {0}")]
+    VolumeOverflow(Decimal),
 }
 
 /// An in-memory Level 2 order book for a single symbol.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct L2Book {
     /// Bids sorted in descending order by price (highest bid first).
     pub(crate) bids: Vec<PriceLevel>,
@@ -41,16 +44,32 @@ pub struct L2Book {
     pub(crate) max_depth: Option<usize>,
     /// Last update identifier, if tracked.
     pub(crate) last_update_id: Option<u64>,
+    scratch_bids: Vec<PriceLevel>,
+    scratch_asks: Vec<PriceLevel>,
 }
+
+impl PartialEq for L2Book {
+    fn eq(&self, other: &Self) -> bool {
+        self.bids == other.bids
+            && self.asks == other.asks
+            && self.max_depth == other.max_depth
+            && self.last_update_id == other.last_update_id
+    }
+}
+
+impl Eq for L2Book {}
 
 impl L2Book {
     /// Creates a new empty [`L2Book`] with an optional maximum depth cap.
     pub fn new(max_depth: Option<usize>) -> Self {
+        let initial_cap = max_depth.unwrap_or(128);
         Self {
-            bids: Vec::new(),
-            asks: Vec::new(),
+            bids: Vec::with_capacity(initial_cap),
+            asks: Vec::with_capacity(initial_cap),
             max_depth,
             last_update_id: None,
+            scratch_bids: Vec::with_capacity(initial_cap),
+            scratch_asks: Vec::with_capacity(initial_cap),
         }
     }
 
@@ -83,52 +102,55 @@ impl L2Book {
     pub fn clear(&mut self) {
         self.bids.clear();
         self.asks.clear();
+        self.scratch_bids.clear();
+        self.scratch_asks.clear();
         self.last_update_id = None;
     }
 
     /// Replaces the entire book with a new authoritative [`L2Snapshot`].
     pub fn apply_snapshot(&mut self, snapshot: &L2Snapshot) -> Result<(), BookError> {
-        let mut new_bids = Vec::with_capacity(snapshot.bids.len());
-        let mut new_asks = Vec::with_capacity(snapshot.asks.len());
+        self.scratch_bids.clear();
+        self.scratch_asks.clear();
 
         for level in &snapshot.bids {
             validate_level(level)?;
             if level.volume > Decimal::ZERO {
-                new_bids.push(*level);
+                self.scratch_bids.push(*level);
             }
         }
 
         for level in &snapshot.asks {
             validate_level(level)?;
             if level.volume > Decimal::ZERO {
-                new_asks.push(*level);
+                self.scratch_asks.push(*level);
             }
         }
 
         // Bids: descending by price
-        new_bids.sort_by_key(|a| std::cmp::Reverse(a.price));
-        new_bids.dedup_by(|a, b| a.price == b.price);
+        self.scratch_bids
+            .sort_by_key(|a| std::cmp::Reverse(a.price));
+        aggregate_levels(&mut self.scratch_bids)?;
 
         // Asks: ascending by price
-        new_asks.sort_by_key(|a| a.price);
-        new_asks.dedup_by(|a, b| a.price == b.price);
+        self.scratch_asks.sort_by_key(|a| a.price);
+        aggregate_levels(&mut self.scratch_asks)?;
 
         if let Some(max_depth) = self.max_depth {
-            if new_bids.len() > max_depth {
+            if self.scratch_bids.len() > max_depth {
                 return Err(BookError::MaxDepthExceeded {
-                    depth: new_bids.len(),
+                    depth: self.scratch_bids.len(),
                     max_depth,
                 });
             }
-            if new_asks.len() > max_depth {
+            if self.scratch_asks.len() > max_depth {
                 return Err(BookError::MaxDepthExceeded {
-                    depth: new_asks.len(),
+                    depth: self.scratch_asks.len(),
                     max_depth,
                 });
             }
         }
 
-        if let (Some(b), Some(a)) = (new_bids.first(), new_asks.first()) {
+        if let (Some(b), Some(a)) = (self.scratch_bids.first(), self.scratch_asks.first()) {
             if b.price >= a.price {
                 return Err(BookError::CrossedBook {
                     best_bid: b.price,
@@ -137,8 +159,8 @@ impl L2Book {
             }
         }
 
-        self.bids = new_bids;
-        self.asks = new_asks;
+        std::mem::swap(&mut self.bids, &mut self.scratch_bids);
+        std::mem::swap(&mut self.asks, &mut self.scratch_asks);
         self.last_update_id = snapshot.last_update_id;
 
         Ok(())
@@ -146,35 +168,42 @@ impl L2Book {
 
     /// Applies an incremental [`L2Delta`] update to the order book.
     pub fn apply_delta(&mut self, delta: &L2Delta) -> Result<(), BookError> {
-        let mut new_bids = self.bids.clone();
-        let mut new_asks = self.asks.clone();
-
         for level in &delta.bids {
             validate_level(level)?;
-            apply_side_update(&mut new_bids, level, true);
+        }
+        for level in &delta.asks {
+            validate_level(level)?;
+        }
+
+        self.scratch_bids.clear();
+        self.scratch_bids.extend_from_slice(&self.bids);
+        self.scratch_asks.clear();
+        self.scratch_asks.extend_from_slice(&self.asks);
+
+        for level in &delta.bids {
+            apply_side_update(&mut self.scratch_bids, level, true);
         }
 
         for level in &delta.asks {
-            validate_level(level)?;
-            apply_side_update(&mut new_asks, level, false);
+            apply_side_update(&mut self.scratch_asks, level, false);
         }
 
         if let Some(max_depth) = self.max_depth {
-            if new_bids.len() > max_depth {
+            if self.scratch_bids.len() > max_depth {
                 return Err(BookError::MaxDepthExceeded {
-                    depth: new_bids.len(),
+                    depth: self.scratch_bids.len(),
                     max_depth,
                 });
             }
-            if new_asks.len() > max_depth {
+            if self.scratch_asks.len() > max_depth {
                 return Err(BookError::MaxDepthExceeded {
-                    depth: new_asks.len(),
+                    depth: self.scratch_asks.len(),
                     max_depth,
                 });
             }
         }
 
-        if let (Some(b), Some(a)) = (new_bids.first(), new_asks.first()) {
+        if let (Some(b), Some(a)) = (self.scratch_bids.first(), self.scratch_asks.first()) {
             if b.price >= a.price {
                 return Err(BookError::CrossedBook {
                     best_bid: b.price,
@@ -183,14 +212,34 @@ impl L2Book {
             }
         }
 
-        self.bids = new_bids;
-        self.asks = new_asks;
+        std::mem::swap(&mut self.bids, &mut self.scratch_bids);
+        std::mem::swap(&mut self.asks, &mut self.scratch_asks);
         if let Some(range) = delta.sequence {
             self.last_update_id = Some(range.last);
         }
 
         Ok(())
     }
+}
+
+fn aggregate_levels(levels: &mut Vec<PriceLevel>) -> Result<(), BookError> {
+    if levels.is_empty() {
+        return Ok(());
+    }
+    let mut write_idx = 0;
+    for read_idx in 1..levels.len() {
+        if levels[write_idx].price == levels[read_idx].price {
+            levels[write_idx].volume = levels[write_idx]
+                .volume
+                .checked_add(levels[read_idx].volume)
+                .ok_or(BookError::VolumeOverflow(levels[write_idx].price))?;
+        } else {
+            write_idx += 1;
+            levels[write_idx] = levels[read_idx];
+        }
+    }
+    levels.truncate(write_idx + 1);
+    Ok(())
 }
 
 fn validate_level(level: &PriceLevel) -> Result<(), BookError> {

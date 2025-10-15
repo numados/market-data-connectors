@@ -75,6 +75,9 @@ pub struct TopOfBookProjector {
     book: L2Book,
     candidate_book: L2Book,
     in_sync: bool,
+    resync_in_progress: bool,
+    candidate_invalid: bool,
+    has_candidate_snapshot: bool,
     bid_effective_ts: Option<UnixNanos>,
     ask_effective_ts: Option<UnixNanos>,
     candidate_bid_ts: Option<UnixNanos>,
@@ -93,6 +96,9 @@ impl TopOfBookProjector {
             book: L2Book::new(max_depth),
             candidate_book: L2Book::new(max_depth),
             in_sync: false,
+            resync_in_progress: true,
+            candidate_invalid: false,
+            has_candidate_snapshot: false,
             bid_effective_ts: None,
             ask_effective_ts: None,
             candidate_bid_ts: None,
@@ -111,6 +117,9 @@ impl TopOfBookProjector {
             book: L2Book::new(None),
             candidate_book: L2Book::new(None),
             in_sync: true,
+            resync_in_progress: false,
+            candidate_invalid: false,
+            has_candidate_snapshot: false,
             bid_effective_ts: None,
             ask_effective_ts: None,
             candidate_bid_ts: None,
@@ -181,23 +190,12 @@ impl TopOfBookProjector {
             },
 
             MarketDataKind::BookTicker(ticker) => {
-                if !self.in_sync {
-                    let proj = QuoteProjection::Unavailable {
-                        venue,
-                        symbol,
-                        tag,
-                        received_ts,
-                        reason: UnavailableReason::NotSynchronized,
-                    };
-                    self.last_projection = Some(proj.clone());
-                    return Some(proj);
-                }
-
                 if ticker.best_bid.price <= Decimal::ZERO
                     || ticker.best_bid.volume < Decimal::ZERO
                     || ticker.best_ask.price <= Decimal::ZERO
                     || ticker.best_ask.volume < Decimal::ZERO
                 {
+                    self.in_sync = false;
                     let proj = QuoteProjection::Unavailable {
                         venue,
                         symbol,
@@ -212,6 +210,7 @@ impl TopOfBookProjector {
                 if ticker.best_bid.volume == Decimal::ZERO
                     || ticker.best_ask.volume == Decimal::ZERO
                 {
+                    self.in_sync = false;
                     let proj = QuoteProjection::Unavailable {
                         venue,
                         symbol,
@@ -224,6 +223,7 @@ impl TopOfBookProjector {
                 }
 
                 if ticker.best_bid.price >= ticker.best_ask.price {
+                    self.in_sync = false;
                     let proj = QuoteProjection::Unavailable {
                         venue,
                         symbol,
@@ -235,6 +235,7 @@ impl TopOfBookProjector {
                     return Some(proj);
                 }
 
+                self.in_sync = true;
                 let proj = QuoteProjection::Available {
                     venue,
                     symbol,
@@ -264,9 +265,14 @@ impl TopOfBookProjector {
         match &event.kind {
             MarketDataKind::IntegrityAlert(alert) => match alert {
                 IntegrityAlert::ResyncCompleted { .. } => {
+                    self.resync_in_progress = false;
                     // Release candidate book for use
-                    if self.candidate_book.is_empty() {
+                    if !self.has_candidate_snapshot
+                        || self.candidate_book.is_empty()
+                        || self.candidate_invalid
+                    {
                         self.in_sync = false;
+                        self.has_candidate_snapshot = false;
                         let proj = QuoteProjection::Unavailable {
                             venue,
                             symbol,
@@ -278,7 +284,9 @@ impl TopOfBookProjector {
                         return Some(proj);
                     }
 
-                    self.book = self.candidate_book.clone();
+                    std::mem::swap(&mut self.book, &mut self.candidate_book);
+                    self.candidate_book.clear();
+                    self.has_candidate_snapshot = false;
                     self.bid_effective_ts = self.candidate_bid_ts;
                     self.ask_effective_ts = self.candidate_ask_ts;
                     self.in_sync = true;
@@ -288,8 +296,30 @@ impl TopOfBookProjector {
                     Some(proj)
                 }
 
+                IntegrityAlert::ResyncStarted => {
+                    self.in_sync = false;
+                    self.resync_in_progress = true;
+                    self.candidate_invalid = false;
+                    self.has_candidate_snapshot = false;
+                    self.candidate_book.clear();
+                    self.candidate_bid_ts = None;
+                    self.candidate_ask_ts = None;
+                    let proj = QuoteProjection::Unavailable {
+                        venue,
+                        symbol,
+                        tag,
+                        received_ts,
+                        reason: UnavailableReason::IntegrityAlert(format!("{alert:?}")),
+                    };
+                    self.last_projection = Some(proj.clone());
+                    Some(proj)
+                }
+
                 _ => {
                     self.in_sync = false;
+                    self.resync_in_progress = false;
+                    self.candidate_invalid = false;
+                    self.has_candidate_snapshot = false;
                     self.candidate_book.clear();
                     self.candidate_bid_ts = None;
                     self.candidate_ask_ts = None;
@@ -306,37 +336,60 @@ impl TopOfBookProjector {
             },
 
             MarketDataKind::L2Snapshot(snapshot) => {
-                match self.candidate_book.apply_snapshot(snapshot) {
-                    Ok(()) => {
-                        self.candidate_bid_ts = Some(event_ts);
-                        self.candidate_ask_ts = Some(event_ts);
-
-                        if self.in_sync {
-                            // If already in sync, snapshot updates active book directly
-                            self.book = self.candidate_book.clone();
+                if self.resync_in_progress {
+                    match self.candidate_book.apply_snapshot(snapshot) {
+                        Ok(()) => {
+                            self.candidate_bid_ts = Some(event_ts);
+                            self.candidate_ask_ts = Some(event_ts);
+                            self.candidate_invalid = false;
+                            self.has_candidate_snapshot = true;
+                            None
+                        }
+                        Err(e) => {
+                            self.in_sync = false;
+                            self.has_candidate_snapshot = false;
+                            self.candidate_invalid = true;
+                            self.candidate_book.clear();
+                            self.candidate_bid_ts = None;
+                            self.candidate_ask_ts = None;
+                            let proj = QuoteProjection::Unavailable {
+                                venue,
+                                symbol,
+                                tag,
+                                received_ts,
+                                reason: book_error_to_unavailable(e),
+                            };
+                            self.last_projection = Some(proj.clone());
+                            Some(proj)
+                        }
+                    }
+                } else {
+                    // Local recovery or in-sync snapshot refresh
+                    match self.book.apply_snapshot(snapshot) {
+                        Ok(()) => {
                             self.bid_effective_ts = Some(event_ts);
                             self.ask_effective_ts = Some(event_ts);
+                            self.in_sync = true;
                             let proj =
                                 self.compute_available_quote(venue, symbol, tag, received_ts);
                             self.last_projection = Some(proj.clone());
                             Some(proj)
-                        } else {
-                            // Candidate book staged, awaits ResyncCompleted
-                            None
                         }
-                    }
-                    Err(e) => {
-                        self.in_sync = false;
-                        self.candidate_book.clear();
-                        let proj = QuoteProjection::Unavailable {
-                            venue,
-                            symbol,
-                            tag,
-                            received_ts,
-                            reason: book_error_to_unavailable(e),
-                        };
-                        self.last_projection = Some(proj.clone());
-                        Some(proj)
+                        Err(e) => {
+                            self.in_sync = false;
+                            self.book.clear();
+                            self.bid_effective_ts = None;
+                            self.ask_effective_ts = None;
+                            let proj = QuoteProjection::Unavailable {
+                                venue,
+                                symbol,
+                                tag,
+                                received_ts,
+                                reason: book_error_to_unavailable(e),
+                            };
+                            self.last_projection = Some(proj.clone());
+                            Some(proj)
+                        }
                     }
                 }
             }
@@ -344,18 +397,43 @@ impl TopOfBookProjector {
             MarketDataKind::L2Delta(delta) => {
                 if !self.in_sync {
                     // Update candidate book during resync
-                    let _ = self.candidate_book.apply_delta(delta);
+                    if !self.has_candidate_snapshot || self.candidate_invalid {
+                        return None;
+                    }
+
+                    let old_best_bid = self.candidate_book.best_bid();
+                    let old_best_ask = self.candidate_book.best_ask();
+
+                    match self.candidate_book.apply_delta(delta) {
+                        Ok(()) => {
+                            let new_best_bid = self.candidate_book.best_bid();
+                            let new_best_ask = self.candidate_book.best_ask();
+
+                            if new_best_bid != old_best_bid {
+                                self.candidate_bid_ts = Some(event_ts);
+                            }
+                            if new_best_ask != old_best_ask {
+                                self.candidate_ask_ts = Some(event_ts);
+                            }
+                        }
+                        Err(_) => {
+                            self.candidate_book.clear();
+                            self.candidate_bid_ts = None;
+                            self.candidate_ask_ts = None;
+                            self.candidate_invalid = true;
+                            self.has_candidate_snapshot = false;
+                        }
+                    }
                     return None;
                 }
 
                 let old_best_bid = self.book.best_bid();
                 let old_best_ask = self.book.best_ask();
 
-                let mut staged_book = self.book.clone();
-                match staged_book.apply_delta(delta) {
+                match self.book.apply_delta(delta) {
                     Ok(()) => {
-                        let new_best_bid = staged_book.best_bid();
-                        let new_best_ask = staged_book.best_ask();
+                        let new_best_bid = self.book.best_bid();
+                        let new_best_ask = self.book.best_ask();
 
                         if new_best_bid != old_best_bid {
                             self.bid_effective_ts = Some(event_ts);
@@ -363,9 +441,6 @@ impl TopOfBookProjector {
                         if new_best_ask != old_best_ask {
                             self.ask_effective_ts = Some(event_ts);
                         }
-
-                        self.book = staged_book;
-                        self.candidate_book = self.book.clone();
 
                         let proj = self.compute_available_quote(venue, symbol, tag, received_ts);
                         self.last_projection = Some(proj.clone());
@@ -441,9 +516,9 @@ impl TopOfBookProjector {
 
 fn book_error_to_unavailable(err: BookError) -> UnavailableReason {
     match err {
-        BookError::NonPositivePrice(_) | BookError::NegativeVolume(_) => {
-            UnavailableReason::InvalidPriceOrVolume
-        }
+        BookError::NonPositivePrice(_)
+        | BookError::NegativeVolume(_)
+        | BookError::VolumeOverflow(_) => UnavailableReason::InvalidPriceOrVolume,
         BookError::CrossedBook { .. } => UnavailableReason::CrossedBook,
         BookError::MaxDepthExceeded { .. } => UnavailableReason::ExceededMaxDepth,
     }

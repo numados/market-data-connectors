@@ -25,3 +25,10 @@ futures-util = { workspace = true, optional = true }
 [dev-dependencies]
 mdc-testkit.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+proptest.workspace = true
+criterion.workspace = true
+allocation-counter.workspace = true
+
+[[bench]]
+name = "top_of_book"
+harness = false
