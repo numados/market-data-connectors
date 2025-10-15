@@ -48,6 +48,10 @@ pub enum MdcError {
     /// Consumer requirements not supported by provider capabilities.
     #[error("capability error: {0}")]
     Capability(#[from] crate::model::CapabilityError),
+
+    /// Invalid configuration parameter or boundary violation.
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 /// Thread-safe, atomically reference-counted error wrapper preserving error source chains.
