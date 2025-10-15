@@ -174,12 +174,22 @@ pub async fn run_connection_task<S: StreamingSink>(
         // Reset FSMs and books, emit ResyncStarted for all symbols
         fsms.clear();
         books.clear();
+        let checksum_strategy = config
+            .checksum_strategy
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(mdc_core::integrity::KrakenChecksum::new(10)));
         for sym in &symbol_list {
             fsms.insert(
                 sym.clone(),
                 SymbolFsm::new(now, config.resubscribe_timeout, config.quarantine_duration),
             );
-            books.insert(sym.clone(), KrakenChecksumBook::new(config.depth));
+            books.insert(
+                sym.clone(),
+                KrakenChecksumBook::with_strategy(
+                    config.depth,
+                    std::sync::Arc::clone(&checksum_strategy),
+                ),
+            );
 
             let tag = *tag_map.get(sym).unwrap_or(&0);
             if sink

@@ -65,6 +65,9 @@ pub enum ConfigError {
     /// Configured symbols per connection must be greater than zero.
     #[error("symbols_per_connection must be greater than zero")]
     ZeroSymbolsPerConnection,
+    /// Configured resync buffer capacity must be greater than zero.
+    #[error("resync_buffer_capacity must be greater than zero")]
+    ZeroResyncBufferCapacity,
 }
 
 impl GateioConfig {
@@ -72,6 +75,9 @@ impl GateioConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.symbols_per_connection == 0 {
             return Err(ConfigError::ZeroSymbolsPerConnection);
+        }
+        if self.resync_buffer_capacity == 0 {
+            return Err(ConfigError::ZeroResyncBufferCapacity);
         }
         if self.orderbook_levels != 50 && self.orderbook_levels != 400 {
             return Err(ConfigError::InvalidOrderbookLevels(self.orderbook_levels));

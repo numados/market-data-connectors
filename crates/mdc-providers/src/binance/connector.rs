@@ -47,6 +47,10 @@ pub static BINANCE_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         ),
     });
 
+/// Factory alias for creating fresh resynchronization policies per connection task.
+pub type ResyncPolicyFactory =
+    Arc<dyn Fn() -> Box<dyn mdc_core::resync::ResyncPolicy> + Send + Sync>;
+
 /// Binance Spot market data connector.
 pub struct BinanceConnector<S> {
     config: BinanceConfig,
@@ -56,6 +60,7 @@ pub struct BinanceConnector<S> {
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
     run_id: Option<RunId>,
+    resync_policy_factory: ResyncPolicyFactory,
 }
 
 impl<S: StreamingSink + Clone> BinanceConnector<S> {
@@ -79,13 +84,24 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
         &BINANCE_CAPABILITIES
     }
 
+    /// Returns a reference to the active configuration.
+    pub fn config(&self) -> &BinanceConfig {
+        &self.config
+    }
+
+    /// Returns a reference to the configured resync policy factory.
+    pub fn resync_policy_factory(&self) -> &ResyncPolicyFactory {
+        &self.resync_policy_factory
+    }
+
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
         let run_id = self.run_id.unwrap_or_else(|| {
             let now = crate::now_nanos().0 as u128;
             RunId::from_nanos(now)
         });
-        let mut join_set = JoinSet::new();
+        let mut conn_tasks = JoinSet::new();
+        let mut aux_tasks = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
             .chunks(self.config.symbols_per_connection)
@@ -98,7 +114,7 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
         let cmd_broadcast = broadcast_tx.clone();
         let cancel_cmd = cancel.clone();
 
-        tokio::spawn(async move {
+        aux_tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_cmd.cancelled() => break,
@@ -120,19 +136,26 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
             let config = self.config.clone();
             let rest_client = self.rest_client.clone();
             let cancel_conn = cancel.clone();
+            let policy_factory = self.resync_policy_factory.clone();
 
             let mut b_rx = broadcast_tx.subscribe();
             let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
 
             let cancel_forward = cancel.clone();
-            tokio::spawn(async move {
+            aux_tasks.spawn(async move {
                 loop {
                     tokio::select! {
                         _ = cancel_forward.cancelled() => break,
                         cmd = b_rx.recv() => {
-                            if let Ok(c) = cmd {
-                                if task_cmd_tx.send(c).await.is_err() {
-                                    break;
+                            match cmd {
+                                Ok(c) => {
+                                    if task_cmd_tx.send(c).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    tracing::warn!(connection_id, skipped, "Command broadcast lagged; commands dropped");
                                 }
                             }
                         }
@@ -140,7 +163,7 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
                 }
             });
 
-            join_set.spawn(async move {
+            conn_tasks.spawn(async move {
                 run_connection_task(
                     connection_id,
                     chunk,
@@ -150,22 +173,53 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
                     task_cmd_rx,
                     cancel_conn,
                     run_id,
+                    policy_factory,
                 )
                 .await;
             });
         }
 
-        while let Some(res) = join_set.join_next().await {
-            if let Err(e) = res {
-                if !e.is_cancelled() {
-                    return Err(MdcError::Transport(Box::new(std::io::Error::other(
-                        format!("Connection task panicked: {e}"),
-                    ))));
+        let mut result = Ok(());
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    while let Some(res) = conn_tasks.join_next().await {
+                        if let Err(e) = res {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panicked: {e}"),
+                                ))));
+                            }
+                        }
+                    }
+                    break;
+                }
+                res = conn_tasks.join_next() => {
+                    match res {
+                        Some(Ok(())) => {
+                            if conn_tasks.is_empty() {
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panicked: {e}"),
+                                ))));
+                            }
+                            break;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
+        conn_tasks.abort_all();
+        aux_tasks.abort_all();
+        while conn_tasks.join_next().await.is_some() {}
+        while aux_tasks.join_next().await.is_some() {}
 
-        Ok(())
+        result
     }
 }
 
@@ -176,6 +230,7 @@ pub struct BinanceConnectorBuilder<S> {
     sink: Option<S>,
     embargo: Option<Arc<Mutex<EmbargoTracker>>>,
     run_id: Option<RunId>,
+    resync_policy_factory: Option<ResyncPolicyFactory>,
 }
 
 impl<S> BinanceConnectorBuilder<S> {
@@ -187,7 +242,23 @@ impl<S> BinanceConnectorBuilder<S> {
             sink: None,
             embargo: None,
             run_id: None,
+            resync_policy_factory: None,
         }
+    }
+
+    /// Configures a pluggable resync policy (cloned per connection task).
+    pub fn resync_policy<P: mdc_core::resync::ResyncPolicy + Clone + Sync + 'static>(
+        mut self,
+        policy: P,
+    ) -> Self {
+        self.resync_policy_factory = Some(Arc::new(move || Box::new(policy.clone())));
+        self
+    }
+
+    /// Configures a factory for pluggable resync policies.
+    pub fn resync_policy_factory(mut self, factory: ResyncPolicyFactory) -> Self {
+        self.resync_policy_factory = Some(factory);
+        self
     }
 
     /// Injects a specific `RunId` session token (primarily for tests).
@@ -247,6 +318,7 @@ impl<M: MarketDataSink + Clone> BinanceConnectorBuilder<Owned<M>> {
             sink: Some(Owned::new(sink)),
             embargo: self.embargo,
             run_id: self.run_id,
+            resync_policy_factory: self.resync_policy_factory,
         }
     }
 }
@@ -256,13 +328,11 @@ impl<S: StreamingSink + Clone> BinanceConnectorBuilder<S> {
     pub fn build(self) -> Result<(BinanceConnector<S>, ConnectorHandle), MdcError> {
         let sink = self
             .sink
-            .ok_or_else(|| MdcError::Protocol("Streaming sink is required".into()))?;
+            .ok_or_else(|| MdcError::Config("Streaming sink is required".into()))?;
 
-        if self.symbols.is_empty() {
-            return Err(MdcError::Protocol(
-                "At least one symbol must be subscribed".into(),
-            ));
-        }
+        crate::config::validate_symbols(&self.symbols)?;
+        crate::config::validate_symbols_per_connection(self.config.symbols_per_connection)?;
+        crate::config::validate_resync_buffer_capacity(self.config.resync_buffer_capacity)?;
 
         let embargo = self
             .embargo
@@ -278,6 +348,11 @@ impl<S: StreamingSink + Clone> BinanceConnectorBuilder<S> {
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());
 
+        let resync_policy_factory = self.resync_policy_factory.unwrap_or_else(|| {
+            let cd = self.config.snapshot_retry_cooldown;
+            Arc::new(move || Box::new(mdc_core::resync::CooldownPolicy::new(cd)))
+        });
+
         let connector = BinanceConnector {
             config: self.config,
             symbols: self.symbols,
@@ -286,6 +361,7 @@ impl<S: StreamingSink + Clone> BinanceConnectorBuilder<S> {
             command_tx,
             command_rx,
             run_id: self.run_id,
+            resync_policy_factory,
         };
 
         Ok((connector, handle))

@@ -117,21 +117,41 @@ pub enum ChecksumVerdict {
 ///
 /// Stores bids and asks sorted in `BTreeMap`s, retaining the exact raw JSON
 /// strings for price and volume so that CRC32 checksums match Kraken's calculation
+use std::sync::Arc;
+
+/// Local shadow order book maintaining exact string tokens for CRC32 validation
 /// without rounding or decimal formatting drift.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KrakenChecksumBook {
     depth: usize,
     bids: BTreeMap<Decimal, RawLevelOwned>,
     asks: BTreeMap<Decimal, RawLevelOwned>,
+    strategy: Arc<dyn ChecksumStrategy>,
+}
+
+impl std::fmt::Debug for KrakenChecksumBook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KrakenChecksumBook")
+            .field("depth", &self.depth)
+            .field("bids_len", &self.bids.len())
+            .field("asks_len", &self.asks.len())
+            .finish()
+    }
 }
 
 impl KrakenChecksumBook {
     /// Creates a new empty `KrakenChecksumBook` with the configured subscribed depth.
     pub fn new(depth: usize) -> Self {
+        Self::with_strategy(depth, Arc::new(KrakenChecksum::new(10)))
+    }
+
+    /// Creates a new empty `KrakenChecksumBook` with the configured depth and pluggable checksum strategy.
+    pub fn with_strategy(depth: usize, strategy: Arc<dyn ChecksumStrategy>) -> Self {
         Self {
             depth,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
+            strategy,
         }
     }
 
@@ -271,24 +291,42 @@ impl KrakenChecksumBook {
         Ok(())
     }
 
-    /// Computes the Kraken CRC32 checksum over the top 10 asks and top 10 bids.
+    /// Computes the order book checksum using the configured checksum strategy.
     pub fn checksum(&self) -> u32 {
-        let mut top_asks = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
-        let mut ask_count = 0;
-        for (i, l) in self.asks.values().take(10).enumerate() {
-            top_asks[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
-            ask_count += 1;
-        }
+        let max_depth = self.strategy.depth();
+        if max_depth <= 10 {
+            let mut top_asks = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
+            let mut ask_count = 0;
+            for (i, l) in self.asks.values().take(max_depth).enumerate() {
+                top_asks[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
+                ask_count += 1;
+            }
 
-        let mut top_bids = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
-        let mut bid_count = 0;
-        for (i, l) in self.bids.values().rev().take(10).enumerate() {
-            top_bids[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
-            bid_count += 1;
-        }
+            let mut top_bids = [RawLevelRef::new(Decimal::ZERO, Decimal::ZERO, "", ""); 10];
+            let mut bid_count = 0;
+            for (i, l) in self.bids.values().rev().take(max_depth).enumerate() {
+                top_bids[i] = RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw);
+                bid_count += 1;
+            }
 
-        let strategy = KrakenChecksum::new(10);
-        strategy.compute(&top_bids[..bid_count], &top_asks[..ask_count])
+            self.strategy
+                .compute(&top_bids[..bid_count], &top_asks[..ask_count])
+        } else {
+            let top_asks: Vec<_> = self
+                .asks
+                .values()
+                .take(max_depth)
+                .map(|l| RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw))
+                .collect();
+            let top_bids: Vec<_> = self
+                .bids
+                .values()
+                .rev()
+                .take(max_depth)
+                .map(|l| RawLevelRef::new(l.price, l.volume, &l.price_raw, &l.volume_raw))
+                .collect();
+            self.strategy.compute(&top_bids, &top_asks)
+        }
     }
 
     /// Compares the calculated checksum against an optional received value.

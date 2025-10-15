@@ -80,6 +80,10 @@ pub enum ConfigError {
     #[error("symbols_per_connection must be greater than zero")]
     ZeroSymbolsPerConnection,
 
+    /// Configured resync buffer capacity must be greater than zero.
+    #[error("resync_buffer_capacity must be greater than zero")]
+    ZeroResyncBufferCapacity,
+
     /// Invalid URL string.
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
@@ -95,6 +99,9 @@ impl HuobiConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.symbols_per_connection == 0 {
             return Err(ConfigError::ZeroSymbolsPerConnection);
+        }
+        if self.resync_buffer_capacity == 0 {
+            return Err(ConfigError::ZeroResyncBufferCapacity);
         }
         if self.mbp_levels != 150 && self.mbp_levels != 400 {
             return Err(ConfigError::InvalidMbpLevels(self.mbp_levels));

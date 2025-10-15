@@ -238,9 +238,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                         let sym_clone = sym.clone();
                         let pair_lower = sym.as_str().to_lowercase();
 
+                        let cancel_snap = cancel.clone();
                         snapshot_task = Some(tokio::spawn(async move {
-                            let res = client.fetch_order_book(&pair_lower, Instant::now()).await;
-                            (sym_clone, res)
+                            tokio::select! {
+                                _ = cancel_snap.cancelled() => (sym_clone, Err(RestError::Transport("request cancelled".to_string()))),
+                                res = client.fetch_order_book(&pair_lower, Instant::now()) => (sym_clone, res),
+                            }
                         }));
                     }
                 }
@@ -248,6 +251,9 @@ pub async fn run_connection_task<S: StreamingSink>(
 
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    if let Some(task) = snapshot_task.take() {
+                        task.abort();
+                    }
                     for (sym, tag) in &symbols {
                         let _ = sink.emit_alert(
                             VenueId::Bitstamp,

@@ -154,8 +154,10 @@ impl BitfinexConnectorBuilder {
     }
 
     /// Validates configuration and returns a configured [`BitfinexConnector`].
-    pub fn build(self) -> Result<BitfinexConnector, ConfigError> {
-        self.config.validate()?;
+    pub fn build(self) -> Result<BitfinexConnector, MdcError> {
+        self.config
+            .validate()
+            .map_err(|e| MdcError::Config(e.to_string()))?;
         Ok(BitfinexConnector {
             config: self.config,
         })

@@ -22,6 +22,8 @@ pub(crate) mod sink_util;
 ))]
 pub(crate) mod rest_quote_util;
 
+pub mod config;
+
 #[cfg(any(
     feature = "binance",
     feature = "kraken",

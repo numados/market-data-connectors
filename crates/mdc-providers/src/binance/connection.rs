@@ -6,10 +6,9 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, CooldownPolicy, DeltaDecision, DisconnectKind, IntegrityAlert, MarketEvent,
-    ResyncController, ResyncDecision, ResyncFailure, ResyncPolicy, RunId, SequenceRange, Side,
-    SilenceWatchdog, SnapshotOutcome, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId,
-    WatchdogAction,
+    BookKind, DeltaDecision, DisconnectKind, IntegrityAlert, MarketEvent, ResyncController,
+    ResyncDecision, ResyncFailure, ResyncPolicy, RunId, SequenceRange, Side, SilenceWatchdog,
+    SnapshotOutcome, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId, WatchdogAction,
 };
 use tokio::sync::{Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::Message;
@@ -70,6 +69,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     run_id: RunId,
+    policy_factory: crate::binance::connector::ResyncPolicyFactory,
 ) {
     let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
 
@@ -84,10 +84,12 @@ pub async fn run_connection_task<S: StreamingSink>(
         })
         .collect();
 
-    let mut policy = CooldownPolicy::new(config.snapshot_retry_cooldown);
+    let mut policy: Box<dyn ResyncPolicy> = (policy_factory)();
     let snapshot_semaphore = Arc::new(Semaphore::new(1));
     let (snapshot_tx, mut snapshot_rx) =
         mpsc::channel::<(Symbol, Result<RawDepthSnapshot, RestError>)>(16);
+    let mut snapshot_tasks = tokio::task::JoinSet::<()>::new();
+    let mut in_flight_snapshots = std::collections::HashSet::<Symbol>::new();
 
     let mut scratch = ConnectionScratchBuffers::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
@@ -186,6 +188,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                 Arc::clone(&snapshot_semaphore),
                 snapshot_tx.clone(),
                 cancel.clone(),
+                &mut snapshot_tasks,
+                &mut in_flight_snapshots,
             );
         }
 
@@ -245,6 +249,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         Arc::clone(&snapshot_semaphore),
                                         snapshot_tx.clone(),
                                         cancel.clone(),
+                                        &mut snapshot_tasks,
+                                        &mut in_flight_snapshots,
                                     );
                                 }
                             }
@@ -274,6 +280,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         Arc::clone(&snapshot_semaphore),
                                         snapshot_tx.clone(),
                                         cancel.clone(),
+                                        &mut snapshot_tasks,
+                                        &mut in_flight_snapshots,
                                     );
                                 }
                             }
@@ -355,6 +363,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 // REST depth snapshot results
                 snap_res_opt = snapshot_rx.recv() => {
                     if let Some((sym, res)) = snap_res_opt {
+                        in_flight_snapshots.remove(&sym);
                         let tag = tag_map.get(&sym).copied().unwrap_or_default();
                         match res {
                             Ok(raw_snapshot) => {
@@ -452,12 +461,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                             policy.on_failed(&sym, &ResyncFailure::StaleSnapshot, now);
                                             spawn_delayed_snapshot(
                                                 sym,
-                                                &mut policy,
+                                                &mut *policy,
                                                 now,
                                                 rest_client.clone(),
                                                 Arc::clone(&snapshot_semaphore),
                                                 snapshot_tx.clone(),
                                                 cancel.clone(),
+                                                &mut snapshot_tasks,
+                                                &mut in_flight_snapshots,
                                             );
                                         }
                                         Ok(SnapshotOutcome::Ignored) => {}
@@ -472,12 +483,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 policy.on_failed(&sym, &ResyncFailure::Transport(e.to_string()), now);
                                 spawn_delayed_snapshot(
                                     sym,
-                                    &mut policy,
+                                    &mut *policy,
                                     now,
                                     rest_client.clone(),
                                     Arc::clone(&snapshot_semaphore),
                                     snapshot_tx.clone(),
                                     cancel.clone(),
+                                    &mut snapshot_tasks,
+                                    &mut in_flight_snapshots,
                                 );
                             }
                         }
@@ -596,6 +609,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     Arc::clone(&snapshot_semaphore),
                                                     snapshot_tx.clone(),
                                                     cancel.clone(),
+                                                    &mut snapshot_tasks,
+                                                    &mut in_flight_snapshots,
                                                 );
                                             }
                                         }
@@ -636,6 +651,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 Arc::clone(&snapshot_semaphore),
                                                 snapshot_tx.clone(),
                                                 cancel.clone(),
+                                                &mut snapshot_tasks,
+                                                &mut in_flight_snapshots,
                                             );
                                         }
                                     }
@@ -724,6 +741,9 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         }
 
+        snapshot_tasks.abort_all();
+        in_flight_snapshots.clear();
+
         if sink.is_failed() {
             break 'reconnect_loop;
         }
@@ -734,6 +754,8 @@ pub async fn run_connection_task<S: StreamingSink>(
             reconnect_attempt = 0;
         }
     }
+
+    snapshot_tasks.abort_all();
 }
 
 fn spawn_snapshot_request(
@@ -742,29 +764,44 @@ fn spawn_snapshot_request(
     semaphore: Arc<Semaphore>,
     tx: mpsc::Sender<(Symbol, Result<RawDepthSnapshot, RestError>)>,
     cancel: CancellationToken,
+    tasks: &mut tokio::task::JoinSet<()>,
+    in_flight: &mut std::collections::HashSet<Symbol>,
 ) {
-    tokio::spawn(async move {
+    if !in_flight.insert(symbol.clone()) {
+        // Coalesce: already in flight
+        return;
+    }
+
+    tasks.spawn(async move {
         tokio::select! {
             _ = cancel.cancelled() => {}
-            permit_res = semaphore.acquire() => {
-                if let Ok(_permit) = permit_res {
-                    let res = rest_client.fetch_depth(symbol.as_str(), Instant::now()).await;
-                    let _ = tx.send((symbol, res)).await;
-                }
-            }
+            _res = async {
+                let _permit = semaphore.acquire().await.ok()?;
+                let fetch_res = rest_client.fetch_depth(symbol.as_str(), Instant::now()).await;
+                let _ = tx.send((symbol, fetch_res)).await;
+                Some(())
+            } => {}
         }
     });
 }
 
+#[allow(clippy::too_many_arguments)] // Internal helper bundling snapshot execution parameters
 fn spawn_delayed_snapshot(
     symbol: Symbol,
-    policy: &mut CooldownPolicy,
+    policy: &mut dyn ResyncPolicy,
     now: Instant,
     rest_client: BinanceRestClient,
     semaphore: Arc<Semaphore>,
     tx: mpsc::Sender<(Symbol, Result<RawDepthSnapshot, RestError>)>,
     cancel: CancellationToken,
+    tasks: &mut tokio::task::JoinSet<()>,
+    in_flight: &mut std::collections::HashSet<Symbol>,
 ) {
+    if !in_flight.insert(symbol.clone()) {
+        // Coalesce: already in flight or scheduled
+        return;
+    }
+
     let delay = match policy.decide(&symbol, now) {
         ResyncDecision::Proceed => Duration::ZERO,
         ResyncDecision::Wait(until) | ResyncDecision::Quarantine(until) => {
@@ -772,11 +809,19 @@ fn spawn_delayed_snapshot(
         }
     };
 
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         tokio::select! {
             _ = cancel.cancelled() => {}
             _ = tokio::time::sleep(delay) => {
-                spawn_snapshot_request(symbol, rest_client, semaphore, tx, cancel);
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _res = async {
+                        let _permit = semaphore.acquire().await.ok()?;
+                        let fetch_res = rest_client.fetch_depth(symbol.as_str(), Instant::now()).await;
+                        let _ = tx.send((symbol, fetch_res)).await;
+                        Some(())
+                    } => {}
+                }
             }
         }
     });

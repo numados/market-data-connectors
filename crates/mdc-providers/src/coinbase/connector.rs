@@ -76,7 +76,8 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
             let now = crate::now_nanos().0 as u128;
             RunId::from_nanos(now)
         });
-        let mut join_set = JoinSet::new();
+        let mut conn_tasks = JoinSet::new();
+        let mut aux_tasks = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
             .chunks(self.config.products_per_connection)
@@ -89,7 +90,7 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
         let cmd_broadcast = broadcast_tx.clone();
         let cancel_cmd = cancel.clone();
 
-        tokio::spawn(async move {
+        aux_tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_cmd.cancelled() => break,
@@ -115,14 +116,20 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
             let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
 
             let cancel_forward = cancel.clone();
-            tokio::spawn(async move {
+            aux_tasks.spawn(async move {
                 loop {
                     tokio::select! {
                         _ = cancel_forward.cancelled() => break,
                         cmd = b_rx.recv() => {
-                            if let Ok(c) = cmd {
-                                if task_cmd_tx.send(c).await.is_err() {
-                                    break;
+                            match cmd {
+                                Ok(c) => {
+                                    if task_cmd_tx.send(c).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    tracing::warn!(connection_id, skipped, "Command broadcast lagged; commands dropped");
                                 }
                             }
                         }
@@ -130,7 +137,7 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
                 }
             });
 
-            join_set.spawn(async move {
+            conn_tasks.spawn(async move {
                 run_connection_task(
                     connection_id,
                     chunk,
@@ -144,17 +151,47 @@ impl<S: StreamingSink + Clone> CoinbaseConnector<S> {
             });
         }
 
-        while let Some(res) = join_set.join_next().await {
-            if let Err(e) = res {
-                if !e.is_cancelled() {
-                    return Err(MdcError::Transport(Box::new(std::io::Error::other(
-                        format!("Connection task panicked: {e}"),
-                    ))));
+        let mut result = Ok(());
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    while let Some(res) = conn_tasks.join_next().await {
+                        if let Err(e) = res {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panicked: {e}"),
+                                ))));
+                            }
+                        }
+                    }
+                    break;
+                }
+                res = conn_tasks.join_next() => {
+                    match res {
+                        Some(Ok(())) => {
+                            if conn_tasks.is_empty() {
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panicked: {e}"),
+                                ))));
+                            }
+                            break;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
+        conn_tasks.abort_all();
+        aux_tasks.abort_all();
+        while conn_tasks.join_next().await.is_some() {}
+        while aux_tasks.join_next().await.is_some() {}
 
-        Ok(())
+        result
     }
 }
 
@@ -229,13 +266,10 @@ impl<S: StreamingSink + Clone> CoinbaseConnectorBuilder<S> {
 
         let sink = self
             .sink
-            .ok_or_else(|| MdcError::Protocol("Streaming sink is required".into()))?;
+            .ok_or_else(|| MdcError::Config("Streaming sink is required".into()))?;
 
-        if self.symbols.is_empty() {
-            return Err(MdcError::Protocol(
-                "At least one symbol must be subscribed".into(),
-            ));
-        }
+        crate::config::validate_symbols(&self.symbols)?;
+        crate::config::validate_symbols_per_connection(self.config.products_per_connection)?;
 
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());

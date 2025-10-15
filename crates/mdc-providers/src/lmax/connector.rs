@@ -9,7 +9,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::lmax::config::{ConfigError, ControlPacing, LmaxConfig, LmaxStreams};
+use crate::lmax::config::{ControlPacing, LmaxConfig, LmaxStreams};
 use crate::lmax::connection::run_connection_task;
 use crate::lmax::control::{Command, ConnectorHandle};
 
@@ -88,7 +88,8 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
             let now = crate::now_nanos().0 as u128;
             RunId::from_nanos(now)
         });
-        let mut join_set = JoinSet::new();
+        let mut conn_tasks = JoinSet::new();
+        let mut aux_tasks = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
             .symbols
             .chunks(self.config.symbols_per_connection)
@@ -100,7 +101,7 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
         let cmd_broadcast = broadcast_tx.clone();
         let cancel_cmd = cancel.clone();
 
-        tokio::spawn(async move {
+        aux_tasks.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_cmd.cancelled() => break,
@@ -126,14 +127,20 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
             let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
 
             let cancel_forward = cancel.clone();
-            tokio::spawn(async move {
+            aux_tasks.spawn(async move {
                 loop {
                     tokio::select! {
                         _ = cancel_forward.cancelled() => break,
                         cmd = b_rx.recv() => {
-                            if let Ok(c) = cmd {
-                                if task_cmd_tx.send(c).await.is_err() {
-                                    break;
+                            match cmd {
+                                Ok(c) => {
+                                    if task_cmd_tx.send(c).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    tracing::warn!(connection_id, skipped, "Command broadcast lagged; commands dropped");
                                 }
                             }
                         }
@@ -141,7 +148,7 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
                 }
             });
 
-            join_set.spawn(async move {
+            conn_tasks.spawn(async move {
                 run_connection_task(
                     run_id,
                     connection_id,
@@ -155,17 +162,47 @@ impl<S: StreamingSink + Clone + Send + 'static> LmaxConnector<S> {
             });
         }
 
-        while let Some(res) = join_set.join_next().await {
-            if let Err(e) = res {
-                if !e.is_cancelled() {
-                    return Err(MdcError::Transport(Box::new(std::io::Error::other(
-                        format!("Connection task panic: {e}"),
-                    ))));
+        let mut result = Ok(());
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    while let Some(res) = conn_tasks.join_next().await {
+                        if let Err(e) = res {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panic: {e}"),
+                                ))));
+                            }
+                        }
+                    }
+                    break;
+                }
+                res = conn_tasks.join_next() => {
+                    match res {
+                        Some(Ok(())) => {
+                            if conn_tasks.is_empty() {
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            if !e.is_cancelled() {
+                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
+                                    format!("Connection task panic: {e}"),
+                                ))));
+                            }
+                            break;
+                        }
+                        None => break,
+                    }
                 }
             }
         }
+        conn_tasks.abort_all();
+        aux_tasks.abort_all();
+        while conn_tasks.join_next().await.is_some() {}
+        while aux_tasks.join_next().await.is_some() {}
 
-        Ok(())
+        result
     }
 }
 
@@ -262,14 +299,17 @@ impl<M: MarketDataSink + Clone> LmaxConnectorBuilder<Owned<M>> {
 
 impl<S: StreamingSink + Clone + Send + 'static> LmaxConnectorBuilder<S> {
     /// Builds the `LmaxConnector` and returns its control handle.
-    pub fn build(self) -> Result<(LmaxConnector<S>, ConnectorHandle), ConfigError> {
-        self.config.validate()?;
+    pub fn build(self) -> Result<(LmaxConnector<S>, ConnectorHandle), MdcError> {
+        self.config
+            .validate()
+            .map_err(|e| MdcError::Config(e.to_string()))?;
 
-        if self.symbols.is_empty() {
-            return Err(ConfigError::EmptySymbols);
-        }
+        crate::config::validate_symbols(&self.symbols)?;
+        crate::config::validate_symbols_per_connection(self.config.symbols_per_connection)?;
 
-        let sink = self.sink.ok_or(ConfigError::MissingSink)?;
+        let sink = self
+            .sink
+            .ok_or_else(|| MdcError::Config("Streaming sink is required".into()))?;
 
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());

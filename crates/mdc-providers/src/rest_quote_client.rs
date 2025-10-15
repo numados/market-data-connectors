@@ -45,10 +45,12 @@ impl HttpRestQuoteClient {
                 reason: format!("invalid default endpoint URL '{default_endpoint}': {e}"),
             })?;
 
-        let client = crate::http::build_standard_http_client(Duration::from_secs(30))
-            .map_err(|e| RestQuoteError::Unsupported {
-                provider,
-                reason: format!("failed to build reqwest client: {e}"),
+        let client =
+            crate::http::build_standard_http_client(Duration::from_secs(30)).map_err(|e| {
+                RestQuoteError::Unsupported {
+                    provider,
+                    reason: format!("failed to build reqwest client: {e}"),
+                }
             })?;
 
         Ok(Self {
@@ -136,14 +138,19 @@ impl RestQuoteSource for HttpRestQuoteClient {
             .await
             .map_err(|e| e.into_rest_quote_error(self.provider))?;
 
-            let payload_str =
-                std::str::from_utf8(&fetch_success.body).map_err(|e| RestQuoteError::InvalidEnvelope {
+            let payload_str = std::str::from_utf8(&fetch_success.body).map_err(|e| {
+                RestQuoteError::InvalidEnvelope {
                     provider: self.provider,
                     reason: format!("response body is not valid UTF-8: {e}"),
-                })?;
+                }
+            })?;
 
-            let results =
-                (self.decoder)(self.provider, &request.symbols, payload_str, fetch_success.received_ts)?;
+            let results = (self.decoder)(
+                self.provider,
+                &request.symbols,
+                payload_str,
+                fetch_success.received_ts,
+            )?;
 
             Ok(RestQuoteSnapshot {
                 configuration_generation: request.configuration_generation,

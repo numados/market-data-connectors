@@ -99,20 +99,29 @@ impl FrankfurterRestClient {
             Err(_) => return Err(HttpPollError::Transport),
         };
 
-        match crate::http::execute_http_get(&self.client, url, self.timeout, self.body_cap_bytes).await {
+        match crate::http::execute_http_get(&self.client, url, self.timeout, self.body_cap_bytes)
+            .await
+        {
             Ok(succ) => Ok(PollResponse {
                 received_ts: succ.received_ts,
                 body: succ.body,
             }),
             Err(crate::http::HttpError::ForeignRedirect(_)) => Err(HttpPollError::ForeignRedirect),
-            Err(crate::http::HttpError::RateLimit { status, retry_after }) => {
-                Err(HttpPollError::HttpStatus { status, retry_after })
-            }
+            Err(crate::http::HttpError::RateLimit {
+                status,
+                retry_after,
+            }) => Err(HttpPollError::HttpStatus {
+                status,
+                retry_after,
+            }),
             Err(crate::http::HttpError::HttpStatus {
                 status,
                 retry_after,
                 ..
-            }) => Err(HttpPollError::HttpStatus { status, retry_after }),
+            }) => Err(HttpPollError::HttpStatus {
+                status,
+                retry_after,
+            }),
             Err(crate::http::HttpError::ResponseTooLarge { .. }) => {
                 Err(HttpPollError::OversizedBody)
             }

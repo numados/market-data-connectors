@@ -87,10 +87,12 @@ impl VwdRestClient {
             return Err(SourceErrorKind::HttpStatus(status.as_u16()));
         }
 
-        let body =
-            crate::http::read_response_bytes_capped(response, crate::http::DEFAULT_REST_SNAPSHOT_CAP)
-                .await
-                .map_err(|_| SourceErrorKind::Transport)?;
+        let body = crate::http::read_response_bytes_capped(
+            response,
+            crate::http::DEFAULT_REST_SNAPSHOT_CAP,
+        )
+        .await
+        .map_err(|_| SourceErrorKind::Transport)?;
 
         let received_ts = crate::now_nanos();
 

@@ -22,7 +22,7 @@ impl Default for KrakenStreams {
 }
 
 /// Configuration options for the Kraken connector.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KrakenConfig {
     /// Base WebSocket URL (default: `wss://ws.kraken.com/v2`).
     pub ws_base_url: Url,
@@ -56,6 +56,32 @@ pub struct KrakenConfig {
     pub max_backoff: Duration,
     /// Injected session run token (generated if not provided).
     pub run_id: Option<mdc_core::RunId>,
+    /// Optional pluggable checksum calculation strategy (default: Kraken CRC32 over top 10 levels).
+    pub checksum_strategy: Option<std::sync::Arc<dyn mdc_core::integrity::ChecksumStrategy>>,
+}
+
+impl std::fmt::Debug for KrakenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KrakenConfig")
+            .field("ws_base_url", &self.ws_base_url)
+            .field("depth", &self.depth)
+            .field("symbols_per_connection", &self.symbols_per_connection)
+            .field("resubscribe_batch_size", &self.resubscribe_batch_size)
+            .field("resubscribe_timeout", &self.resubscribe_timeout)
+            .field("quarantine_duration", &self.quarantine_duration)
+            .field("streams", &self.streams)
+            .field("watchdog_ping_after", &self.watchdog_ping_after)
+            .field("watchdog_reconnect_after", &self.watchdog_reconnect_after)
+            .field("checksum_policy", &self.checksum_policy)
+            .field("initial_backoff", &self.initial_backoff)
+            .field("max_backoff", &self.max_backoff)
+            .field("run_id", &self.run_id)
+            .field(
+                "checksum_strategy",
+                &self.checksum_strategy.as_ref().map(|s| s.depth()),
+            )
+            .finish()
+    }
 }
 
 impl Default for KrakenConfig {
@@ -75,6 +101,7 @@ impl Default for KrakenConfig {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(15),
             run_id: None,
+            checksum_strategy: None,
         }
     }
 }

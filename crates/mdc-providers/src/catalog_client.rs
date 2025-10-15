@@ -34,10 +34,12 @@ impl HttpCatalogClient {
             reason: format!("invalid default endpoint URL '{default_endpoint}': {e}"),
         })?;
 
-        let client = crate::http::build_standard_http_client(Duration::from_secs(30))
-            .map_err(|e| CatalogError::Unsupported {
-                provider,
-                reason: format!("failed to build reqwest client: {e}"),
+        let client =
+            crate::http::build_standard_http_client(Duration::from_secs(30)).map_err(|e| {
+                CatalogError::Unsupported {
+                    provider,
+                    reason: format!("failed to build reqwest client: {e}"),
+                }
             })?;
 
         Ok(Self {
@@ -113,11 +115,12 @@ impl InstrumentCatalog for HttpCatalogClient {
             .await
             .map_err(|e| e.into_catalog_error(self.provider))?;
 
-            let payload_str =
-                std::str::from_utf8(&fetch_success.body).map_err(|e| CatalogError::InvalidEnvelope {
+            let payload_str = std::str::from_utf8(&fetch_success.body).map_err(|e| {
+                CatalogError::InvalidEnvelope {
                     provider: self.provider,
                     reason: format!("response body is not valid UTF-8: {e}"),
-                })?;
+                }
+            })?;
 
             let instruments = (self.decoder)(payload_str, request.limits.max_items)?;
 

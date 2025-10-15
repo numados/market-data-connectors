@@ -127,10 +127,12 @@ impl BinanceRestClient {
             }
         }
 
-        let bytes =
-            crate::http::read_response_bytes_capped(response, crate::http::DEFAULT_REST_SNAPSHOT_CAP)
-                .await
-                .map_err(|e| RestError::Transport(e.to_string()))?;
+        let bytes = crate::http::read_response_bytes_capped(
+            response,
+            crate::http::DEFAULT_REST_SNAPSHOT_CAP,
+        )
+        .await
+        .map_err(|e| RestError::Transport(e.to_string()))?;
 
         let snapshot: RawDepthSnapshot =
             serde_json::from_slice(&bytes).map_err(|e| RestError::Parse(e.to_string()))?;

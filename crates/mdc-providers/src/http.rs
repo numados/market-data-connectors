@@ -100,9 +100,10 @@ impl HttpError {
                 message: "foreign-origin redirect disallowed".to_string(),
                 source: e.map(ArcError::new),
             },
-            Self::RateLimit { retry_after, .. } => {
-                CatalogError::RateLimit { provider, retry_after }
-            }
+            Self::RateLimit { retry_after, .. } => CatalogError::RateLimit {
+                provider,
+                retry_after,
+            },
             Self::HttpStatus {
                 status,
                 message,
@@ -114,13 +115,11 @@ impl HttpError {
                 retry_after,
                 source: None,
             },
-            Self::ResponseTooLarge { max, actual } => {
-                CatalogError::ResponseTooLarge {
-                    provider,
-                    max: max.min(u32::MAX as usize) as u32,
-                    actual,
-                }
-            }
+            Self::ResponseTooLarge { max, actual } => CatalogError::ResponseTooLarge {
+                provider,
+                max: max.min(u32::MAX as usize) as u32,
+                actual,
+            },
             Self::Transport(e) => CatalogError::Transport {
                 provider,
                 message: format!("network transport error: {e}"),
@@ -138,9 +137,10 @@ impl HttpError {
                 message: "foreign-origin redirect disallowed".to_string(),
                 source: e.map(ArcError::new),
             },
-            Self::RateLimit { retry_after, .. } => {
-                RestQuoteError::RateLimit { provider, retry_after }
-            }
+            Self::RateLimit { retry_after, .. } => RestQuoteError::RateLimit {
+                provider,
+                retry_after,
+            },
             Self::HttpStatus {
                 status,
                 message,
@@ -152,13 +152,11 @@ impl HttpError {
                 retry_after,
                 source: None,
             },
-            Self::ResponseTooLarge { max, actual } => {
-                RestQuoteError::ResponseTooLarge {
-                    provider,
-                    max: max.min(u32::MAX as usize) as u32,
-                    actual,
-                }
-            }
+            Self::ResponseTooLarge { max, actual } => RestQuoteError::ResponseTooLarge {
+                provider,
+                max: max.min(u32::MAX as usize) as u32,
+                actual,
+            },
             Self::Transport(e) => RestQuoteError::Transport {
                 provider,
                 message: format!("network transport error: {e}"),
@@ -212,10 +210,7 @@ pub async fn read_response_bytes_capped(
     }
 
     // 2. Stream chunks with running byte counter
-    let initial_cap = response
-        .content_length()
-        .unwrap_or(0)
-        .min(limit as u64) as usize;
+    let initial_cap = response.content_length().unwrap_or(0).min(limit as u64) as usize;
     let mut buf = BytesMut::with_capacity(initial_cap);
 
     while let Some(chunk_res) = response.chunk().await.map_err(|e| {
