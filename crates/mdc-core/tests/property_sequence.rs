@@ -191,4 +191,76 @@ proptest! {
         prop_assert!(!tracker.is_reset());
         prop_assert_eq!(tracker.check(curr + 1), GlobalSequenceCheck::First);
     }
+
+    #[test]
+    fn property_global_sequence_pre_anchor_and_exhaustion(
+        start in 1u64..u64::MAX - 1,
+    ) {
+        use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+
+        let mut tracker = GlobalSequenceTracker::new();
+        // Pre-anchor invariants
+        prop_assert_eq!(tracker.next(), None);
+        prop_assert!(!tracker.is_reset());
+        prop_assert!(!tracker.is_exhausted());
+
+        // First check anchors tracker
+        prop_assert_eq!(tracker.check(start), GlobalSequenceCheck::First);
+        prop_assert_eq!(tracker.next(), Some(start + 1));
+        prop_assert!(!tracker.is_exhausted());
+
+        // Test boundary exhaustion at u64::MAX
+        let mut max_tracker = GlobalSequenceTracker::new();
+        prop_assert_eq!(max_tracker.check(u64::MAX), GlobalSequenceCheck::First);
+        prop_assert!(max_tracker.is_exhausted());
+        prop_assert_eq!(max_tracker.next(), None);
+        prop_assert_eq!(max_tracker.check(1), GlobalSequenceCheck::SequenceExhausted);
+    }
+
+    #[test]
+    fn property_global_sequence_contiguous_and_gaps(
+        start in 1u64..1_000_000,
+        ops in proptest::collection::vec(0u64..10, 1..40),
+    ) {
+        use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+
+        let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(100);
+        prop_assert_eq!(tracker.check(start), GlobalSequenceCheck::First);
+        let mut expected = start + 1;
+
+        for step in ops {
+            match step {
+                0 => {
+                    // Contiguous
+                    let check = tracker.check(expected);
+                    prop_assert_eq!(check, GlobalSequenceCheck::Valid);
+                    expected += 1;
+                    prop_assert_eq!(tracker.next(), Some(expected));
+                }
+                1..=5 => {
+                    // Gap
+                    let gapped = expected + step;
+                    let check = tracker.check(gapped);
+                    prop_assert_eq!(
+                        check,
+                        GlobalSequenceCheck::GapDetected {
+                            expected,
+                            received: gapped,
+                        }
+                    );
+                    expected = gapped + 1;
+                    prop_assert_eq!(tracker.next(), Some(expected));
+                }
+                _ => {
+                    // Old data
+                    if expected > 10 {
+                        let old = expected - 2;
+                        let check = tracker.check(old);
+                        prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
+                        prop_assert_eq!(tracker.next(), Some(expected));
+                    }
+                }
+            }
+        }
+    }
 }

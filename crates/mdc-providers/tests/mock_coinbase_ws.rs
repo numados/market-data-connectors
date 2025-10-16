@@ -116,11 +116,11 @@ async fn test_ws_snapshot_and_delta_ordered_delivery() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send snapshot
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send update
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events = sink.events();
@@ -195,10 +195,10 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send snapshot for BTC-USD
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     // Send snapshot for ETH-USD
     let eth_snap = snap_json.replace("BTC-USD", "ETH-USD");
-    ws.broadcast_text(&eth_snap);
+    let _ = ws.broadcast_text(&eth_snap);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send initial heartbeats for both symbols
@@ -216,8 +216,8 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
         "product_id": "ETH-USD",
         "time": "2014-11-07T08:19:28.464459Z"
     });
-    ws.broadcast_text(hb_init_btc.to_string());
-    ws.broadcast_text(hb_init_eth.to_string());
+    let _ = ws.broadcast_text(hb_init_btc.to_string());
+    let _ = ws.broadcast_text(hb_init_eth.to_string());
     tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Now continuously send heartbeats ONLY for BTC-USD, leaving ETH-USD silent
@@ -229,7 +229,7 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
             "product_id": "BTC-USD",
             "time": "2014-11-07T08:19:28.464459Z"
         });
-        ws.broadcast_text(hb.to_string());
+        let _ = ws.broadcast_text(hb.to_string());
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
 
@@ -305,12 +305,12 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send snapshot
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send normal heartbeat from fixture (seq 90)
     let hb_json = load_fixture(HEARTBEAT_FIXTURE).expect("load heartbeat fixture");
-    ws.broadcast_text(&hb_json);
+    let _ = ws.broadcast_text(&hb_json);
     tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Send heartbeat with sequence jump 4000 (jump = 3900 > 3000 threshold)
@@ -321,7 +321,7 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
         "product_id": "BTC-USD",
         "time": "2014-11-07T08:19:29.464459Z"
     });
-    ws.broadcast_text(hb2.to_string());
+    let _ = ws.broadcast_text(hb2.to_string());
     tokio::time::sleep(Duration::from_millis(80)).await;
 
     let received = ws.received_messages();
@@ -369,7 +369,7 @@ async fn test_ws_drop_updates_while_awaiting_snapshot() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send update BEFORE snapshot
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events = sink.events();
@@ -412,7 +412,7 @@ async fn test_ws_matches_trade_stream() {
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    ws.broadcast_text(&trade_json);
+    let _ = ws.broadcast_text(&trade_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events = sink.events();

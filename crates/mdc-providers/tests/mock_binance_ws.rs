@@ -223,7 +223,7 @@ async fn test_ws_control_pause_resume_cancel() {
 
     // Broadcast a ticker while paused
     let ticker_json = r#"{"stream":"btcusdt@bookTicker","data":{"u":400900217,"s":"BTCUSDT","b":"25000.00","B":"1.20","a":"25000.10","A":"2.40"}}"#;
-    ws.broadcast_text(ticker_json);
+    let _ = ws.broadcast_text(ticker_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Verify no ticker was emitted while paused
@@ -239,7 +239,7 @@ async fn test_ws_control_pause_resume_cancel() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Broadcast another ticker while resumed
-    ws.broadcast_text(ticker_json);
+    let _ = ws.broadcast_text(ticker_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events_after_resume = sink.events();
@@ -302,8 +302,8 @@ async fn test_ws_gap_injection_triggers_resync() {
     let alerts = sink.alerts_for("BTCUSDT");
     // Verify alert progression: ResyncStarted -> ResyncCompleted -> GapDetected -> ResyncStarted
     assert!(
-        alerts.len() >= 3,
-        "expected at least 3 alerts, got {alerts:?}"
+        alerts.len() >= 4,
+        "expected at least 4 alerts, got {alerts:?}"
     );
     assert_eq!(alerts[0], IntegrityAlert::ResyncStarted);
     assert_eq!(

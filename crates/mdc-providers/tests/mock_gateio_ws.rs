@@ -88,7 +88,7 @@ async fn test_ws_spot_ping_answered_with_spot_pong() {
 
     // Send spot.ping from server
     let ping_json = load_fixture(PING_FIXTURE).expect("load ping fixture");
-    ws.broadcast_text(&ping_json);
+    let _ = ws.broadcast_text(&ping_json);
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
@@ -132,17 +132,17 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
 
     // Send sub ack
     let ack_json = load_fixture(SUB_ACK_FIXTURE).expect("load sub ack fixture");
-    ws.broadcast_text(&ack_json);
+    let _ = ws.broadcast_text(&ack_json);
 
     // Send snapshot
     let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send incremental delta
     let upd_json = load_fixture(UPDATE_FIXTURE).expect("load update fixture");
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -241,7 +241,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
         }
     })
     .to_string();
-    ws.broadcast_text(&snap_frame);
+    let _ = ws.broadcast_text(&snap_frame);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -262,7 +262,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
         }
     })
     .to_string();
-    ws.broadcast_text(&gap_frame);
+    let _ = ws.broadcast_text(&gap_frame);
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -321,7 +321,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
         }
     })
     .to_string();
-    ws.broadcast_text(&fresh_snap_frame);
+    let _ = ws.broadcast_text(&fresh_snap_frame);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -380,17 +380,17 @@ async fn test_ws_one_sided_updates() {
         }
     })
     .to_string();
-    ws.broadcast_text(&snap);
+    let _ = ws.broadcast_text(&snap);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Bid-only update [123461, 123462]
     let bid_only = load_fixture(BID_ONLY_FIXTURE).expect("load bid only");
-    ws.broadcast_text(&bid_only);
+    let _ = ws.broadcast_text(&bid_only);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Ask-only update [123463, 123464]
     let ask_only = load_fixture(ASK_ONLY_FIXTURE).expect("load ask only");
-    ws.broadcast_text(&ask_only);
+    let _ = ws.broadcast_text(&ask_only);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events = sink.events();
@@ -465,7 +465,7 @@ async fn test_ws_public_trades() {
     );
 
     let trade_json = load_fixture(TRADE_FIXTURE).expect("load trade fixture");
-    ws.broadcast_text(&trade_json);
+    let _ = ws.broadcast_text(&trade_json);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 

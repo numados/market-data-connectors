@@ -132,7 +132,7 @@ async fn test_snapshot_and_delta_lifecycle() {
 
     // Broadcast snapshot fixture (sequence 1)
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    ws.broadcast_text(snap_raw);
+    let _ = ws.broadcast_text(snap_raw);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -158,7 +158,7 @@ async fn test_snapshot_and_delta_lifecycle() {
 
     // Broadcast incremental update fixture (sequence 2)
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    ws.broadcast_text(upd_raw);
+    let _ = ws.broadcast_text(upd_raw);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -217,7 +217,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
             }]
         }]
     });
-    ws.broadcast_text(snap_btc.to_string());
+    let _ = ws.broadcast_text(snap_btc.to_string());
 
     // Send snapshot for ETH-USD (seq 2)
     let snap_eth = serde_json::json!({
@@ -235,7 +235,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
             }]
         }]
     });
-    ws.broadcast_text(snap_eth.to_string());
+    let _ = ws.broadcast_text(snap_eth.to_string());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -267,7 +267,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
             }]
         }]
     });
-    ws.broadcast_text(gap_frame.to_string());
+    let _ = ws.broadcast_text(gap_frame.to_string());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -336,7 +336,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
             }]
         }]
     });
-    ws.broadcast_text(delta_frame.to_string());
+    let _ = ws.broadcast_text(delta_frame.to_string());
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // No new BeginBook event should have been added
@@ -379,7 +379,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
 
     // Send snapshot (seq 1)
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
-    ws.broadcast_text(snap_raw);
+    let _ = ws.broadcast_text(snap_raw);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -401,7 +401,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
             }]
         }]
     });
-    ws.broadcast_text(dup_frame.to_string());
+    let _ = ws.broadcast_text(dup_frame.to_string());
 
     // Send older sequence (seq 0)
     let old_frame = serde_json::json!({
@@ -419,7 +419,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
             }]
         }]
     });
-    ws.broadcast_text(old_frame.to_string());
+    let _ = ws.broadcast_text(old_frame.to_string());
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -432,7 +432,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
 
     // Send valid next sequence (seq 2)
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    ws.broadcast_text(upd_raw);
+    let _ = ws.broadcast_text(upd_raw);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
@@ -478,7 +478,7 @@ async fn test_heartbeat_keeps_watchdog_alive() {
                 "heartbeat_counter": i
             }]
         });
-        ws.broadcast_text(hb.to_string());
+        let _ = ws.broadcast_text(hb.to_string());
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 
@@ -514,7 +514,7 @@ async fn test_market_trades_channel() {
 
     // Broadcast trade fixture
     let trade_raw = load_fixture(TRADE_FIXTURE).expect("load trade");
-    ws.broadcast_text(trade_raw);
+    let _ = ws.broadcast_text(trade_raw);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -596,7 +596,7 @@ async fn test_operator_commands_resync_and_pause() {
 
     let pre_pause_count = sink.events().len();
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
-    ws.broadcast_text(upd_raw.clone());
+    let _ = ws.broadcast_text(upd_raw.clone());
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(
@@ -624,7 +624,7 @@ async fn test_operator_commands_resync_and_pause() {
             }]
         }]
     });
-    ws.broadcast_text(upd_seq10.to_string());
+    let _ = ws.broadcast_text(upd_seq10.to_string());
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert!(
@@ -719,7 +719,7 @@ async fn test_ws_sequenceless_l2_data_fails_closed() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid snapshot -> InSync
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let books_after_snap: Vec<_> = sink
@@ -734,7 +734,7 @@ async fn test_ws_sequenceless_l2_data_fails_closed() {
     assert_eq!(books_after_snap[0], BookKind::Snapshot);
 
     // Send sequence-less l2_data frame -> must fail closed
-    ws.broadcast_text(&bad_upd_str);
+    let _ = ws.broadcast_text(&bad_upd_str);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Verify: no book delta was emitted
@@ -834,7 +834,7 @@ async fn test_multi_event_envelope_dispatches_per_event() {
         ]
     });
 
-    ws.broadcast_text(multi_event_payload.to_string());
+    let _ = ws.broadcast_text(multi_event_payload.to_string());
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Verify: separate books emitted for BTC and ETH

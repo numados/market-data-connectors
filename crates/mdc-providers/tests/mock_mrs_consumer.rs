@@ -98,6 +98,8 @@ async fn test_mrs_consumer_end_to_end_conformance_with_binance() {
     let mut config = BinanceConfig::default();
     config.ws_base_url = ws.ws_url().expect("ws url");
     config.rest_base_url = rest.url().expect("rest url");
+    config.streams.depth = false;
+    config.streams.book_ticker = true;
 
     let cancel = CancellationToken::new();
     let (tx, mut rx) = loss_intolerant_channel(100, 1, cancel.clone());
@@ -120,8 +122,8 @@ async fn test_mrs_consumer_end_to_end_conformance_with_binance() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Wait for connection and send book ticker
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    ws.broadcast_text(ticker_json);
+    ws.wait_for_handshakes(1).await;
+    let _ = ws.broadcast_text(ticker_json);
 
     // Ingest events via MRS harness until an available quote is projected
     let mut harness = MrsConsumerHarness::new(req);
@@ -173,6 +175,8 @@ async fn test_mrs_delivery_fault_overflow_halts_connector() {
     let mut config = BinanceConfig::default();
     config.ws_base_url = ws.ws_url().expect("ws url");
     config.rest_base_url = rest.url().expect("rest url");
+    config.streams.depth = false;
+    config.streams.book_ticker = true;
 
     let cancel = CancellationToken::new();
     // Tiny capacity of 1: second frame will overflow and cause terminal fault

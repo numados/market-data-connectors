@@ -187,7 +187,7 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
     })
     .to_string();
 
-    ws.broadcast_text(stale_diff);
+    let _ = ws.broadcast_text(stale_diff);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert!(
@@ -196,7 +196,7 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
     );
 
     // 2. Send a newer diff (microtimestamp 1700000000123456 > snapshot 1700000000100000)
-    ws.broadcast_text(upd_json);
+    let _ = ws.broadcast_text(upd_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let new_events = sink.events();
@@ -250,7 +250,7 @@ async fn test_ws_request_reconnect_triggers_reconnect() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Send bts:request_reconnect
-    ws.broadcast_text(reconnect_json);
+    let _ = ws.broadcast_text(reconnect_json);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let events = sink.events();
@@ -312,7 +312,7 @@ async fn test_ws_trade_normalization() {
     sink.clear();
 
     // Send trade frame
-    ws.broadcast_text(trade_json);
+    let _ = ws.broadcast_text(trade_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events = sink.events();

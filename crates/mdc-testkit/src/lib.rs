@@ -9,7 +9,7 @@ pub mod sink;
 pub mod ws;
 
 pub use catalog::MockCatalogServer;
-pub use conformance::{MrsConsumerHarness, MrsConsumerStats};
+pub use conformance::{ConformanceReport, MrsConsumerHarness, MrsConsumerStats};
 pub use fixture::{load_fixture, load_fixture_bytes};
 pub use rest::MockRest;
 pub use rest_quote::MockRestQuoteServer;

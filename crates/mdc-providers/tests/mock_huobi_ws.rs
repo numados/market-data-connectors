@@ -124,7 +124,7 @@ async fn test_ws_server_ping_answered_with_pong() {
     // Send binary gzip ping
     let ping_json = load_fixture(PING_FIXTURE).expect("load ping fixture");
     let ping_gz = gzip_compress(ping_json.as_bytes());
-    ws.broadcast_binary(ping_gz);
+    let _ = ws.broadcast_binary(ping_gz);
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
@@ -182,14 +182,14 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
 
     // Send sub ack
     let ack_json = load_fixture(SUB_ACK_FIXTURE).expect("load sub ack");
-    ws.broadcast_binary(gzip_compress(ack_json.as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(ack_json.as_bytes()));
 
     // Send snapshot response with matching ID
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
     let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -198,7 +198,7 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
-    ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -321,7 +321,7 @@ async fn test_ws_delta_buffering_before_snapshot() {
     let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
-    ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -339,7 +339,7 @@ async fn test_ws_delta_buffering_before_snapshot() {
     let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -414,7 +414,7 @@ async fn test_ws_gap_detected_triggers_resync() {
     let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -425,7 +425,7 @@ async fn test_ws_gap_detected_triggers_resync() {
     let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(105);
     delta_val["tick"]["seqNum"] = serde_json::json!(106);
-    ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -502,7 +502,7 @@ async fn test_ws_stale_snapshot_handling() {
     let mut delta_val: serde_json::Value = serde_json::from_str(&delta_raw).expect("parse update");
     delta_val["tick"]["prevSeqNum"] = serde_json::json!(100);
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
-    ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -511,7 +511,7 @@ async fn test_ws_stale_snapshot_handling() {
     let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(90);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -584,7 +584,7 @@ async fn test_ws_multi_symbol_snapshot_serialization() {
     snap_val["id"] = serde_json::Value::String(active_id);
     snap_val["rep"] = serde_json::Value::String(active_ch.to_string());
     snap_val["data"]["seqNum"] = serde_json::json!(100);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
@@ -640,7 +640,7 @@ async fn test_ws_trades_stream() {
 
     // Broadcast trade binary frame
     let trade_json = load_fixture(TRADE_FIXTURE).expect("load trade");
-    ws.broadcast_binary(gzip_compress(trade_json.as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(trade_json.as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -703,7 +703,7 @@ async fn test_ws_manual_resync_command() {
     let mut snap_val: serde_json::Value = serde_json::from_str(&snap_raw).expect("parse snapshot");
     snap_val["id"] = serde_json::Value::String(req_id);
     snap_val["data"]["seqNum"] = serde_json::json!(100);
-    ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
+    let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 

@@ -42,7 +42,22 @@ pub struct MockWsServer {
     ping_count: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Vec<WsAction>>>>,
     broadcast_tx: broadcast::Sender<Message>,
-    _drop_guard: tokio::sync::oneshot::Sender<()>,
+    conn_notify: Arc<tokio::sync::Notify>,
+    handshake_notify: Arc<tokio::sync::Notify>,
+    message_notify: Arc<tokio::sync::Notify>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    server_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for MockWsServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.server_task.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl MockWsServer {
@@ -59,6 +74,10 @@ impl MockWsServer {
         let (broadcast_tx, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+        let conn_notify = Arc::new(tokio::sync::Notify::new());
+        let handshake_notify = Arc::new(tokio::sync::Notify::new());
+        let message_notify = Arc::new(tokio::sync::Notify::new());
+
         let server_paths = Arc::clone(&handshake_paths);
         let server_received = Arc::clone(&received_messages);
         let server_conns = Arc::clone(&connection_count);
@@ -66,10 +85,19 @@ impl MockWsServer {
         let server_scripts = Arc::clone(&scripts);
         let server_broadcast = broadcast_tx.clone();
 
-        tokio::spawn(async move {
+        let s_conn_notify = Arc::clone(&conn_notify);
+        let s_handshake_notify = Arc::clone(&handshake_notify);
+        let s_message_notify = Arc::clone(&message_notify);
+
+        let server_task = tokio::spawn(async move {
+            let mut connection_tasks = tokio::task::JoinSet::new();
+
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
+                    res = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                        let _ = res;
+                    }
                     accept_res = listener.accept() => {
                         let (stream, _) = match accept_res {
                             Ok(conn) => conn,
@@ -77,13 +105,17 @@ impl MockWsServer {
                         };
 
                         server_conns.fetch_add(1, Ordering::SeqCst);
+                        s_conn_notify.notify_waiters();
+
                         let paths = Arc::clone(&server_paths);
                         let received = Arc::clone(&server_received);
                         let pings = Arc::clone(&server_pings);
                         let scripts = Arc::clone(&server_scripts);
                         let mut broadcast_rx = server_broadcast.subscribe();
+                        let hs_notify = Arc::clone(&s_handshake_notify);
+                        let msg_notify = Arc::clone(&s_message_notify);
 
-                        tokio::spawn(async move {
+                        connection_tasks.spawn(async move {
                             let mut path_capture = String::new();
                             #[allow(clippy::result_large_err)]
                             let ws_res = tokio_tungstenite::accept_hdr_async(
@@ -105,6 +137,7 @@ impl MockWsServer {
                                 if let Ok(mut p) = paths.lock() {
                                     p.push(path_capture);
                                 }
+                                hs_notify.notify_waiters();
                             }
 
                             let script = {
@@ -153,6 +186,7 @@ impl MockWsServer {
                                             if let Ok(mut r) = received.lock() {
                                                 r.push(t.to_string());
                                             }
+                                            msg_notify.notify_waiters();
                                         }
                                     }
                                 }
@@ -167,6 +201,7 @@ impl MockWsServer {
                                                 if let Ok(mut r) = received.lock() {
                                                     r.push(t.to_string());
                                                 }
+                                                msg_notify.notify_waiters();
                                             }
                                             Some(Ok(Message::Ping(_))) => {
                                                 pings.fetch_add(1, Ordering::SeqCst);
@@ -176,10 +211,14 @@ impl MockWsServer {
                                         }
                                     }
                                     b_msg = broadcast_rx.recv() => {
-                                        if let Ok(m) = b_msg {
-                                            if ws_stream.send(m).await.is_err() {
-                                                break;
+                                        match b_msg {
+                                            Ok(m) => {
+                                                if ws_stream.send(m).await.is_err() {
+                                                    break;
+                                                }
                                             }
+                                            Err(broadcast::error::RecvError::Closed) => break,
+                                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
                                         }
                                     }
                                 }
@@ -188,6 +227,9 @@ impl MockWsServer {
                     }
                 }
             }
+
+            connection_tasks.abort_all();
+            while connection_tasks.join_next().await.is_some() {}
         });
 
         Ok(Self {
@@ -198,8 +240,69 @@ impl MockWsServer {
             ping_count,
             scripts,
             broadcast_tx,
-            _drop_guard: shutdown_tx,
+            conn_notify,
+            handshake_notify,
+            message_notify,
+            shutdown_tx: Some(shutdown_tx),
+            server_task: Some(server_task),
         })
+    }
+
+    /// Shuts down the mock server and terminates all active connection tasks.
+    pub async fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.server_task.take() {
+            let _ = handle.await;
+        }
+    }
+
+    /// Waits until at least `target_count` TCP connections have been accepted.
+    pub async fn wait_for_connections(&self, target_count: usize) -> usize {
+        loop {
+            let count = self.connection_count();
+            if count >= target_count {
+                return count;
+            }
+            self.conn_notify.notified().await;
+        }
+    }
+
+    /// Waits until at least `target_count` WebSocket handshakes have been established.
+    pub async fn wait_for_handshakes(&self, target_count: usize) -> Vec<String> {
+        loop {
+            let paths = self.handshake_paths();
+            if paths.len() >= target_count {
+                return paths;
+            }
+            self.handshake_notify.notified().await;
+        }
+    }
+
+    /// Waits until at least `target_count` text messages have been received from connected clients.
+    pub async fn wait_for_client_messages(&self, target_count: usize) -> Vec<String> {
+        loop {
+            let msgs = self.received_messages();
+            if msgs.len() >= target_count {
+                return msgs;
+            }
+            self.message_notify.notified().await;
+        }
+    }
+
+    /// Waits until a client message matching `predicate` is received and returns it.
+    pub async fn wait_for_client_message_matching<F>(&self, predicate: F) -> String
+    where
+        F: Fn(&str) -> bool,
+    {
+        loop {
+            let msgs = self.received_messages();
+            if let Some(found) = msgs.iter().find(|m| predicate(m)) {
+                return found.clone();
+            }
+            self.message_notify.notified().await;
+        }
     }
 
     /// Returns the WebSocket base URL of this mock server.
@@ -240,22 +343,28 @@ impl MockWsServer {
     }
 
     /// Broadcasts a text message to all currently connected clients.
-    pub fn broadcast_text(&self, text: impl Into<String>) {
-        let _ = self.broadcast_tx.send(Message::Text(text.into()));
+    pub fn broadcast_text(
+        &self,
+        text: impl Into<String>,
+    ) -> Result<usize, broadcast::error::SendError<Message>> {
+        self.broadcast_tx.send(Message::Text(text.into()))
     }
 
     /// Broadcasts a binary frame to all currently connected clients.
-    pub fn broadcast_binary(&self, data: impl Into<Vec<u8>>) {
-        let _ = self.broadcast_tx.send(Message::Binary(data.into()));
+    pub fn broadcast_binary(
+        &self,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<usize, broadcast::error::SendError<Message>> {
+        self.broadcast_tx.send(Message::Binary(data.into()))
     }
 
     /// Broadcasts a close frame to all currently connected clients.
-    pub fn broadcast_close(&self) {
+    pub fn broadcast_close(&self) -> Result<usize, broadcast::error::SendError<Message>> {
         let frame = CloseFrame {
             code: CloseCode::Normal,
             reason: "mock broadcast close".into(),
         };
-        let _ = self.broadcast_tx.send(Message::Close(Some(frame)));
+        self.broadcast_tx.send(Message::Close(Some(frame)))
     }
 }
 
@@ -266,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_ws_server_lifecycle() {
-        let server = MockWsServer::spawn().await.expect("spawn server");
+        let mut server = MockWsServer::spawn().await.expect("spawn server");
         let ws_url = server.ws_url().expect("ws url");
         assert_eq!(server.connection_count(), 0);
 
@@ -274,6 +383,7 @@ mod tests {
             .await
             .expect("connect client");
 
+        server.wait_for_handshakes(1).await;
         assert_eq!(server.connection_count(), 1);
 
         client
@@ -281,10 +391,10 @@ mod tests {
             .await
             .expect("send message");
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let msgs = server.received_messages();
+        let msgs = server.wait_for_client_messages(1).await;
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0], "hello from client");
+
+        server.shutdown().await;
     }
 }

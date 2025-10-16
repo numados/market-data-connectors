@@ -97,16 +97,16 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send conf ack and book subscription confirmation
-    ws.broadcast_text(&conf_ok);
-    ws.broadcast_text(&sub_book);
+    let _ = ws.broadcast_text(&conf_ok);
+    let _ = ws.broadcast_text(&sub_book);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send order book snapshot
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send depth update
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events = sink.events();
@@ -221,12 +221,12 @@ async fn test_ws_trade_execution_event() {
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    ws.broadcast_text(&conf_ok);
-    ws.broadcast_text(trade_sub_ack);
+    let _ = ws.broadcast_text(&conf_ok);
+    let _ = ws.broadcast_text(trade_sub_ack);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send trade event
-    ws.broadcast_text(&trade_json);
+    let _ = ws.broadcast_text(&trade_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let trades: Vec<_> = sink
@@ -271,17 +271,17 @@ async fn test_ws_checksum_mismatch_triggers_in_place_resubscribe() {
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    ws.broadcast_text(&conf_ok);
-    ws.broadcast_text(&sub_book);
+    let _ = ws.broadcast_text(&conf_ok);
+    let _ = ws.broadcast_text(&sub_book);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Enter InSync with snapshot
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Broadcast checksum frame with bogus checksum value 999999999
     let bad_cs_msg = r#"[266343, "cs", 999999999, 1614604253634]"#;
-    ws.broadcast_text(bad_cs_msg);
+    let _ = ws.broadcast_text(bad_cs_msg);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Check alerts
@@ -342,16 +342,16 @@ async fn test_ws_channel_leak_guard_forces_reconnect() {
 
     tokio::time::sleep(Duration::from_millis(60)).await;
 
-    ws.broadcast_text(&conf_ok);
+    let _ = ws.broadcast_text(&conf_ok);
 
     // Send 3 distinct channel confirmations (> 2 * 1 symbols)
     let leak1 = r#"{"event":"subscribed","channel":"book","chanId":101,"symbol":"tBTCUSD"}"#;
     let leak2 = r#"{"event":"subscribed","channel":"book","chanId":102,"symbol":"tBTCUSD"}"#;
     let leak3 = r#"{"event":"subscribed","channel":"book","chanId":103,"symbol":"tBTCUSD"}"#;
 
-    ws.broadcast_text(leak1);
-    ws.broadcast_text(leak2);
-    ws.broadcast_text(leak3);
+    let _ = ws.broadcast_text(leak1);
+    let _ = ws.broadcast_text(leak2);
+    let _ = ws.broadcast_text(leak3);
 
     // The watchdog timer runs every 250ms and checks channel leak guard
     tokio::time::sleep(Duration::from_millis(400)).await;

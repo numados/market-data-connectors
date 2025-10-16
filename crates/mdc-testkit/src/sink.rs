@@ -131,6 +131,7 @@ pub enum RecordedEvent {
 pub struct RecordingSink {
     events: Arc<Mutex<Vec<RecordedEvent>>>,
     stamps: Arc<Mutex<Vec<mdc_core::DeliveryStamp>>>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl RecordingSink {
@@ -139,6 +140,7 @@ impl RecordingSink {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
             stamps: Arc::new(Mutex::new(Vec::new())),
+            notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -182,6 +184,42 @@ impl RecordingSink {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Asynchronously waits until at least `count` events have been recorded, returning all recorded events.
+    pub async fn wait_for_events(&self, count: usize) -> Vec<RecordedEvent> {
+        loop {
+            let notified = self.notify.notified();
+            let events = self.events();
+            if events.len() >= count {
+                return events;
+            }
+            notified.await;
+        }
+    }
+
+    /// Asynchronously waits until at least `count` alerts have been recorded, returning all recorded alerts.
+    pub async fn wait_for_alerts(&self, count: usize) -> Vec<IntegrityAlert> {
+        loop {
+            let notified = self.notify.notified();
+            let alerts = self.alerts();
+            if alerts.len() >= count {
+                return alerts;
+            }
+            notified.await;
+        }
+    }
+
+    /// Asynchronously waits until at least `count` alerts have been recorded for a specific symbol.
+    pub async fn wait_for_alerts_for(&self, symbol: &str, count: usize) -> Vec<IntegrityAlert> {
+        loop {
+            let notified = self.notify.notified();
+            let alerts = self.alerts_for(symbol);
+            if alerts.len() >= count {
+                return alerts;
+            }
+            notified.await;
+        }
     }
 
     /// Clears all recorded events and delivery stamps.
@@ -230,6 +268,9 @@ impl StreamingSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stamp_guard.push(ctx.delivery);
+        drop(guard);
+        drop(stamp_guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -243,6 +284,8 @@ impl StreamingSink for RecordingSink {
             price,
             volume,
         });
+        drop(guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -259,6 +302,8 @@ impl StreamingSink for RecordingSink {
             symbol: ctx.symbol.clone(),
             seq,
         });
+        drop(guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -276,6 +321,9 @@ impl StreamingSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stamp_guard.push(ctx.delivery);
+        drop(guard);
+        drop(stamp_guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -297,6 +345,9 @@ impl StreamingSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stamp_guard.push(ctx.delivery);
+        drop(guard);
+        drop(stamp_guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -318,6 +369,9 @@ impl StreamingSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stamp_guard.push(ctx.delivery);
+        drop(guard);
+        drop(stamp_guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 
@@ -335,6 +389,9 @@ impl StreamingSink for RecordingSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         stamp_guard.push(ctx.delivery);
+        drop(guard);
+        drop(stamp_guard);
+        self.notify.notify_waiters();
         Ok(())
     }
 }
@@ -358,6 +415,8 @@ pub enum FaultInjectionPoint {
     ReferenceRate,
     /// Fail on `alert`.
     Alert,
+    /// Fail on the Nth callback overall (1-indexed across all callback types).
+    NthCallback(usize),
 }
 
 /// Error type returned by [`FaultInjectingSink`].
@@ -375,6 +434,7 @@ pub struct FaultInjectingSink {
     inner: RecordingSink,
     fault_point: FaultInjectionPoint,
     level_count: Arc<Mutex<usize>>,
+    callback_count: Arc<Mutex<usize>>,
     tripped: Arc<Mutex<bool>>,
 }
 
@@ -385,8 +445,14 @@ impl FaultInjectingSink {
             inner: RecordingSink::new(),
             fault_point,
             level_count: Arc::new(Mutex::new(0)),
+            callback_count: Arc::new(Mutex::new(0)),
             tripped: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// Creates a new `FaultInjectingSink` that fails on the `n`-th callback overall.
+    pub fn fail_at_callback(n: usize) -> Self {
+        Self::new(FaultInjectionPoint::NthCallback(n))
     }
 
     /// Returns all events recorded by the inner sink.
@@ -399,6 +465,11 @@ impl FaultInjectingSink {
         self.inner.alerts()
     }
 
+    /// Returns all alerts recorded for a specific symbol.
+    pub fn alerts_for(&self, symbol: &str) -> Vec<IntegrityAlert> {
+        self.inner.alerts_for(symbol)
+    }
+
     /// Returns all delivery stamps recorded by the inner sink.
     pub fn delivery_stamps(&self) -> Vec<mdc_core::DeliveryStamp> {
         self.inner.delivery_stamps()
@@ -408,12 +479,48 @@ impl FaultInjectingSink {
     pub fn is_tripped(&self) -> bool {
         *self.tripped.lock().unwrap_or_else(|p| p.into_inner())
     }
+
+    /// Asynchronously waits until at least `count` events have been recorded.
+    pub async fn wait_for_events(&self, count: usize) -> Vec<RecordedEvent> {
+        self.inner.wait_for_events(count).await
+    }
+
+    /// Asynchronously waits until at least `count` alerts have been recorded.
+    pub async fn wait_for_alerts(&self, count: usize) -> Vec<IntegrityAlert> {
+        self.inner.wait_for_alerts(count).await
+    }
+
+    /// Asynchronously waits until at least `count` alerts have been recorded for a specific symbol.
+    pub async fn wait_for_alerts_for(&self, symbol: &str, count: usize) -> Vec<IntegrityAlert> {
+        self.inner.wait_for_alerts_for(symbol, count).await
+    }
+
+    fn check_callback_fault(&self) -> Result<(), InjectedSinkError> {
+        if let FaultInjectionPoint::NthCallback(n) = self.fault_point {
+            let mut count = self
+                .callback_count
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            *count += 1;
+            if *count == n {
+                let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
+                if !*tripped {
+                    *tripped = true;
+                    return Err(InjectedSinkError {
+                        point: FaultInjectionPoint::NthCallback(n),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl StreamingSink for FaultInjectingSink {
     type Error = InjectedSinkError;
 
     fn begin_book(&mut self, ctx: &EventContext<'_>, kind: BookKind) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if self.fault_point == FaultInjectionPoint::BeginBook {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -428,6 +535,7 @@ impl StreamingSink for FaultInjectingSink {
     }
 
     fn level(&mut self, side: Side, price: Decimal, volume: Decimal) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if let FaultInjectionPoint::Level(n) = self.fault_point {
             let mut count = self.level_count.lock().unwrap_or_else(|p| p.into_inner());
             *count += 1;
@@ -452,6 +560,7 @@ impl StreamingSink for FaultInjectingSink {
         volume: Decimal,
         raw: mdc_core::RawLevelText<'_>,
     ) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if let FaultInjectionPoint::Level(n) = self.fault_point {
             let mut count = self.level_count.lock().unwrap_or_else(|p| p.into_inner());
             *count += 1;
@@ -474,6 +583,7 @@ impl StreamingSink for FaultInjectingSink {
         ctx: &EventContext<'_>,
         seq: Option<SequenceRange>,
     ) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if self.fault_point == FaultInjectionPoint::EndBook {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -488,6 +598,7 @@ impl StreamingSink for FaultInjectingSink {
     }
 
     fn trade(&mut self, ctx: &EventContext<'_>, trade: &Trade) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if self.fault_point == FaultInjectionPoint::Trade {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -506,6 +617,7 @@ impl StreamingSink for FaultInjectingSink {
         ctx: &EventContext<'_>,
         ticker: &BookTicker,
     ) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if self.fault_point == FaultInjectionPoint::BookTicker {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -524,6 +636,7 @@ impl StreamingSink for FaultInjectingSink {
         ctx: &EventContext<'_>,
         rate: &ReferenceRate,
     ) -> Result<(), Self::Error> {
+        self.check_callback_fault()?;
         if self.fault_point == FaultInjectionPoint::ReferenceRate {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -538,6 +651,9 @@ impl StreamingSink for FaultInjectingSink {
     }
 
     fn alert(&mut self, ctx: &EventContext<'_>, alert: IntegrityAlert) -> Result<(), Self::Error> {
+        if alert != IntegrityAlert::SinkFailure {
+            self.check_callback_fault()?;
+        }
         if self.fault_point == FaultInjectionPoint::Alert {
             let mut tripped = self.tripped.lock().unwrap_or_else(|p| p.into_inner());
             if !*tripped {
@@ -627,5 +743,52 @@ mod tests {
         assert_eq!(stamps.len(), 2);
         assert_eq!(stamps[0], stamp1);
         assert_eq!(stamps[1], stamp2);
+    }
+
+    #[test]
+    fn test_fault_injection_nth_callback() {
+        let sym = Symbol::from("BTCUSDT");
+        let run = RunId::from_u128(1);
+        let stamp = DeliveryStamp::new(run, 1, 1);
+        let ctx = make_ctx(&sym, stamp);
+
+        // Fail at the 3rd callback
+        let mut sink = FaultInjectingSink::fail_at_callback(3);
+        assert!(sink.begin_book(&ctx, BookKind::Snapshot).is_ok());
+        assert!(!sink.is_tripped());
+        assert!(sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).is_ok());
+        assert!(!sink.is_tripped());
+        assert!(sink.end_book(&ctx, None).is_err());
+        assert!(sink.is_tripped());
+
+        // Subsequent calls succeed so error alert can be recorded
+        assert!(sink.alert(&ctx, IntegrityAlert::SinkFailure).is_ok());
+        assert_eq!(sink.alerts(), vec![IntegrityAlert::SinkFailure]);
+    }
+
+    #[tokio::test]
+    async fn test_recording_sink_readiness_barriers() {
+        let sink = RecordingSink::new();
+        let sym = Symbol::from("BTCUSDT");
+        let run = RunId::from_u128(1);
+        let stamp = DeliveryStamp::new(run, 1, 1);
+
+        let mut sink_writer = sink.clone();
+        tokio::spawn(async move {
+            let ctx = make_ctx(&sym, stamp);
+            sink_writer.begin_book(&ctx, BookKind::Snapshot).unwrap();
+            sink_writer
+                .level(Side::Bid, Decimal::ONE, Decimal::ONE)
+                .unwrap();
+            sink_writer
+                .alert(&ctx, IntegrityAlert::ResyncStarted)
+                .unwrap();
+        });
+
+        let alerts = sink.wait_for_alerts(1).await;
+        assert_eq!(alerts, vec![IntegrityAlert::ResyncStarted]);
+
+        let events = sink.wait_for_events(3).await;
+        assert_eq!(events.len(), 3);
     }
 }

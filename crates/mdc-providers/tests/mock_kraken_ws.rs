@@ -89,11 +89,11 @@ async fn test_ws_snapshot_and_update_lifecycle() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid snapshot
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid update
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events = sink.events();
@@ -174,11 +174,11 @@ async fn test_ws_checksum_mismatch_resubscribes() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid snapshot to enter InSync
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send corrupt checksum update
-    ws.broadcast_text(&bad_upd_str);
+    let _ = ws.broadcast_text(&bad_upd_str);
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     // Check alerts
@@ -248,11 +248,11 @@ async fn test_ws_resubscribe_timeout_quarantine() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid snapshot -> InSync
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send mismatch -> triggers resubscribe, transitioning to AwaitingSnapshot
-    ws.broadcast_text(&bad_upd_str);
+    let _ = ws.broadcast_text(&bad_upd_str);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Server deliberately does NOT send snapshot back
@@ -324,12 +324,12 @@ async fn test_ws_snapshot_during_quarantine_lifts_quarantine() {
     );
 
     // Send valid snapshot DURING quarantine
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid update -> must be accepted immediately!
     sink.clear();
-    ws.broadcast_text(&upd_json);
+    let _ = ws.broadcast_text(&upd_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let events = sink.events();
@@ -432,7 +432,7 @@ async fn test_ws_heartbeat_silence_watchdog() {
     // Send heartbeats every 40ms for 200ms (longer than watchdog_ping_after 120ms)
     for _ in 0..5 {
         tokio::time::sleep(Duration::from_millis(40)).await;
-        ws.broadcast_text(&heartbeat_json);
+        let _ = ws.broadcast_text(&heartbeat_json);
     }
 
     assert_eq!(
@@ -487,7 +487,7 @@ async fn test_ws_checksumless_update_fails_closed() {
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Send valid snapshot -> InSync
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     let books_after_snap: Vec<_> = sink
@@ -502,7 +502,7 @@ async fn test_ws_checksumless_update_fails_closed() {
     assert_eq!(books_after_snap[0], BookKind::Snapshot);
 
     // Send checksum-less update -> must fail closed
-    ws.broadcast_text(&bad_upd_str);
+    let _ = ws.broadcast_text(&bad_upd_str);
     tokio::time::sleep(Duration::from_millis(60)).await;
 
     // Verify: no book delta was emitted

@@ -145,6 +145,11 @@ impl ResyncController {
         self.buffer.len()
     }
 
+    /// Returns a reference to the queued deltas currently held in the buffer.
+    pub fn buffered_deltas(&self) -> &VecDeque<MarketEvent<L2Delta>> {
+        &self.buffer
+    }
+
     /// Returns a reference to the underlying [`SequenceTracker`].
     pub fn tracker(&self) -> &SequenceTracker {
         &self.tracker
@@ -266,16 +271,6 @@ impl ResyncController {
             .map(|seq| seq.first)
             .min();
 
-        if let Some(earliest_first) = min_retained_first {
-            let expected_max_first = snapshot_id.saturating_add(1);
-            if earliest_first > expected_max_first {
-                return Ok(SnapshotOutcome::StaleSnapshot {
-                    snapshot_id,
-                    first_buffered: earliest_first,
-                });
-            }
-        }
-
         // Retain only deltas extending past snapshot_id
         self.buffer.retain(|d| match d.kind.sequence {
             Some(seq) => seq.last > snapshot_id,
@@ -286,6 +281,16 @@ impl ResyncController {
         self.buffer
             .make_contiguous()
             .sort_by_key(|d| d.kind.sequence.map(|s| s.first).unwrap_or(0));
+
+        if let Some(earliest_first) = min_retained_first {
+            let expected_max_first = snapshot_id.saturating_add(1);
+            if earliest_first > expected_max_first {
+                return Ok(SnapshotOutcome::StaleSnapshot {
+                    snapshot_id,
+                    first_buffered: earliest_first,
+                });
+            }
+        }
 
         // Anchor tracker to snapshot
         self.tracker.reset_to(snapshot_id);

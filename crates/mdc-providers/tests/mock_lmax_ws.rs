@@ -116,7 +116,7 @@ async fn test_ws_continuous_full_snapshots_and_resync_lifecycle() {
     sink.clear();
 
     // Send 1st order book frame
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events1 = sink.events();
@@ -148,7 +148,7 @@ async fn test_ws_continuous_full_snapshots_and_resync_lifecycle() {
     sink.clear();
 
     // Send 2nd order book frame
-    ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&snap_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events2 = sink.events();
@@ -215,7 +215,7 @@ async fn test_ws_high_throughput_snapshot_stream() {
     // Stream 1,000 snapshots rapidly, yielding periodically to avoid broadcast channel buffer lag
     const NUM_SNAPSHOTS: usize = 1_000;
     for i in 0..NUM_SNAPSHOTS {
-        ws.broadcast_text(&snap_json);
+        let _ = ws.broadcast_text(&snap_json);
         if i % 32 == 0 {
             tokio::task::yield_now().await;
         }
@@ -344,7 +344,7 @@ async fn test_ws_trade_normalization() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     sink.clear();
 
-    ws.broadcast_text(trade_json);
+    let _ = ws.broadcast_text(trade_json);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events = sink.events();

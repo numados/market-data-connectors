@@ -51,15 +51,36 @@ fn make_snapshot(last_update_id: u64) -> MarketEvent<L2Snapshot> {
     }
 }
 
-fn arb_op() -> impl Strategy<Value = ResyncOp> {
-    prop_oneof![
-        (1u64..100_000, 0u64..20).prop_map(|(first, span)| ResyncOp::LiveDelta {
-            first,
-            last: first + span,
-        }),
-        (1u64..100_000).prop_map(|last_update_id| ResyncOp::ApplySnapshot { last_update_id }),
-        Just(ResyncOp::Reset),
-    ]
+use mdc_core::resync::BufferError;
+
+fn arb_clustered_scenario() -> impl Strategy<Value = (usize, Vec<ResyncOp>)> {
+    (1usize..50, 100u64..10_000).prop_flat_map(|(max_buffer, base)| {
+        let op_strat = prop_oneof![
+            // Contiguous or slight delta
+            (-5i64..20i64, 0u64..3).prop_map(move |(offset, span)| {
+                let first = (base as i64 + offset).max(1) as u64;
+                ResyncOp::LiveDelta {
+                    first,
+                    last: first + span,
+                }
+            }),
+            // Gapped delta (to reach gap-during-replay or gap detection)
+            (-5i64..20i64, 0u64..3).prop_map(move |(offset, span)| {
+                let first = (base as i64 + offset + 7).max(1) as u64;
+                ResyncOp::LiveDelta {
+                    first,
+                    last: first + span,
+                }
+            }),
+            // Snapshot clustered around the base
+            (-10i64..20i64).prop_map(move |offset| {
+                let last_update_id = (base as i64 + offset).max(1) as u64;
+                ResyncOp::ApplySnapshot { last_update_id }
+            }),
+            Just(ResyncOp::Reset),
+        ];
+        (Just(max_buffer), proptest::collection::vec(op_strat, 1..60))
+    })
 }
 
 proptest! {
@@ -67,8 +88,7 @@ proptest! {
 
     #[test]
     fn property_resync_controller_invariants(
-        max_buffer in 5usize..100,
-        ops in proptest::collection::vec(arb_op(), 1..60),
+        (max_buffer, ops) in arb_clustered_scenario(),
     ) {
         let mut controller = ResyncController::new(max_buffer).expect("valid max_buffer");
         let mut prev_emitted_last: Option<u64> = None;
@@ -83,8 +103,11 @@ proptest! {
                         DeltaDecision::Buffer => {
                             prop_assert_eq!(controller.state(), SyncState::BufferingDiffs);
                             let delta = make_delta(first, last);
-                            // If buffer exceeds max_buffer, it purges
-                            let _ = controller.buffer(delta);
+                            let res = controller.buffer(delta);
+                            if let Err(BufferError::Overflow(overflow)) = res {
+                                prop_assert_eq!(overflow.dropped, max_buffer);
+                                prop_assert_eq!(controller.buffered_count(), 0);
+                            }
                         }
                         DeltaDecision::Emit => {
                             prop_assert_eq!(controller.state(), SyncState::InSync);
@@ -132,6 +155,16 @@ proptest! {
                             prop_assert!(!was_in_sync);
                             prop_assert_eq!(controller.state(), SyncState::BufferingDiffs);
                             prop_assert!(first_buffered > snapshot_id + 1);
+
+                            // Invariant: all retained deltas must have last > snapshot_id
+                            for d in controller.buffered_deltas() {
+                                let seq = d.kind.sequence.expect("has sequence");
+                                prop_assert!(seq.last > snapshot_id);
+                            }
+                            if let Some(first_d) = controller.buffered_deltas().front() {
+                                let seq = first_d.kind.sequence.expect("has sequence");
+                                prop_assert_eq!(seq.first, first_buffered);
+                            }
                         }
                         SnapshotOutcome::Ignored => {
                             prop_assert!(was_in_sync);
@@ -158,4 +191,33 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn test_resync_controller_max_buffer_one() {
+    let mut controller = ResyncController::new(1).expect("valid max_buffer 1");
+    assert_eq!(controller.max_buffer(), 1);
+    let d1 = make_delta(100, 105);
+    assert!(controller.buffer(d1).is_ok());
+    assert_eq!(controller.buffered_count(), 1);
+
+    // Second delta overflows buffer of size 1 and purges
+    let d2 = make_delta(106, 110);
+    let err = controller.buffer(d2).unwrap_err();
+    match err {
+        BufferError::Overflow(overflow) => {
+            assert_eq!(overflow.dropped, 1);
+        }
+        other => panic!("expected Overflow, got {other:?}"),
+    }
+    assert_eq!(controller.buffered_count(), 0);
+}
+
+#[test]
+fn test_resync_controller_rejects_zero_max_buffer() {
+    use mdc_core::ConfigError;
+    assert!(matches!(
+        ResyncController::new(0),
+        Err(ConfigError::InvalidMaxBuffer)
+    ));
 }
