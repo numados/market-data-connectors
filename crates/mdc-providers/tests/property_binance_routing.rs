@@ -47,8 +47,8 @@ proptest! {
             r#"{{"e":"depthUpdate","E":1600000000000,"s":"{symbol}","U":{first_id},"u":{last_id},"b":[["{bid_p}","{bid_v}"]],"a":[["{ask_p}","{ask_v}"]]}}"#
         );
 
-        let mut bytes = json_str.into_bytes();
-        let payload: RawPayload<'_> = simd_json::from_slice(&mut bytes).expect("deserialize depthUpdate");
+        let bytes = json_str.into_bytes();
+        let payload: RawPayload<'_> = serde_json::from_slice(&bytes).expect("deserialize depthUpdate");
 
         match payload {
             RawPayload::Depth(update) => {
@@ -83,8 +83,8 @@ proptest! {
             r#"{{"u":{update_id},"s":"{symbol}","b":"{bid_p}","B":"{bid_v}","a":"{ask_p}","A":"{ask_v}"}}"#
         );
 
-        let mut bytes = json_str.into_bytes();
-        let payload: RawPayload<'_> = simd_json::from_slice(&mut bytes).expect("deserialize bookTicker");
+        let bytes = json_str.into_bytes();
+        let payload: RawPayload<'_> = serde_json::from_slice(&bytes).expect("deserialize bookTicker");
 
         match payload {
             RawPayload::BookTicker(ticker) => {
@@ -114,8 +114,8 @@ proptest! {
             r#"{{"e":"trade","E":1672531200000,"s":"{symbol}","t":{trade_id},"p":"{price}","q":"{qty}","b":{buyer_order_id},"a":{seller_order_id},"T":1672531200000,"m":{buyer_is_maker},"M":true}}"#
         );
 
-        let mut bytes = json_str.into_bytes();
-        let payload: RawPayload<'_> = simd_json::from_slice(&mut bytes).expect("deserialize trade");
+        let bytes = json_str.into_bytes();
+        let payload: RawPayload<'_> = serde_json::from_slice(&bytes).expect("deserialize trade");
 
         match payload {
             RawPayload::Trade(trade) => {
@@ -144,8 +144,8 @@ proptest! {
         );
         let envelope = format!(r#"{{"stream":"{stream_name}","data":{inner_json}}}"#);
 
-        let mut bytes = envelope.into_bytes();
-        let combined: CombinedStream<'_> = simd_json::from_slice(&mut bytes).expect("deserialize CombinedStream");
+        let bytes = envelope.into_bytes();
+        let combined: CombinedStream<'_> = serde_json::from_slice(&bytes).expect("deserialize CombinedStream");
 
         prop_assert_eq!(combined.stream, stream_name.as_str());
         match combined.data {
@@ -169,8 +169,8 @@ proptest! {
             r#"{{"lastUpdateId":{last_update_id},"bids":[["{bid_p}","{bid_v}"]],"asks":[["{ask_p}","{ask_v}"]]}}"#
         );
 
-        let mut bytes = json_str.into_bytes();
-        let raw_snapshot: RawDepthSnapshot = simd_json::from_slice(&mut bytes).expect("deserialize snapshot");
+        let bytes = json_str.into_bytes();
+        let raw_snapshot: RawDepthSnapshot = serde_json::from_slice(&bytes).expect("deserialize snapshot");
         prop_assert_eq!(raw_snapshot.last_update_id, last_update_id);
 
         let snapshot = normalize_snapshot(&raw_snapshot);

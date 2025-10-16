@@ -28,4 +28,4 @@ cargo +1.85.0 test --workspace --all-features --locked
 ```
 
 Install the MSRV toolchain before running its test command. Additional repository
-checks are listed in `docs/engineering-standards.md`.
+checks and engineering standards are listed in [docs/engineering-standards.md](docs/engineering-standards.md) and [CONTRIBUTING.md](CONTRIBUTING.md).

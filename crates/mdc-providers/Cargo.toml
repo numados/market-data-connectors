@@ -20,7 +20,6 @@ binance = [
     "dep:reqwest",
     "dep:url",
     "dep:bytes",
-    "dep:simd-json",
 ]
 kraken = [
     "dep:tokio",
@@ -141,7 +140,6 @@ futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-simd-json = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
 secrecy = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }

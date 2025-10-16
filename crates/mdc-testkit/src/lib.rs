@@ -1,5 +1,7 @@
 //! In-process deterministic mock servers and test utilities for market data connectors.
 
+#![forbid(unsafe_code)]
+
 pub mod catalog;
 pub mod conformance;
 pub mod fixture;
