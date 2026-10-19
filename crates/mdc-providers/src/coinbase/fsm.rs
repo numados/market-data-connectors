@@ -49,21 +49,27 @@ pub enum PollOutcome {
     QuarantineExpiredTriggerResubscribe,
 }
 
+use mdc_core::resync::{ResyncDecision, ResyncPolicy, TimeoutQuarantinePolicy};
+use mdc_core::Symbol;
+
 /// Per-product synchronization controller.
 #[derive(Debug, Clone)]
 pub struct SymbolFsm {
+    symbol: Symbol,
     state: SyncState,
-    timeout: Duration,
-    quarantine: Duration,
+    policy: TimeoutQuarantinePolicy,
 }
 
 impl SymbolFsm {
     /// Creates a new `SymbolFsm` starting in `AwaitingSnapshot` with the given timeouts.
     pub fn new(started_at: Instant, timeout: Duration, quarantine: Duration) -> Self {
+        let symbol = Symbol::from("product");
+        let mut policy = TimeoutQuarantinePolicy::new(timeout, quarantine);
+        policy.on_started(&symbol, started_at);
         Self {
+            symbol,
             state: SyncState::AwaitingSnapshot { started_at },
-            timeout,
-            quarantine,
+            policy,
         }
     }
 
@@ -80,6 +86,7 @@ impl SymbolFsm {
     /// Handles arrival of an order book snapshot.
     pub fn on_snapshot(&mut self) -> SnapshotOutcome {
         self.state = SyncState::InSync;
+        self.policy.on_completed(&self.symbol, Instant::now());
         SnapshotOutcome::Accepted
     }
 
@@ -102,14 +109,17 @@ impl SymbolFsm {
         match self.state {
             SyncState::InSync => {
                 self.state = SyncState::AwaitingSnapshot { started_at: now };
+                self.policy.on_started(&self.symbol, now);
                 true
             }
-            SyncState::AwaitingSnapshot { started_at } => {
-                if now.saturating_duration_since(started_at) >= self.timeout {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    true
-                } else {
-                    false
+            SyncState::AwaitingSnapshot { .. } => {
+                match self.policy.decide(&self.symbol, now) {
+                    ResyncDecision::Wait(_) => false,
+                    _ => {
+                        self.state = SyncState::AwaitingSnapshot { started_at: now };
+                        self.policy.on_started(&self.symbol, now);
+                        true
+                    }
                 }
             }
             SyncState::Quarantined { .. } => false,
@@ -119,31 +129,33 @@ impl SymbolFsm {
     /// Polls periodic timers (snapshot timeout and quarantine expiry).
     pub fn poll(&mut self, now: Instant) -> PollOutcome {
         match self.state {
-            SyncState::AwaitingSnapshot { started_at } => {
-                let deadline = started_at.checked_add(self.timeout).unwrap_or(started_at);
-                if now >= deadline {
-                    let until = now.checked_add(self.quarantine).unwrap_or(now);
-                    self.state = SyncState::Quarantined { until };
-                    PollOutcome::TimeoutQuarantined { until }
-                } else {
-                    PollOutcome::None
-                }
-            }
-            SyncState::Quarantined { until } => {
-                if now >= until {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    PollOutcome::QuarantineExpiredTriggerResubscribe
-                } else {
-                    PollOutcome::None
-                }
-            }
             SyncState::InSync => PollOutcome::None,
+            SyncState::AwaitingSnapshot { .. } => {
+                match self.policy.decide(&self.symbol, now) {
+                    ResyncDecision::Quarantine(until) => {
+                        self.state = SyncState::Quarantined { until };
+                        PollOutcome::TimeoutQuarantined { until }
+                    }
+                    _ => PollOutcome::None,
+                }
+            }
+            SyncState::Quarantined { .. } => {
+                match self.policy.decide(&self.symbol, now) {
+                    ResyncDecision::Proceed => {
+                        self.state = SyncState::AwaitingSnapshot { started_at: now };
+                        self.policy.on_started(&self.symbol, now);
+                        PollOutcome::QuarantineExpiredTriggerResubscribe
+                    }
+                    _ => PollOutcome::None,
+                }
+            }
         }
     }
 
     /// Explicitly resets the symbol (e.g. upon socket reconnect).
     pub fn reset(&mut self, now: Instant) {
         self.state = SyncState::AwaitingSnapshot { started_at: now };
+        self.policy.on_started(&self.symbol, now);
     }
 }
 

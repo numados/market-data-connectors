@@ -49,14 +49,18 @@ pub struct PollResponse {
 /// REST HTTP client executing authenticated SNAPQUOTE requests against VWD.
 pub struct VwdRestClient {
     client: reqwest::Client,
-    request_url: Url,
+    base_url: Url,
+    account_path: secrecy::SecretString,
+    keys: String,
     credentials: VwdCredentials,
 }
 
 impl std::fmt::Debug for VwdRestClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VwdRestClient")
-            .field("request_url", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("account_path", &"[REDACTED]")
+            .field("keys", &self.keys)
             .field("credentials", &self.credentials)
             .finish()
     }
@@ -66,24 +70,33 @@ impl VwdRestClient {
     /// Creates a new `VwdRestClient` from validated config.
     pub fn new(config: &VwdConfig) -> Result<Self, MdcError> {
         let keys = build_snapquote_keys(&config.symbols);
-        let request_url =
-            build_snapquote_url(&config.base_url, config.account_path.expose_secret(), &keys)?;
+        // Validate SNAPQUOTE URL construction upfront
+        let _ = build_snapquote_url(&config.base_url, config.account_path.expose_secret(), &keys)?;
 
         let client = crate::http::build_standard_http_client(config.request_timeout)
             .map_err(|e| MdcError::Transport(Box::new(e)))?;
 
         Ok(Self {
             client,
-            request_url,
+            base_url: config.base_url.clone(),
+            account_path: config.account_path.clone(),
+            keys,
             credentials: config.credentials.clone(),
         })
     }
 
     /// Fetches the latest batch SNAPQUOTE payload.
     pub async fn fetch_snap_quotes(&self) -> Result<PollResponse, SourceErrorKind> {
+        let url = build_snapquote_url(
+            &self.base_url,
+            self.account_path.expose_secret(),
+            &self.keys,
+        )
+        .map_err(|_| SourceErrorKind::Transport)?;
+
         let response = self
             .client
-            .get(self.request_url.clone())
+            .get(url)
             .basic_auth(
                 self.credentials.username.expose_secret(),
                 Some(self.credentials.password.expose_secret()),

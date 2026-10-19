@@ -1,6 +1,6 @@
 //! Bitstamp WebSocket per-connection worker task and protocol loop.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -71,6 +71,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+    resync_policy_factory: crate::bitstamp::connector::ResyncPolicyFactory,
 ) -> Result<(), crate::sink_util::SinkError> {
     let mut sink = ConnectionSink::new(sink, run_id, connection_id)
         .with_generation_allocator(generation_allocator);
@@ -80,7 +81,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         .map(|(s, _)| {
             (
                 s.clone(),
-                SymbolFsm::new(s.clone(), config.snapshot_retry_cooldown),
+                SymbolFsm::with_policy(s.clone(), (resync_policy_factory)()),
             )
         })
         .collect();
@@ -170,6 +171,9 @@ pub async fn run_connection_task<S: StreamingSink>(
         // Subscribe to channels and initialize symbols to AwaitingSnapshot
         let mut snapshot_queue: VecDeque<Symbol> = VecDeque::new();
         let mut buffered_diffs: HashMap<Symbol, VecDeque<BufferedDiff>> = HashMap::new();
+        let mut in_flight_snapshots: HashSet<Symbol> = HashSet::new();
+        let mut active_snapshot_ids: HashMap<Symbol, u64> = HashMap::new();
+        let mut next_snapshot_id: u64 = 1;
 
         for (sym, tag) in &symbols {
             if let Some(fsm) = fsms.get_mut(sym) {
@@ -236,6 +240,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 let mut found_idx = None;
 
                 for (idx, sym) in snapshot_queue.iter().enumerate() {
+                    if in_flight_snapshots.contains(sym) {
+                        continue;
+                    }
                     if let Some(fsm) = fsms.get_mut(sym) {
                         if fsm.can_request_snapshot(now) {
                             found_idx = Some(idx);
@@ -247,8 +254,13 @@ pub async fn run_connection_task<S: StreamingSink>(
                 if let Some(idx) = found_idx {
                     if let Some(sym) = snapshot_queue.remove(idx) {
                         if let Some(fsm) = fsms.get_mut(&sym) {
+                            fsm.trigger_resync(now);
                             fsm.mark_snapshot_requested(now);
                         }
+                        in_flight_snapshots.insert(sym.clone());
+                        let req_id = next_snapshot_id;
+                        next_snapshot_id = next_snapshot_id.wrapping_add(1);
+                        active_snapshot_ids.insert(sym.clone(), req_id);
 
                         let client = rest_client.clone();
                         let sym_clone = sym.clone();
@@ -257,8 +269,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                         let cancel_snap = cancel.clone();
                         snapshot_tasks.spawn(async move {
                             tokio::select! {
-                                _ = cancel_snap.cancelled() => (sym_clone, Err(RestError::Transport("request cancelled".to_string()))),
-                                res = client.fetch_order_book(&pair_lower, Instant::now()) => (sym_clone, res),
+                                _ = cancel_snap.cancelled() => (sym_clone, req_id, Err(RestError::Transport("request cancelled".to_string()))),
+                                res = client.fetch_order_book(&pair_lower, Instant::now()) => (sym_clone, req_id, res),
                             }
                         });
                     }
@@ -353,7 +365,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     break 'frame_loop;
                                 }
 
-                                if !snapshot_queue.contains(&sym) {
+                                if !snapshot_queue.contains(&sym) && !in_flight_snapshots.contains(&sym) {
                                     snapshot_queue.push_back(sym);
                                 }
                             }
@@ -391,9 +403,23 @@ pub async fn run_connection_task<S: StreamingSink>(
                 Some(task_res) = snapshot_tasks.join_next(), if !snapshot_tasks.is_empty() => {
                     let now = Instant::now();
 
-                    if let Ok((sym, res)) = task_res {
+                    if let Ok((sym, req_id, res)) = task_res {
+                        in_flight_snapshots.remove(&sym);
+
+                        // Discard if superseded by a newer snapshot request for this symbol
+                        if active_snapshot_ids.get(&sym) != Some(&req_id) {
+                            continue;
+                        }
+
                         match res {
                             Ok(snap) => {
+                                if let Some(fsm) = fsms.get(&sym) {
+                                    if fsm.state() != SyncState::AwaitingSnapshot {
+                                        // Symbol is already synchronized or superseded; discard older snapshot
+                                        continue;
+                                    }
+                                }
+
                                 let tag = symbol_tags.get(&sym).copied().unwrap_or_default();
                                 let snap_ts = Some(UnixNanos::from_micros(snap.microtimestamp));
                                 let ctx = sink.next_context(
@@ -493,7 +519,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     fsm.on_snapshot_failed(&failure, now);
                                 }
 
-                                if !snapshot_queue.contains(&sym) {
+                                if !snapshot_queue.contains(&sym) && !in_flight_snapshots.contains(&sym) {
                                     snapshot_queue.push_back(sym);
                                 }
                             }
@@ -630,7 +656,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     if let Some(buf) = buffered_diffs.get_mut(sym) {
                                                         buf.clear();
                                                     }
-                                                    if !snapshot_queue.contains(sym) {
+                                                    if !snapshot_queue.contains(sym) && !in_flight_snapshots.contains(sym) {
                                                         snapshot_queue.push_back(sym.clone());
                                                     }
                                                 }
@@ -672,16 +698,42 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 let queue = buffered_diffs
                                                     .entry(sym.clone())
                                                     .or_insert_with(|| VecDeque::with_capacity(128));
-                                                if queue.len() >= 1024 {
-                                                    queue.pop_front();
-                                                }
-                                                queue.push_back(BufferedDiff {
-                                                    microtimestamp: header.microtimestamp,
-                                                    bids: scratch.bids.clone(),
-                                                    asks: scratch.asks.clone(),
-                                                });
-                                                if !snapshot_queue.contains(sym) {
-                                                    snapshot_queue.push_back(sym.clone());
+                                                if queue.len() >= config.buffer_capacity {
+                                                    warn!(
+                                                        connection_id,
+                                                        symbol = %sym,
+                                                        capacity = config.buffer_capacity,
+                                                        "Bitstamp diff buffer overflow; triggering resync"
+                                                    );
+                                                    queue.clear();
+                                                    let now = Instant::now();
+                                                    if let Some(fsm) = fsms.get_mut(sym) {
+                                                        fsm.trigger_resync(now);
+                                                    }
+                                                    let tag = symbol_tags.get(sym).copied().unwrap_or_default();
+                                                    if sink.emit_alert(
+                                                        VenueId::Bitstamp,
+                                                        sym,
+                                                        tag,
+                                                        None,
+                                                        crate::now_nanos(),
+                                                        None,
+                                                        IntegrityAlert::ResyncStarted,
+                                                    ).is_err() {
+                                                        break 'frame_loop;
+                                                    }
+                                                    if !snapshot_queue.contains(sym) && !in_flight_snapshots.contains(sym) {
+                                                        snapshot_queue.push_back(sym.clone());
+                                                    }
+                                                } else {
+                                                    queue.push_back(BufferedDiff {
+                                                        microtimestamp: header.microtimestamp,
+                                                        bids: scratch.bids.clone(),
+                                                        asks: scratch.asks.clone(),
+                                                    });
+                                                    if !snapshot_queue.contains(sym) && !in_flight_snapshots.contains(sym) {
+                                                        snapshot_queue.push_back(sym.clone());
+                                                    }
                                                 }
                                             }
                                             DiffDecision::Drop => {}

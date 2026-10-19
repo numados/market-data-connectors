@@ -9,6 +9,8 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use std::sync::Arc;
+
 use crate::huobi::catalog::DEFAULT_HUOBI_CATALOG_ENDPOINT;
 use crate::huobi::config::{ConfigError, HuobiConfig, HuobiStreams};
 use crate::huobi::connection::run_connection_task;
@@ -41,12 +43,17 @@ pub static HUOBI_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         ),
     });
 
+/// Thread-safe factory producing per-symbol resynchronization policies.
+pub type ResyncPolicyFactory =
+    Arc<dyn Fn() -> Box<dyn mdc_core::resync::ResyncPolicy> + Send + Sync>;
+
 /// Huobi (HTX) Market-By-Price WebSocket market data connector.
 pub struct HuobiConnector<S> {
     config: HuobiConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: S,
     run_id: Option<RunId>,
+    policy_factory: ResyncPolicyFactory,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
 }
@@ -154,6 +161,7 @@ impl<S: StreamingSink + Clone> HuobiConnector<S> {
                 }
             });
 
+            let policy_factory = self.policy_factory.clone();
             conn_tasks.spawn(async move {
                 run_connection_task(
                     connection_id,
@@ -164,6 +172,7 @@ impl<S: StreamingSink + Clone> HuobiConnector<S> {
                     cancel_conn,
                     run_id,
                     gen_alloc,
+                    policy_factory,
                 )
                 .await
             });
@@ -225,6 +234,7 @@ pub struct HuobiConnectorBuilder<S = ()> {
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: Option<S>,
     run_id: Option<RunId>,
+    policy_factory: Option<ResyncPolicyFactory>,
 }
 
 impl HuobiConnectorBuilder<()> {
@@ -235,11 +245,27 @@ impl HuobiConnectorBuilder<()> {
             symbols: Vec::new(),
             sink: None,
             run_id: None,
+            policy_factory: None,
         }
     }
 }
 
 impl<S> HuobiConnectorBuilder<S> {
+    /// Injects a custom resynchronization policy prototype cloned for each symbol FSM.
+    pub fn resync_policy<P: mdc_core::resync::ResyncPolicy + Clone + Send + Sync + 'static>(
+        mut self,
+        policy: P,
+    ) -> Self {
+        self.policy_factory = Some(Arc::new(move || Box::new(policy.clone())));
+        self
+    }
+
+    /// Injects a custom factory producing resynchronization policies.
+    pub fn resync_policy_factory(mut self, factory: ResyncPolicyFactory) -> Self {
+        self.policy_factory = Some(factory);
+        self
+    }
+
     /// Explicitly sets the `RunId` for this connector session.
     pub fn run_id(mut self, run_id: RunId) -> Self {
         self.run_id = Some(run_id);
@@ -321,6 +347,7 @@ impl<S> HuobiConnectorBuilder<S> {
             symbols: self.symbols,
             sink: Some(sink),
             run_id: self.run_id,
+            policy_factory: self.policy_factory,
         }
     }
 
@@ -348,6 +375,13 @@ impl<S> HuobiConnectorBuilder<S> {
             .sink
             .ok_or_else(|| MdcError::Config("Streaming sink is required".into()))?;
 
+        let policy_factory = self.policy_factory.unwrap_or_else(|| {
+            let timeout = self.config.resync_timeout;
+            Arc::new(move || {
+                Box::new(mdc_core::resync::CooldownPolicy::new(timeout))
+            })
+        });
+
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());
 
@@ -356,6 +390,7 @@ impl<S> HuobiConnectorBuilder<S> {
             symbols: self.symbols,
             sink,
             run_id: self.run_id,
+            policy_factory,
             command_tx,
             command_rx,
         };

@@ -18,6 +18,8 @@ pub struct BitstampConfig {
     pub snapshot_retry_cooldown: Duration,
     /// Timeout for REST HTTP requests (default: 5s).
     pub request_timeout: Duration,
+    /// Maximum number of deltas to buffer per symbol while awaiting a snapshot (default: 1024).
+    pub buffer_capacity: usize,
 }
 
 impl Default for BitstampConfig {
@@ -33,6 +35,7 @@ impl Default for BitstampConfig {
             streams: BitstampStreams::default(),
             snapshot_retry_cooldown: Duration::from_secs(5),
             request_timeout: Duration::from_secs(5),
+            buffer_capacity: 1024,
         }
     }
 }
@@ -64,9 +67,6 @@ pub enum ConfigError {
     /// Streaming or market data sink was not provided.
     #[error("market data sink is required")]
     MissingSink,
-    /// Configured symbols per connection must be greater than zero.
-    #[error("symbols_per_connection must be greater than zero")]
-    ZeroSymbolsPerConnection,
     /// WebSocket URL scheme was invalid (must be ws:// or wss://).
     #[error("ws_url scheme must be ws or wss: {0}")]
     InvalidWsScheme(String),
@@ -81,9 +81,6 @@ pub enum ConfigError {
 impl BitstampConfig {
     /// Validates the configuration parameters.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols_per_connection == 0 {
-            return Err(ConfigError::ZeroSymbolsPerConnection);
-        }
         let ws_scheme = self.ws_url.scheme();
         if ws_scheme != "ws" && ws_scheme != "wss" {
             return Err(ConfigError::InvalidWsScheme(ws_scheme.to_string()));
@@ -109,20 +106,9 @@ mod tests {
         let config = BitstampConfig::default();
         assert!(config.validate().is_ok());
         assert_eq!(config.symbols_per_connection, 25);
+        assert_eq!(config.buffer_capacity, 1024);
         assert!(config.streams.depth);
         assert!(!config.streams.trades);
-    }
-
-    #[test]
-    fn test_zero_symbols_per_connection_rejected() {
-        let config = BitstampConfig {
-            symbols_per_connection: 0,
-            ..Default::default()
-        };
-        assert_eq!(
-            config.validate(),
-            Err(ConfigError::ZeroSymbolsPerConnection)
-        );
     }
 
     #[test]

@@ -190,6 +190,62 @@ impl ResyncPolicy for TimeoutQuarantinePolicy {
     }
 }
 
+impl TimeoutQuarantinePolicy {
+    /// Returns true if `symbol` is currently recorded in quarantine.
+    pub fn is_quarantined(&self, symbol: &Symbol, now: Instant) -> bool {
+        match self.tracking.get(symbol) {
+            Some(QuarantineTracking::Quarantined { until }) => now < *until,
+            _ => false,
+        }
+    }
+}
+
+/// Reconnect backoff policy for connection retry scheduling.
+pub trait BackoffPolicy: Send + Sync + 'static {
+    /// Computes the delay before retry attempt `attempt`.
+    fn next_delay(&mut self, attempt: u32) -> Duration;
+
+    /// Resets policy state on successful connection.
+    fn reset(&mut self);
+}
+
+/// Standard exponential reconnect backoff with configurable initial delay, maximum delay cap, and factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExponentialBackoff {
+    /// Initial delay on first reconnect attempt.
+    pub initial: Duration,
+    /// Maximum upper bound on delay.
+    pub max: Duration,
+    /// Exponential multiplication factor (default: 2).
+    pub factor: u32,
+}
+
+impl ExponentialBackoff {
+    /// Creates a new `ExponentialBackoff` with exponential factor 2.
+    pub fn new(initial: Duration, max: Duration) -> Self {
+        Self {
+            initial,
+            max,
+            factor: 2,
+        }
+    }
+}
+
+impl Default for ExponentialBackoff {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(1), Duration::from_secs(15))
+    }
+}
+
+impl BackoffPolicy for ExponentialBackoff {
+    fn next_delay(&mut self, attempt: u32) -> Duration {
+        let mult = 1u32.checked_shl(attempt.min(10)).unwrap_or(1024);
+        (self.initial * mult).min(self.max)
+    }
+
+    fn reset(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +346,16 @@ mod tests {
             policy.decide(&sym, t1 + Duration::from_secs(30)),
             ResyncDecision::Proceed
         );
+    }
+
+    #[test]
+    fn test_exponential_backoff_progression_and_cap() {
+        let mut backoff = ExponentialBackoff::new(Duration::from_millis(500), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(0), Duration::from_millis(500));
+        assert_eq!(backoff.next_delay(1), Duration::from_millis(1000));
+        assert_eq!(backoff.next_delay(2), Duration::from_millis(2000));
+        assert_eq!(backoff.next_delay(3), Duration::from_millis(4000));
+        assert_eq!(backoff.next_delay(4), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(100), Duration::from_secs(4));
     }
 }

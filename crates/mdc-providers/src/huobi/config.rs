@@ -76,14 +76,6 @@ pub enum ConfigError {
     #[error("invalid mbp levels {0}; only 150 and 400 are supported for incremental updates")]
     InvalidMbpLevels(u32),
 
-    /// Configured symbols per connection must be greater than zero.
-    #[error("symbols_per_connection must be greater than zero")]
-    ZeroSymbolsPerConnection,
-
-    /// Configured resync buffer capacity must be greater than zero.
-    #[error("resync_buffer_capacity must be greater than zero")]
-    ZeroResyncBufferCapacity,
-
     /// Invalid URL string.
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
@@ -97,12 +89,6 @@ impl HuobiConfig {
 
     /// Validates the configuration parameters.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols_per_connection == 0 {
-            return Err(ConfigError::ZeroSymbolsPerConnection);
-        }
-        if self.resync_buffer_capacity == 0 {
-            return Err(ConfigError::ZeroResyncBufferCapacity);
-        }
         if self.mbp_levels != 150 && self.mbp_levels != 400 {
             return Err(ConfigError::InvalidMbpLevels(self.mbp_levels));
         }
@@ -224,11 +210,5 @@ mod tests {
     fn test_invalid_mbp_levels() {
         let res = HuobiConfig::builder().mbp_levels(50).build();
         assert_eq!(res, Err(ConfigError::InvalidMbpLevels(50)));
-    }
-
-    #[test]
-    fn test_zero_symbols_per_conn() {
-        let res = HuobiConfig::builder().symbols_per_connection(0).build();
-        assert_eq!(res, Err(ConfigError::ZeroSymbolsPerConnection));
     }
 }

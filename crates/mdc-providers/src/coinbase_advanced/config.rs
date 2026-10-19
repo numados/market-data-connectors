@@ -77,9 +77,6 @@ pub enum ConfigError {
     /// No symbols were provided.
     #[error("symbols list cannot be empty")]
     EmptySymbols,
-    /// Symbols per connection must be greater than zero.
-    #[error("symbols_per_connection must be greater than 0")]
-    ZeroSymbolsPerConnection,
     /// Reset threshold must be greater than zero.
     #[error("reset_threshold must be greater than 0")]
     InvalidResetThreshold,
@@ -93,9 +90,6 @@ impl CoinbaseAdvancedConfig {
 
     /// Validates the configuration parameters.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols_per_connection == 0 {
-            return Err(ConfigError::ZeroSymbolsPerConnection);
-        }
         if self.reset_threshold == 0 {
             return Err(ConfigError::InvalidResetThreshold);
         }
@@ -203,18 +197,6 @@ mod tests {
         assert!(config.streams.level2);
         assert!(config.streams.heartbeats);
         assert!(!config.streams.market_trades);
-    }
-
-    #[test]
-    fn test_zero_symbols_per_connection() {
-        let config = CoinbaseAdvancedConfig {
-            symbols_per_connection: 0,
-            ..Default::default()
-        };
-        assert_eq!(
-            config.validate(),
-            Err(ConfigError::ZeroSymbolsPerConnection)
-        );
     }
 
     #[test]

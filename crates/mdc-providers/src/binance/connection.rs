@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, DeltaDecision, DisconnectKind, IntegrityAlert, MarketEvent, ResyncController,
-    ResyncDecision, ResyncFailure, ResyncPolicy, RunId, SequenceRange, Side, SilenceWatchdog,
-    SnapshotOutcome, StreamingSink, Symbol, SymbolTag, UnixNanos, VenueId, WatchdogAction,
+    BackoffPolicy, BookKind, DeltaDecision, DisconnectKind, ExponentialBackoff, IntegrityAlert,
+    MarketEvent, ResyncController, ResyncDecision, ResyncFailure, ResyncPolicy, RunId,
+    SequenceRange, Side, SilenceWatchdog, SnapshotOutcome, StreamingSink, Symbol, SymbolTag,
+    UnixNanos, VenueId, WatchdogAction,
 };
 use tokio::sync::{Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::Message;
@@ -95,6 +96,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
     let mut scratch = ConnectionScratchBuffers::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
+    let mut backoff_policy = ExponentialBackoff::new(config.initial_backoff, config.max_backoff);
     let mut is_paused = false;
 
     'reconnect_loop: loop {
@@ -129,8 +131,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Exponential backoff delay
         if reconnect_attempt > 0 {
-            let mult = 1u32.checked_shl(reconnect_attempt.min(4) - 1).unwrap_or(16);
-            let backoff = (config.initial_backoff * mult).min(config.max_backoff);
+            let backoff = backoff_policy.next_delay(reconnect_attempt);
             info!(
                 connection_id,
                 ?backoff,
@@ -153,6 +154,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         let (mut ws_stream, _) = match ws_res {
             Ok(s) => {
                 reconnect_attempt = 0;
+                backoff_policy.reset();
                 s
             }
             Err(e) => {
@@ -797,6 +799,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             reconnect_attempt += 1;
         } else {
             reconnect_attempt = 0;
+            backoff_policy.reset();
         }
     }
 

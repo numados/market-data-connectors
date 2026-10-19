@@ -15,18 +15,32 @@ use crate::gateio::config::GateioConfig;
 use crate::gateio::normalize::normalize_snapshot;
 use crate::gateio::raw::{GateioConnectionScratch, ObuHeader};
 
-/// Per-symbol FSM coordinating `ResyncController` and `CooldownPolicy`.
-#[derive(Debug)]
+/// Per-symbol FSM coordinating `ResyncController` and `ResyncPolicy`.
 pub struct SymbolFsm {
     symbol: Symbol,
     tag: SymbolTag,
     controller: mdc_core::resync::ResyncController,
-    cooldown: CooldownPolicy,
+    cooldown: Box<dyn ResyncPolicy>,
 }
 
 impl SymbolFsm {
-    /// Creates a new `SymbolFsm` for the given symbol.
+    /// Creates a new `SymbolFsm` for the given symbol with default CooldownPolicy.
     pub fn new(symbol: Symbol, tag: SymbolTag, config: &GateioConfig) -> Self {
+        Self::with_policy(
+            symbol,
+            tag,
+            config,
+            Box::new(CooldownPolicy::new(config.resync_timeout)),
+        )
+    }
+
+    /// Creates a new `SymbolFsm` with an injected resync policy.
+    pub fn with_policy(
+        symbol: Symbol,
+        tag: SymbolTag,
+        config: &GateioConfig,
+        policy: Box<dyn ResyncPolicy>,
+    ) -> Self {
         #[allow(clippy::expect_used)] // capacity clamped to >= 1
         let controller =
             mdc_core::resync::ResyncController::new(config.resync_buffer_capacity.max(1))
@@ -35,7 +49,7 @@ impl SymbolFsm {
             symbol,
             tag,
             controller,
-            cooldown: CooldownPolicy::new(config.resync_timeout),
+            cooldown: policy,
         }
     }
 
@@ -215,5 +229,19 @@ mod tests {
         // After cooldown elapses, resubscribe is permitted
         let later = now + Duration::from_secs(6);
         assert!(fsm.can_resubscribe(later));
+    }
+
+    #[test]
+    fn test_fsm_with_custom_policy() {
+        let config = GateioConfig::default();
+        let sym = Symbol::from("BTC_USDT");
+        let custom_policy = CooldownPolicy::new(Duration::from_secs(42));
+        let mut fsm = SymbolFsm::with_policy(
+            sym,
+            SymbolTag::default(),
+            &config,
+            Box::new(custom_policy),
+        );
+        assert!(fsm.can_resubscribe(Instant::now()));
     }
 }

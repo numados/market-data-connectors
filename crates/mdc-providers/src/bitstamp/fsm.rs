@@ -29,21 +29,25 @@ pub enum DiffDecision {
 }
 
 /// State machine tracking the synchronization status and timestamp gate for a single symbol.
-#[derive(Debug, Clone)]
 pub struct SymbolFsm {
     symbol: Symbol,
     state: SyncState,
-    cooldown: CooldownPolicy,
+    cooldown: Box<dyn ResyncPolicy>,
 }
 
 impl SymbolFsm {
+    /// Creates a new `SymbolFsm` for `symbol` with a custom resync policy.
+    pub fn with_policy(symbol: Symbol, policy: Box<dyn ResyncPolicy>) -> Self {
+        Self {
+            symbol,
+            state: SyncState::AwaitingSnapshot,
+            cooldown: policy,
+        }
+    }
+
     /// Creates a new `SymbolFsm` for `symbol` with the specified failure cooldown.
     pub fn new(symbol: Symbol, cooldown: Duration) -> Self {
-        Self {
-            symbol: symbol.clone(),
-            state: SyncState::AwaitingSnapshot,
-            cooldown: CooldownPolicy::new(cooldown),
-        }
+        Self::with_policy(symbol, Box::new(CooldownPolicy::new(cooldown)))
     }
 
     /// Current synchronization state.
@@ -66,11 +70,24 @@ impl SymbolFsm {
     }
 
     /// Records receipt of an authoritative REST snapshot at `microtimestamp`.
+    /// Never rolls back an existing timestamp gate.
     pub fn on_snapshot(&mut self, microtimestamp: u64, now: Instant) {
-        self.state = SyncState::InSync {
-            gate_micros: microtimestamp,
-        };
-        self.cooldown.on_completed(&self.symbol, now);
+        match self.state {
+            SyncState::AwaitingSnapshot => {
+                self.state = SyncState::InSync {
+                    gate_micros: microtimestamp,
+                };
+                self.cooldown.on_completed(&self.symbol, now);
+            }
+            SyncState::InSync { gate_micros } => {
+                if microtimestamp > gate_micros {
+                    self.state = SyncState::InSync {
+                        gate_micros: microtimestamp,
+                    };
+                    self.cooldown.on_completed(&self.symbol, now);
+                }
+            }
+        }
     }
 
     /// Records failure of a REST snapshot retrieval attempt.
@@ -168,5 +185,53 @@ mod tests {
         assert_eq!(fsm.state(), SyncState::AwaitingSnapshot);
         // Now diffs are buffered again
         assert_eq!(fsm.check_diff(snap_time + 1), DiffDecision::Buffer);
+    }
+
+    #[test]
+    fn test_fsm_snapshot_no_rollback_on_older_timestamp() {
+        let mut fsm = SymbolFsm::new(Symbol::from("btcusd"), Duration::from_secs(5));
+        let now = Instant::now();
+        let newer_snap = 1700000000200000;
+        let older_snap = 1700000000100000;
+
+        fsm.on_snapshot(newer_snap, now);
+        assert_eq!(
+            fsm.state(),
+            SyncState::InSync {
+                gate_micros: newer_snap
+            }
+        );
+
+        // Delayed/stale REST snapshot with older timestamp arrives -> must NOT roll back gate!
+        fsm.on_snapshot(older_snap, now);
+        assert_eq!(
+            fsm.state(),
+            SyncState::InSync {
+                gate_micros: newer_snap
+            }
+        );
+        // Microtimestamp between older and newer is still dropped (not emitted)
+        assert_eq!(fsm.check_diff(older_snap + 50), DiffDecision::Drop);
+        // Newer than the active gate emits
+        assert_eq!(fsm.check_diff(newer_snap + 1), DiffDecision::Emit);
+    }
+
+    #[test]
+    fn test_fsm_with_custom_policy_injection() {
+        struct ZeroCooldownPolicy;
+        impl ResyncPolicy for ZeroCooldownPolicy {
+            fn on_started(&mut self, _symbol: &Symbol, _now: Instant) {}
+            fn on_completed(&mut self, _symbol: &Symbol, _now: Instant) {}
+            fn on_failed(&mut self, _symbol: &Symbol, _error: &ResyncFailure, _now: Instant) {}
+            fn decide(&mut self, _symbol: &Symbol, _now: Instant) -> ResyncDecision {
+                ResyncDecision::Proceed
+            }
+        }
+
+        let mut fsm = SymbolFsm::with_policy(Symbol::from("btcusd"), Box::new(ZeroCooldownPolicy));
+        let now = Instant::now();
+        fsm.on_snapshot_failed(&ResyncFailure::HttpError(500), now);
+        // Custom policy allows snapshot immediately despite failure
+        assert!(fsm.can_request_snapshot(now));
     }
 }

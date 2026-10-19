@@ -49,21 +49,27 @@ pub enum PollOutcome {
     QuarantineExpiredTriggerResubscribe,
 }
 
+use mdc_core::resync::{ResyncDecision, ResyncPolicy, TimeoutQuarantinePolicy};
+use mdc_core::Symbol;
+
 /// Per-channel synchronization controller.
 #[derive(Debug, Clone)]
 pub struct ChannelFsm {
+    symbol: Symbol,
     state: SyncState,
-    timeout: Duration,
-    quarantine: Duration,
+    policy: TimeoutQuarantinePolicy,
 }
 
 impl ChannelFsm {
     /// Creates a new `ChannelFsm` starting in `AwaitingSnapshot`.
     pub fn new(started_at: Instant, timeout: Duration, quarantine: Duration) -> Self {
+        let symbol = Symbol::from("channel");
+        let mut policy = TimeoutQuarantinePolicy::new(timeout, quarantine);
+        policy.on_started(&symbol, started_at);
         Self {
+            symbol,
             state: SyncState::AwaitingSnapshot { started_at },
-            timeout,
-            quarantine,
+            policy,
         }
     }
 
@@ -80,6 +86,7 @@ impl ChannelFsm {
     /// Handles arrival of an order book snapshot.
     pub fn on_snapshot(&mut self) -> SnapshotOutcome {
         self.state = SyncState::InSync;
+        self.policy.on_completed(&self.symbol, Instant::now());
         SnapshotOutcome::Accepted
     }
 
@@ -96,34 +103,38 @@ impl ChannelFsm {
     /// Triggers a resynchronization due to CRC32 checksum mismatch.
     pub fn on_checksum_mismatch(&mut self, now: Instant) {
         self.state = SyncState::AwaitingSnapshot { started_at: now };
+        self.policy.on_started(&self.symbol, now);
     }
 
     /// Resets the FSM back to awaiting snapshot (e.g. on manual resync or reconnect).
     pub fn reset_awaiting_snapshot(&mut self, now: Instant) {
         self.state = SyncState::AwaitingSnapshot { started_at: now };
+        self.policy.on_started(&self.symbol, now);
     }
 
     /// Evaluates timer transitions (timeout to quarantine, quarantine expiry).
     pub fn poll(&mut self, now: Instant) -> PollOutcome {
         match self.state {
-            SyncState::AwaitingSnapshot { started_at } => {
-                if now.duration_since(started_at) >= self.timeout {
-                    let until = now + self.quarantine;
-                    self.state = SyncState::Quarantined { until };
-                    PollOutcome::TimeoutQuarantined { until }
-                } else {
-                    PollOutcome::None
-                }
-            }
-            SyncState::Quarantined { until } => {
-                if now >= until {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    PollOutcome::QuarantineExpiredTriggerResubscribe
-                } else {
-                    PollOutcome::None
-                }
-            }
             SyncState::InSync => PollOutcome::None,
+            SyncState::AwaitingSnapshot { .. } => {
+                match self.policy.decide(&self.symbol, now) {
+                    ResyncDecision::Quarantine(until) => {
+                        self.state = SyncState::Quarantined { until };
+                        PollOutcome::TimeoutQuarantined { until }
+                    }
+                    _ => PollOutcome::None,
+                }
+            }
+            SyncState::Quarantined { .. } => {
+                match self.policy.decide(&self.symbol, now) {
+                    ResyncDecision::Proceed => {
+                        self.state = SyncState::AwaitingSnapshot { started_at: now };
+                        self.policy.on_started(&self.symbol, now);
+                        PollOutcome::QuarantineExpiredTriggerResubscribe
+                    }
+                    _ => PollOutcome::None,
+                }
+            }
         }
     }
 }

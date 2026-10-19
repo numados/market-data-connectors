@@ -42,12 +42,17 @@ pub static GATEIO_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         ),
     });
 
+/// Thread-safe factory producing per-symbol resynchronization policies.
+pub type ResyncPolicyFactory =
+    Arc<dyn Fn() -> Box<dyn mdc_core::resync::ResyncPolicy> + Send + Sync>;
+
 /// Gate.io WebSocket v4 market data connector.
 pub struct GateioConnector<S> {
     config: GateioConfig,
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: S,
     run_id: Option<RunId>,
+    policy_factory: ResyncPolicyFactory,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
 }
@@ -153,6 +158,7 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
                 }
             });
 
+            let policy_factory = self.policy_factory.clone();
             conn_tasks.spawn(async move {
                 run_connection_task(
                     connection_id,
@@ -163,6 +169,7 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
                     cancel_conn,
                     run_id,
                     gen_alloc,
+                    policy_factory,
                 )
                 .await
             });
@@ -224,6 +231,7 @@ pub struct GateioConnectorBuilder<S> {
     symbols: Vec<(Symbol, SymbolTag)>,
     sink: Option<S>,
     run_id: Option<RunId>,
+    policy_factory: Option<ResyncPolicyFactory>,
 }
 
 impl<S> GateioConnectorBuilder<S> {
@@ -234,7 +242,23 @@ impl<S> GateioConnectorBuilder<S> {
             symbols: Vec::new(),
             sink: None,
             run_id: None,
+            policy_factory: None,
         }
+    }
+
+    /// Injects a custom resynchronization policy prototype cloned for each symbol FSM.
+    pub fn resync_policy<P: mdc_core::resync::ResyncPolicy + Clone + Send + Sync + 'static>(
+        mut self,
+        policy: P,
+    ) -> Self {
+        self.policy_factory = Some(Arc::new(move || Box::new(policy.clone())));
+        self
+    }
+
+    /// Injects a custom factory producing resynchronization policies.
+    pub fn resync_policy_factory(mut self, factory: ResyncPolicyFactory) -> Self {
+        self.policy_factory = Some(factory);
+        self
     }
 
     /// Explicitly sets the `RunId` for this connector session.
@@ -308,6 +332,7 @@ impl<M: MarketDataSink + Clone> GateioConnectorBuilder<Owned<M>> {
             symbols: self.symbols,
             sink: Some(Owned::new(sink)),
             run_id: self.run_id,
+            policy_factory: self.policy_factory,
         }
     }
 }
@@ -327,6 +352,13 @@ impl<S: StreamingSink + Clone> GateioConnectorBuilder<S> {
         crate::config::validate_symbols_per_connection(self.config.symbols_per_connection)?;
         crate::config::validate_resync_buffer_capacity(self.config.resync_buffer_capacity)?;
 
+        let policy_factory = self.policy_factory.unwrap_or_else(|| {
+            let timeout = self.config.resync_timeout;
+            Arc::new(move || {
+                Box::new(mdc_core::resync::CooldownPolicy::new(timeout))
+            })
+        });
+
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());
 
@@ -335,6 +367,7 @@ impl<S: StreamingSink + Clone> GateioConnectorBuilder<S> {
             symbols: self.symbols,
             sink,
             run_id: self.run_id,
+            policy_factory,
             command_tx,
             command_rx,
         };

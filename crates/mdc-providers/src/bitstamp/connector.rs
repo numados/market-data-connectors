@@ -45,6 +45,10 @@ pub static BITSTAMP_CAPABILITIES: std::sync::LazyLock<ProviderCapabilities> =
         ),
     });
 
+/// Thread-safe factory producing per-symbol resynchronization policies.
+pub type ResyncPolicyFactory =
+    Arc<dyn Fn() -> Box<dyn mdc_core::resync::ResyncPolicy> + Send + Sync>;
+
 /// Bitstamp WebSocket v2 and REST market data connector.
 pub struct BitstampConnector<S> {
     config: BitstampConfig,
@@ -54,6 +58,7 @@ pub struct BitstampConnector<S> {
     run_id: Option<RunId>,
     command_tx: mpsc::Sender<Command>,
     command_rx: mpsc::Receiver<Command>,
+    resync_policy_factory: ResyncPolicyFactory,
 }
 
 impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
@@ -166,6 +171,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
                 }
             });
 
+            let resync_pf = self.resync_policy_factory.clone();
             conn_tasks.spawn(async move {
                 run_connection_task(
                     run_id,
@@ -177,6 +183,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
                     task_cmd_rx,
                     cancel_conn,
                     gen_alloc,
+                    resync_pf,
                 )
                 .await
             });
@@ -239,6 +246,7 @@ pub struct BitstampConnectorBuilder<S> {
     embargo: Option<Arc<Mutex<EmbargoTracker>>>,
     sink: Option<S>,
     run_id: Option<RunId>,
+    resync_policy_factory: Option<ResyncPolicyFactory>,
 }
 
 impl<S> BitstampConnectorBuilder<S> {
@@ -250,7 +258,29 @@ impl<S> BitstampConnectorBuilder<S> {
             embargo: None,
             sink: None,
             run_id: None,
+            resync_policy_factory: None,
         }
+    }
+
+    /// Configures a pluggable resync policy (cloned per connection task).
+    pub fn resync_policy<P: mdc_core::resync::ResyncPolicy + Clone + Sync + 'static>(
+        mut self,
+        policy: P,
+    ) -> Self {
+        self.resync_policy_factory = Some(Arc::new(move || Box::new(policy.clone())));
+        self
+    }
+
+    /// Configures a factory for pluggable resync policies.
+    pub fn resync_policy_factory(mut self, factory: ResyncPolicyFactory) -> Self {
+        self.resync_policy_factory = Some(factory);
+        self
+    }
+
+    /// Sets the maximum number of deltas to buffer per symbol while awaiting a snapshot.
+    pub fn buffer_capacity(mut self, capacity: usize) -> Self {
+        self.config.buffer_capacity = capacity;
+        self
     }
 
     /// Sets the runtime execution run ID.
@@ -322,6 +352,7 @@ impl<M: MarketDataSink + Clone> BitstampConnectorBuilder<Owned<M>> {
             embargo: self.embargo,
             sink: Some(Owned::new(sink)),
             run_id: self.run_id,
+            resync_policy_factory: self.resync_policy_factory,
         }
     }
 }
@@ -335,6 +366,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnectorBuilder<S> {
 
         crate::config::validate_symbols(&self.symbols)?;
         crate::config::validate_symbols_per_connection(self.config.symbols_per_connection)?;
+        crate::config::validate_resync_buffer_capacity(self.config.buffer_capacity)?;
 
         let sink = self
             .sink
@@ -347,6 +379,11 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnectorBuilder<S> {
         let (command_tx, command_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(command_tx.clone());
 
+        let default_cooldown = self.config.snapshot_retry_cooldown;
+        let resync_policy_factory = self.resync_policy_factory.unwrap_or_else(|| {
+            Arc::new(move || Box::new(mdc_core::resync::CooldownPolicy::new(default_cooldown)))
+        });
+
         let connector = BitstampConnector {
             config: self.config,
             symbols: self.symbols,
@@ -355,6 +392,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnectorBuilder<S> {
             run_id: self.run_id,
             command_tx,
             command_rx,
+            resync_policy_factory,
         };
 
         Ok((connector, handle))

@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, DisconnectKind, GlobalSequenceCheck, IntegrityAlert, RunId, SequencePolicy, Side,
-    SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId, WatchdogAction,
+    BackoffPolicy, BookKind, DisconnectKind, ExponentialBackoff, GlobalSequenceCheck,
+    IntegrityAlert, RunId, SequencePolicy, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag,
+    VenueId, WatchdogAction,
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
@@ -25,13 +26,6 @@ use crate::coinbase_advanced::raw::{
     CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, L2EventKind, RawTradesEnvelope,
     build_subscribe_frame, build_unsubscribe_frame,
 };
-
-/// Computes exponential reconnect backoff with a 30-second cap.
-fn compute_backoff(attempt: u32) -> Duration {
-    let base_ms = 200u64;
-    let factor = 2u64.saturating_pow(attempt.min(8));
-    Duration::from_millis(base_ms.saturating_mul(factor).min(30_000))
-}
 
 /// Runs a single Coinbase Advanced Trade WebSocket connection worker managing a slice of products.
 #[allow(clippy::too_many_lines)]
@@ -52,6 +46,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         .with_reset_threshold(config.reset_threshold);
     let mut scratch = CoinbaseAdvancedScratch::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
+    let mut backoff_policy = ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(30));
     let mut is_paused = false;
 
     // Collect product string slices for subscription messages
@@ -70,6 +65,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Resume | Command::Reconnect) => {
                             is_paused = false;
                             reconnect_attempt = 0;
+                            backoff_policy.reset();
                             break;
                         }
                         Some(_) => {}
@@ -82,7 +78,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         sink.next_generation();
 
         if reconnect_attempt > 0 {
-            let backoff = compute_backoff(reconnect_attempt);
+            let backoff = backoff_policy.next_delay(reconnect_attempt);
             debug!(
                 connection_id,
                 attempt = reconnect_attempt,
@@ -109,6 +105,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             ) => match res {
                 Ok(Ok((stream, _response))) => {
                     reconnect_attempt = 0;
+                    backoff_policy.reset();
                     stream
                 }
                 Ok(Err(e)) => {
@@ -786,6 +783,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             reconnect_attempt += 1;
         } else {
             reconnect_attempt = 0;
+            backoff_policy.reset();
         }
     }
 

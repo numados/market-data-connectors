@@ -233,13 +233,19 @@ pub async fn read_response_bytes_capped(
 }
 
 /// Reads an error response body capped to a safe excerpt length.
-pub async fn read_error_body_capped(response: reqwest::Response, limit: usize) -> String {
+///
+/// Returns `Ok(body_str)` on success or when truncated, or `Err(BodyReadError)`
+/// if a transport error or timeout occurred during chunk streaming.
+pub async fn read_error_body_capped(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<String, BodyReadError> {
     match read_response_bytes_capped(response, limit).await {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(BodyReadError::TooLarge { limit, .. }) => {
-            format!("<error body exceeded {limit} bytes limit>")
+            Ok(format!("<error body exceeded {limit} bytes limit>"))
         }
-        Err(e) => format!("<failed to read error body: {e}>"),
+        Err(e @ (BodyReadError::Timeout | BodyReadError::Transport(_))) => Err(e),
     }
 }
 
@@ -294,7 +300,14 @@ pub async fn execute_http_get(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| parse_retry_after(Some(s)));
 
-        let message = read_error_body_capped(response, DEFAULT_ERROR_BODY_CAP).await;
+        let message = match read_error_body_capped(response, DEFAULT_ERROR_BODY_CAP).await {
+            Ok(msg) => msg,
+            Err(BodyReadError::Timeout) => return Err(HttpError::Timeout),
+            Err(BodyReadError::Transport(e)) => return Err(HttpError::Transport(e)),
+            Err(BodyReadError::TooLarge { limit, .. }) => {
+                format!("<error body exceeded {limit} bytes limit>")
+            }
+        };
 
         return Err(HttpError::HttpStatus {
             status: status.as_u16(),
@@ -406,7 +419,44 @@ mod tests {
             .await
             .expect("send request");
 
-        let err_text = read_error_body_capped(resp, 100).await;
+        let err_text = read_error_body_capped(resp, 100)
+            .await
+            .expect("should read error body with truncation placeholder");
         assert!(err_text.contains("<error body exceeded 100 bytes limit>"));
+    }
+
+    #[tokio::test]
+    async fn test_error_body_transport_failure_preserves_source() {
+        use std::error::Error;
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                // Send 500 status with Content-Length: 100, then abruptly close socket without body
+                let resp = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\n\r\nincomplete";
+                let _ = socket.write_all(resp).await;
+                drop(socket);
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/err_drop")).expect("parse url");
+        let err = execute_http_get(&client, url, Duration::from_secs(2), 1024)
+            .await
+            .expect_err("should fail with transport error");
+
+        match err {
+            HttpError::Transport(ref source) => {
+                assert!(source.source().is_some() || !source.to_string().is_empty());
+                assert!(err.source().is_some());
+            }
+            other => panic!("expected HttpError::Transport, got {other:?}"),
+        }
     }
 }

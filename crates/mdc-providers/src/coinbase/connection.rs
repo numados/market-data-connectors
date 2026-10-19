@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
-    BookKind, DisconnectKind, IntegrityAlert, RunId, Side, SilenceWatchdog, StreamingSink, Symbol,
-    SymbolTag, VenueId, WatchdogAction,
+    BackoffPolicy, BookKind, DisconnectKind, ExponentialBackoff, IntegrityAlert, RunId, Side,
+    SilenceWatchdog, StreamingSink, Symbol, SymbolTag, VenueId, WatchdogAction,
 };
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -95,6 +95,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
     let mut reconnect_attempt = 0u32;
     let mut is_paused = false;
+    let mut backoff_policy = ExponentialBackoff::new(config.initial_backoff, config.max_backoff);
 
     'reconnect_loop: loop {
         if cancel.is_cancelled() || sink.is_failed() {
@@ -120,8 +121,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         sink.next_generation();
 
         if reconnect_attempt > 0 {
-            let mult = 1u32.checked_shl(reconnect_attempt.min(4) - 1).unwrap_or(16);
-            let backoff = (config.initial_backoff * mult).min(config.max_backoff);
+            let backoff = backoff_policy.next_delay(reconnect_attempt);
             info!(
                 connection_id,
                 ?backoff,
@@ -133,7 +133,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 cmd = command_rx.recv() => {
                     match cmd {
                         Some(Command::Pause) => { is_paused = true; continue 'reconnect_loop; }
-                        Some(Command::Reconnect(_)) => { reconnect_attempt = 0; }
+                        Some(Command::Reconnect(_)) => { reconnect_attempt = 0; backoff_policy.reset(); }
                         None => break 'reconnect_loop,
                         _ => {}
                     }
@@ -168,6 +168,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         info!(connection_id, "Connected to Coinbase Exchange WebSocket");
         reconnect_attempt = 0;
+        backoff_policy.reset();
 
         let now = Instant::now();
         let mut watchdog = SilenceWatchdog::new(

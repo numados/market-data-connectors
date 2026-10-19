@@ -87,9 +87,6 @@ pub enum ConfigError {
     /// Market data sink was not supplied.
     #[error("market data sink is required")]
     MissingSink,
-    /// Configured symbols per connection must be greater than zero.
-    #[error("symbols_per_connection must be greater than zero")]
-    ZeroSymbolsPerConnection,
     /// WebSocket URL scheme was invalid (must be ws:// or wss://).
     #[error("ws_url scheme must be ws or wss: {0}")]
     InvalidWsScheme(String),
@@ -101,9 +98,6 @@ pub enum ConfigError {
 impl LmaxConfig {
     /// Validates the configuration parameters.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols_per_connection == 0 {
-            return Err(ConfigError::ZeroSymbolsPerConnection);
-        }
         let ws_scheme = self.ws_url.scheme();
         if ws_scheme != "ws" && ws_scheme != "wss" {
             return Err(ConfigError::InvalidWsScheme(ws_scheme.to_string()));
@@ -127,18 +121,6 @@ mod tests {
         assert_eq!(config.symbols_per_connection, usize::MAX);
         assert!(config.streams.book);
         assert!(!config.streams.trades);
-    }
-
-    #[test]
-    fn test_zero_symbols_per_connection_rejected() {
-        let config = LmaxConfig {
-            symbols_per_connection: 0,
-            ..Default::default()
-        };
-        assert_eq!(
-            config.validate(),
-            Err(ConfigError::ZeroSymbolsPerConnection)
-        );
     }
 
     #[test]

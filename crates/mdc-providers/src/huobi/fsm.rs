@@ -15,18 +15,32 @@ use crate::huobi::config::HuobiConfig;
 use crate::huobi::normalize::normalize_snapshot;
 use crate::huobi::raw::{HuobiConnectionScratch, MbpHeader};
 
-/// Per-symbol FSM coordinating [`mdc_core::resync::ResyncController`] and [`CooldownPolicy`].
-#[derive(Debug)]
+/// Per-symbol FSM coordinating [`mdc_core::resync::ResyncController`] and [`ResyncPolicy`].
 pub struct SymbolFsm {
     symbol: Symbol,
     tag: SymbolTag,
     controller: mdc_core::resync::ResyncController,
-    cooldown: CooldownPolicy,
+    cooldown: Box<dyn ResyncPolicy>,
 }
 
 impl SymbolFsm {
-    /// Creates a new `SymbolFsm` for the given symbol.
+    /// Creates a new `SymbolFsm` for the given symbol with default cooldown policy.
     pub fn new(symbol: Symbol, tag: SymbolTag, config: &HuobiConfig) -> Self {
+        Self::with_policy(
+            symbol,
+            tag,
+            config,
+            Box::new(CooldownPolicy::new(config.resync_timeout)),
+        )
+    }
+
+    /// Creates a new `SymbolFsm` with an injected resync policy.
+    pub fn with_policy(
+        symbol: Symbol,
+        tag: SymbolTag,
+        config: &HuobiConfig,
+        policy: Box<dyn ResyncPolicy>,
+    ) -> Self {
         #[allow(clippy::expect_used)] // capacity clamped to >= 1
         let controller =
             mdc_core::resync::ResyncController::new(config.resync_buffer_capacity.max(1))
@@ -35,7 +49,7 @@ impl SymbolFsm {
             symbol,
             tag,
             controller,
-            cooldown: CooldownPolicy::new(config.resync_timeout),
+            cooldown: policy,
         }
     }
 
@@ -193,5 +207,19 @@ mod tests {
         // Gap check: gap to 105 (expected 103)
         let gap_decision = fsm.check_delta(SequenceRange::new(105, 106));
         assert!(matches!(gap_decision, DeltaDecision::GapDetected { .. }));
+    }
+
+    #[test]
+    fn test_fsm_with_custom_policy() {
+        let config = HuobiConfig::default();
+        let sym = Symbol::from("btcusdt");
+        let custom_policy = CooldownPolicy::new(std::time::Duration::from_secs(42));
+        let mut fsm = SymbolFsm::with_policy(
+            sym,
+            SymbolTag::default(),
+            &config,
+            Box::new(custom_policy),
+        );
+        assert!(fsm.can_request_snapshot(Instant::now()));
     }
 }

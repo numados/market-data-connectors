@@ -62,23 +62,11 @@ pub enum ConfigError {
     /// Specified order book levels is invalid (only 50 and 400 supported).
     #[error("invalid orderbook levels {0}; only 50 and 400 are supported by Gate.io")]
     InvalidOrderbookLevels(u32),
-    /// Configured symbols per connection must be greater than zero.
-    #[error("symbols_per_connection must be greater than zero")]
-    ZeroSymbolsPerConnection,
-    /// Configured resync buffer capacity must be greater than zero.
-    #[error("resync_buffer_capacity must be greater than zero")]
-    ZeroResyncBufferCapacity,
 }
 
 impl GateioConfig {
     /// Validates the configuration parameters.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols_per_connection == 0 {
-            return Err(ConfigError::ZeroSymbolsPerConnection);
-        }
-        if self.resync_buffer_capacity == 0 {
-            return Err(ConfigError::ZeroResyncBufferCapacity);
-        }
         if self.orderbook_levels != 50 && self.orderbook_levels != 400 {
             return Err(ConfigError::InvalidOrderbookLevels(self.orderbook_levels));
         }
@@ -116,17 +104,5 @@ mod tests {
             ..GateioConfig::default()
         };
         assert!(valid_config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_zero_symbols_per_connection_rejected() {
-        let config = GateioConfig {
-            symbols_per_connection: 0,
-            ..GateioConfig::default()
-        };
-        assert_eq!(
-            config.validate(),
-            Err(ConfigError::ZeroSymbolsPerConnection)
-        );
     }
 }

@@ -92,13 +92,19 @@ pub async fn run_connection_task<S: StreamingSink>(
     cancel: CancellationToken,
     run_id: RunId,
     generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+    policy_factory: crate::gateio::connector::ResyncPolicyFactory,
 ) -> Result<(), crate::sink_util::SinkError> {
     let mut sink = ConnectionSink::new(sink, run_id, connection_id)
         .with_generation_allocator(generation_allocator);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
-        .map(|(s, tag)| (s.clone(), SymbolFsm::new(s.clone(), *tag, &config)))
+        .map(|(s, tag)| {
+            (
+                s.clone(),
+                SymbolFsm::with_policy(s.clone(), *tag, &config, (policy_factory)()),
+            )
+        })
         .collect();
 
     let mut scratch = GateioConnectionScratch::with_capacity(1_024);
@@ -168,9 +174,27 @@ pub async fn run_connection_task<S: StreamingSink>(
         sink.next_generation();
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-        // Reset FSMs upon new connection
-        for fsm in fsms.values_mut() {
-            fsm.reset(&config);
+        // Reset FSMs and emit ResyncStarted upon new connection
+        for (sym, tag) in &symbols {
+            if let Some(fsm) = fsms.get_mut(sym) {
+                fsm.reset(&config);
+                let _ = fsm.trigger_resync(Instant::now());
+            }
+            if config.streams.depth
+                && sink
+                    .emit_alert(
+                        VenueId::Gateio,
+                        sym,
+                        *tag,
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ResyncStarted,
+                    )
+                    .is_err()
+            {
+                break 'reconnect_loop;
+            }
         }
 
         // Send initial subscriptions for all configured symbols
@@ -603,7 +627,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 last = header.last_id,
                                                 "Sequence gap detected on Gate.io feed; resubscribing"
                                             );
-                                            let _ = fsm.trigger_resync(now);
+                                            let resync_alert = fsm.trigger_resync(now);
                                             if sink.emit_alert(
                                                 VenueId::Gateio,
                                                 &sym,
@@ -612,6 +636,17 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 received_ts,
                                                 Some(header.last_id),
                                                 alert,
+                                            ).is_err() {
+                                                break 'frame_loop;
+                                            }
+                                            if sink.emit_alert(
+                                                VenueId::Gateio,
+                                                &sym,
+                                                tag,
+                                                exchange_ts,
+                                                received_ts,
+                                                Some(header.last_id),
+                                                resync_alert,
                                             ).is_err() {
                                                 break 'frame_loop;
                                             }

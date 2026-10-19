@@ -74,8 +74,8 @@ pub async fn run_connection_loop<S: StreamingSink>(
     let mut symbol_to_chan: HashMap<Symbol, u32> = HashMap::new();
     let mut books: HashMap<u32, BitfinexChecksumBook> = HashMap::new();
     let mut scratch = BitfinexConnectionScratch::new();
-    let mut recent_trades: HashSet<u64> = HashSet::with_capacity(2048);
-    let mut recent_trade_ring: VecDeque<u64> = VecDeque::with_capacity(2048);
+    let mut recent_trades: HashSet<(Symbol, u64)> = HashSet::with_capacity(2048);
+    let mut recent_trade_ring: VecDeque<(Symbol, u64)> = VecDeque::with_capacity(2048);
 
     let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
 
@@ -593,8 +593,8 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
     symbol_to_chan: &mut HashMap<Symbol, u32>,
     books: &mut HashMap<u32, BitfinexChecksumBook>,
     _pending_resubscribe: &mut HashSet<Symbol>,
-    recent_trades: &mut HashSet<u64>,
-    recent_trade_ring: &mut VecDeque<u64>,
+    recent_trades: &mut HashSet<(Symbol, u64)>,
+    recent_trade_ring: &mut VecDeque<(Symbol, u64)>,
     orderbook_depth: usize,
     trades_enabled: bool,
     ws_stream: &mut W,
@@ -850,14 +850,15 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                     }
                 }
                 RawPayload::Trade { trade, .. } => {
-                    if trades_enabled && !recent_trades.contains(&trade.id) {
+                    let trade_key = (sym.clone(), trade.id);
+                    if trades_enabled && !recent_trades.contains(&trade_key) {
                         if recent_trade_ring.len() >= 2048 {
                             if let Some(oldest) = recent_trade_ring.pop_front() {
                                 recent_trades.remove(&oldest);
                             }
                         }
-                        recent_trade_ring.push_back(trade.id);
-                        recent_trades.insert(trade.id);
+                        recent_trade_ring.push_back(trade_key.clone());
+                        recent_trades.insert(trade_key);
 
                         if let Ok(t) = normalize_trade(&trade, received_ts) {
                             let ctx = sink.next_context(
@@ -877,14 +878,15 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                 RawPayload::TradeSnapshot { trades, .. } => {
                     if trades_enabled {
                         for trade in &trades {
-                            if !recent_trades.contains(&trade.id) {
+                            let trade_key = (sym.clone(), trade.id);
+                            if !recent_trades.contains(&trade_key) {
                                 if recent_trade_ring.len() >= 2048 {
                                     if let Some(oldest) = recent_trade_ring.pop_front() {
                                         recent_trades.remove(&oldest);
                                     }
                                 }
-                                recent_trade_ring.push_back(trade.id);
-                                recent_trades.insert(trade.id);
+                                recent_trade_ring.push_back(trade_key.clone());
+                                recent_trades.insert(trade_key);
 
                                 if let Ok(t) = normalize_trade(trade, received_ts) {
                                     let ctx = sink.next_context(

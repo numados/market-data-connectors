@@ -8,5 +8,6 @@ pub use controller::{
     SnapshotOutcome, SyncState,
 };
 pub use policy::{
-    CooldownPolicy, ResyncDecision, ResyncFailure, ResyncPolicy, TimeoutQuarantinePolicy,
+    BackoffPolicy, CooldownPolicy, ExponentialBackoff, ResyncDecision, ResyncFailure, ResyncPolicy,
+    TimeoutQuarantinePolicy,
 };

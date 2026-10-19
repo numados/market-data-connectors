@@ -40,13 +40,19 @@ pub async fn run_connection_task<S: StreamingSink>(
     cancel: CancellationToken,
     run_id: RunId,
     generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    policy_factory: crate::huobi::connector::ResyncPolicyFactory,
 ) -> Result<(), crate::sink_util::SinkError> {
     let mut sink = ConnectionSink::new(sink, run_id, connection_id)
         .with_generation_allocator(generation_allocator);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
-        .map(|(s, tag)| (s.clone(), SymbolFsm::new(s.clone(), *tag, &config)))
+        .map(|(s, tag)| {
+            (
+                s.clone(),
+                SymbolFsm::with_policy(s.clone(), *tag, &config, (policy_factory)()),
+            )
+        })
         .collect();
 
     let mut scratch = HuobiConnectionScratch::with_capacity(1_024);
