@@ -53,18 +53,26 @@ impl<S: StreamingSink> Connection<S> {
             exchange_ts: Some(UnixNanos::from_millis(header.depth.event_time_ms)),
             received_ts: crate::now_nanos(),
             connection_id: 1,
-            delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+            delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
             source_sequence: Some(header.depth.last_update_id),
         };
 
-        let _ = self.sink.begin_book(&ctx, BookKind::Delta);
+        if self.sink.begin_book(&ctx, BookKind::Delta).is_err() {
+            return;
+        }
         for level in &self.scratch.bids {
-            let _ = self.sink.level(Side::Bid, level.price, level.volume);
+            if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                return;
+            }
         }
         for level in &self.scratch.asks {
-            let _ = self.sink.level(Side::Ask, level.price, level.volume);
+            if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                return;
+            }
         }
         let range = SequenceRange::new(header.depth.first_update_id, header.depth.last_update_id);
-        let _ = self.sink.end_book(&ctx, Some(range));
+        if self.sink.end_book(&ctx, Some(range)).is_err() {
+            return;
+        }
     }
 }

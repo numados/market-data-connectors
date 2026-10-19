@@ -65,7 +65,7 @@ impl<S: StreamingSink> Connection<S> {
             exchange_ts: Some(UnixNanos::from_millis(header.obu.t)),
             received_ts: crate::now_nanos(),
             connection_id: 1,
-            delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+            delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
             source_sequence: Some(header.obu.last_id),
         };
 
@@ -74,19 +74,27 @@ impl<S: StreamingSink> Connection<S> {
         } else {
             BookKind::Delta
         };
-        let _ = self.sink.begin_book(&ctx, kind);
+        if self.sink.begin_book(&ctx, kind).is_err() {
+            return;
+        }
         for level in &self.scratch.bids {
-            let _ = self.sink.level(Side::Bid, level.price, level.volume);
+            if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                return;
+            }
         }
         for level in &self.scratch.asks {
-            let _ = self.sink.level(Side::Ask, level.price, level.volume);
+            if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                return;
+            }
         }
         let seq = if header.obu.full {
             None
         } else {
             Some(SequenceRange::new(header.obu.first_id, header.obu.last_id))
         };
-        let _ = self.sink.end_book(&ctx, seq);
+        if self.sink.end_book(&ctx, seq).is_err() {
+            return;
+        }
     }
 }
 

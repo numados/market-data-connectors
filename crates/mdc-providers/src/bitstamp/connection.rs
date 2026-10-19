@@ -1,6 +1,7 @@
 //! Bitstamp WebSocket per-connection worker task and protocol loop.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -68,8 +69,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
@@ -164,7 +167,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 fsm.trigger_resync(Instant::now());
             }
 
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Bitstamp,
                 sym,
                 *tag,
@@ -172,7 +175,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 crate::now_nanos(),
                 None,
                 IntegrityAlert::ResyncStarted,
-            );
+            ).is_err() {
+                break 'reconnect_loop;
+            }
 
             let sym_lower = sym.as_str().to_lowercase();
 
@@ -264,8 +269,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                     if let Some(task) = snapshot_task.take() {
                         task.abort();
                     }
-                    for (sym, tag) in &symbols {
-                        let _ = sink.emit_alert(
+                     for (sym, tag) in &symbols {
+                        sink.best_effort_emit_alert(
                             VenueId::Bitstamp,
                             sym,
                             *tag,
@@ -294,7 +299,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 "Silence watchdog timeout on Bitstamp feed; forcing reconnect"
                             );
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     sym,
                                     *tag,
@@ -302,8 +307,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     sym,
                                     *tag,
@@ -313,7 +320,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -332,7 +341,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 }
 
                                 let tag = symbol_tags.get(&sym).copied().unwrap_or_default();
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     &sym,
                                     tag,
@@ -340,7 +349,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::ResyncStarted,
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
 
                                 if !snapshot_queue.contains(&sym) {
                                     snapshot_queue.push_back(sym);
@@ -354,7 +365,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Pause) => {
                             info!(connection_id, "Operator paused Bitstamp connection");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                sink.best_effort_emit_alert(
                                     VenueId::Bitstamp,
                                     sym,
                                     *tag,
@@ -417,7 +428,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     break 'frame_loop;
                                 }
 
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     &sym,
                                     tag,
@@ -427,7 +438,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ResyncCompleted {
                                         last_update_id: None,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
 
                                 if let Some(fsm) = fsms.get_mut(&sym) {
                                     fsm.on_snapshot(snap.microtimestamp, now);
@@ -501,7 +514,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Err(e)) => {
                             warn!(connection_id, error = %e, "Bitstamp WebSocket stream error");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     sym,
                                     *tag,
@@ -511,14 +524,16 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::TransportError,
                                     },
-                                );
+                                ).is_err() {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
                         None => {
                             info!(connection_id, "Bitstamp WebSocket connection closed by peer");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitstamp,
                                     sym,
                                     *tag,
@@ -528,7 +543,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Closed,
                                     },
-                                );
+                                ).is_err() {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -546,7 +563,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     "Bitstamp server requested reconnect (bts:request_reconnect)"
                                 );
                                 for (sym, tag) in &symbols {
-                                    let _ = sink.emit_alert(
+                                    if sink.emit_alert(
                                         VenueId::Bitstamp,
                                         sym,
                                         *tag,
@@ -556,7 +573,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         IntegrityAlert::ConnectionLost {
                                             reason: DisconnectKind::VenueRequested,
                                         },
-                                    );
+                                    ).is_err() {
+                                        break;
+                                    }
                                 }
                                 break 'frame_loop;
                             }
@@ -589,7 +608,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 );
                                                 if fsm.state() != SyncState::AwaitingSnapshot {
                                                     let tag = symbol_tags.get(sym).copied().unwrap_or_default();
-                                                    let _ = sink.emit_alert(
+                                                    if sink.emit_alert(
                                                         VenueId::Bitstamp,
                                                         sym,
                                                         tag,
@@ -599,8 +618,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         IntegrityAlert::SourceError {
                                                             kind: SourceErrorKind::Parse,
                                                         },
-                                                    );
-                                                    let _ = sink.emit_alert(
+                                                    ).is_err() {
+                                                        break 'frame_loop;
+                                                    }
+                                                    if sink.emit_alert(
                                                         VenueId::Bitstamp,
                                                         sym,
                                                         tag,
@@ -608,7 +629,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         crate::now_nanos(),
                                                         None,
                                                         IntegrityAlert::ResyncStarted,
-                                                    );
+                                                    ).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                     fsm.trigger_resync(Instant::now());
                                                     if let Some(buf) = buffered_diffs.get_mut(sym) {
                                                         buf.clear();
@@ -701,17 +724,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Message::Close(_) => {
                             info!(connection_id, "Bitstamp close frame received");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
-                                    VenueId::Bitstamp,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::Closed,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Bitstamp,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::Closed,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -724,5 +752,11 @@ pub async fn run_connection_task<S: StreamingSink>(
         if sink.is_failed() {
             break 'reconnect_loop;
         }
+    }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
     }
 }

@@ -33,11 +33,9 @@ impl FrankfurterConnector {
         self,
         sink: S,
         cancel_token: CancellationToken,
-    ) -> (ConnectorHandle, tokio::task::JoinHandle<()>) {
-        let run_id = self.run_id.unwrap_or_else(|| {
-            let now = crate::now_nanos().0 as u128;
-            RunId::from_nanos(now)
-        });
+    ) -> (ConnectorHandle, tokio::task::JoinHandle<Result<(), mdc_core::MdcError>>) {
+        let run_id = self.run_id.unwrap_or_else(crate::generate_run_id);
+        let generation_allocator = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let handle = ConnectorHandle::new(cmd_tx);
 
@@ -47,19 +45,24 @@ impl FrankfurterConnector {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(venue = "frankfurter_ecb", error = %e, "failed to initialize REST client");
-                    return (handle, tokio::spawn(async {}));
+                    return (handle, tokio::spawn(async { Ok(()) }));
                 }
             },
         };
 
-        let join_handle = tokio::spawn(run_connection_task(
-            run_id,
-            self.config,
-            rest_client,
-            sink,
-            cmd_rx,
-            cancel_token,
-        ));
+        let join_handle = tokio::spawn(async move {
+            run_connection_task(
+                run_id,
+                self.config,
+                rest_client,
+                sink,
+                cmd_rx,
+                cancel_token,
+                generation_allocator,
+            )
+            .await
+            .map_err(|e| mdc_core::MdcError::Sink(Box::new(e)))
+        });
 
         (handle, join_handle)
     }

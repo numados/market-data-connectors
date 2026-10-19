@@ -128,10 +128,10 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
         )
         .map_err(|e| MdcError::Transport(Box::new(std::io::Error::other(e.to_string()))))?;
 
-        let run_id = self.run_id.unwrap_or_else(|| {
-            let now = crate::now_nanos().0 as u128;
-            RunId::from_nanos(now)
-        });
+        let run_id = self.run_id.unwrap_or_else(crate::generate_run_id);
+        let generation_allocator = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let total_connections = chunks.len();
+        let mut sink_failure_count = 0;
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             let connection_id = (i + 1) as u32;
@@ -139,6 +139,7 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
             let config = self.config.clone();
             let cancel_conn = cancel.clone();
             let rest = rest_client.clone();
+            let gen_alloc = generation_allocator.clone();
 
             let mut b_rx = broadcast_tx.subscribe();
             let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
@@ -175,8 +176,9 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
                     sink,
                     task_cmd_rx,
                     cancel_conn,
+                    gen_alloc,
                 )
-                .await;
+                .await
             });
         }
 
@@ -197,8 +199,14 @@ impl<S: StreamingSink + Clone + Send + 'static> BitstampConnector<S> {
                 }
                 res = conn_tasks.join_next() => {
                     match res {
-                        Some(Ok(())) => {
+                        Some(Ok(task_res)) => {
+                            if let Err(crate::sink_util::SinkError) = task_res {
+                                sink_failure_count += 1;
+                            }
                             if conn_tasks.is_empty() {
+                                if total_connections > 0 && sink_failure_count == total_connections {
+                                    result = Err(MdcError::Sink(Box::new(crate::sink_util::SinkError)));
+                                }
                                 break;
                             }
                         }

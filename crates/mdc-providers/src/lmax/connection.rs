@@ -45,8 +45,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     sink: S,
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let mut scratch = LmaxConnectionScratch::with_capacity(512);
 
@@ -137,7 +139,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Emit ResyncStarted for each symbol upon fresh connection
         for (sym, tag) in &symbols {
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Lmax,
                 sym,
                 *tag,
@@ -145,7 +147,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 crate::now_nanos(),
                 None,
                 IntegrityAlert::ResyncStarted,
-            );
+            ).is_err() {
+                break 'reconnect_loop;
+            }
             awaiting_first_snapshot.insert(sym.clone());
         }
 
@@ -190,7 +194,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        let _ = sink.emit_alert(
+                        sink.best_effort_emit_alert(
                             VenueId::Lmax,
                             sym,
                             *tag,
@@ -222,7 +226,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 "Silence watchdog timeout on LMAX connection; reconnecting"
                             );
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -230,8 +234,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -241,7 +247,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -278,7 +286,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                     match cmd_opt {
                         Some(Command::ResyncSymbol(sym)) => {
                             if let Some(tag) = symbol_tags.get(&sym) {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     &sym,
                                     *tag,
@@ -286,7 +294,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::ResyncStarted,
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                                 awaiting_first_snapshot.insert(sym.clone());
 
                                 if !pending_resync_symbols.contains(&sym) {
@@ -305,7 +315,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Pause) => {
                             info!(connection_id, "Operator paused LMAX connection");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -315,7 +325,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Paused,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             let _ = ws_tx.close().await;
                             is_paused = true;
@@ -335,7 +347,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Err(e)) => {
                             warn!(connection_id, error = %e, "LMAX WebSocket stream error");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -345,14 +357,16 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::TransportError,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             break 'frame_loop;
                         }
                         None => {
                             info!(connection_id, "LMAX WebSocket closed by peer");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -362,7 +376,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Closed,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -418,8 +434,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         }
 
                                         // Complete resync lifecycle if awaiting initial snapshot
-                                        if awaiting_first_snapshot.remove(sym) {
-                                            let _ = sink.emit_alert(
+                                        if awaiting_first_snapshot.remove(sym)
+                                            && sink.emit_alert(
                                                 VenueId::Lmax,
                                                 sym,
                                                 tag,
@@ -429,7 +445,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 IntegrityAlert::ResyncCompleted {
                                                     last_update_id: None,
                                                 },
-                                            );
+                                            ).is_err()
+                                        {
+                                            break 'frame_loop;
                                         }
                                     }
                                 }
@@ -492,7 +510,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Message::Close(_) => {
                             info!(connection_id, "LMAX close frame received");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Lmax,
                                     sym,
                                     *tag,
@@ -502,7 +520,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Closed,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -515,5 +535,11 @@ pub async fn run_connection_task<S: StreamingSink>(
         if sink.is_failed() {
             break 'reconnect_loop;
         }
+    }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
     }
 }

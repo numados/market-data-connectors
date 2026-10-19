@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use mdc_core::MdcError;
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
 use mdc_core::model::{
-    DisconnectKind, IntegrityAlert, RunId, Symbol, SymbolTag, UnixNanos, VenueId,
+    DisconnectKind, IntegrityAlert, Symbol, SymbolTag, UnixNanos, VenueId,
 };
 use mdc_core::sink::{BookKind, RawLevelText, StreamingSink};
 use tokio::sync::mpsc;
@@ -62,10 +62,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
 ) -> Result<(), MdcError> {
-    let run_id = config.run_id.unwrap_or_else(|| {
-        let now = crate::now_nanos().0 as u128;
-        RunId::from_nanos(now)
-    });
+    let run_id = config.run_id.unwrap_or_else(crate::generate_run_id);
     let mut connection_id: u32 = 0;
     let mut reconnect_attempt: u32 = 0;
 
@@ -238,7 +235,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
                     info!(connection_id, "Bitfinex connection worker cancelled");
                     for sym in &symbol_list {
                         let tag = *tag_map.get(sym).unwrap_or(&0);
-                        let _ = sink.emit_alert(
+                        sink.best_effort_emit_alert(
                             VenueId::Bitfinex,
                             sym,
                             tag,
@@ -335,7 +332,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
                             let elapsed_ms = silent_for.as_millis() as u64;
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitfinex,
                                     sym,
                                     tag,
@@ -343,8 +340,10 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Bitfinex,
                                     sym,
                                     tag,
@@ -354,7 +353,9 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break;
+                                }
                             }
                             break 'message_loop;
                         }
@@ -379,7 +380,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 PollOutcome::TimeoutQuarantined { until } => {
                                     warn!(connection_id, %sym, ?until, "Symbol snapshot timed out, entering quarantine");
                                     let tag = *tag_map.get(sym).unwrap_or(&0);
-                                    let _ = sink.emit_alert(
+                                    if sink.emit_alert(
                                         VenueId::Bitfinex,
                                         sym,
                                         tag,
@@ -389,7 +390,9 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                         IntegrityAlert::Quarantined {
                                             retry_in_ms: 30_000,
                                         },
-                                    );
+                                    ).is_err() {
+                                        break 'message_loop;
+                                    }
                                 }
                                 PollOutcome::QuarantineExpiredTriggerResubscribe => {
                                     info!(connection_id, %sym, "Quarantine expired, re-attempting subscribe");
@@ -417,7 +420,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
                             }
 
                             let tag = *tag_map.get(&sym).unwrap_or(&0);
-                            let _ = sink.emit_alert(
+                            if sink.emit_alert(
                                 VenueId::Bitfinex,
                                 &sym,
                                 tag,
@@ -425,7 +428,9 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 crate::now_nanos(),
                                 None,
                                 IntegrityAlert::ResyncStarted,
-                            );
+                            ).is_err() {
+                                break 'message_loop;
+                            }
 
                             let sub_msg = build_book_subscribe(sym.as_str(), config.orderbook_depth);
                             if let Err(e) = ws_stream.send(Message::Text(sub_msg)).await {
@@ -551,6 +556,10 @@ pub async fn run_connection_loop<S: StreamingSink>(
         if sink.is_failed() {
             break 'reconnect_loop;
         }
+    }
+
+    if sink.is_failed() {
+        return Err(MdcError::Sink(Box::new(crate::sink_util::SinkError)));
     }
 
     Ok(())
@@ -685,7 +694,7 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     "Bitfinex CRC32 checksum mismatch; triggering channel resubscribe"
                                 );
 
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitfinex,
                                     &sym,
                                     tag,
@@ -696,13 +705,15 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                         expected: expected as u32,
                                         calculated: calculated as u32,
                                     },
-                                );
+                                ).is_err() {
+                                    return Err(true);
+                                }
 
                                 if let Some(fsm) = fsms.get_mut(&sym) {
                                     fsm.on_checksum_mismatch(Instant::now());
                                 }
 
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Bitfinex,
                                     &sym,
                                     tag,
@@ -710,7 +721,9 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     received_ts,
                                     None,
                                     IntegrityAlert::ResyncStarted,
-                                );
+                                ).is_err() {
+                                    return Err(true);
+                                }
 
                                 // Resubscribe channel in-place
                                 let un_msg = build_unsubscribe(chan_id);
@@ -769,7 +782,7 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
 
                             // ResyncCompleted must be emitted strictly AFTER begin_book and end_book,
                             // consuming a fresh monotonic delivery ordinal.
-                            let _ = sink.emit_alert(
+                            if sink.emit_alert(
                                 VenueId::Bitfinex,
                                 &sym,
                                 tag,
@@ -779,7 +792,9 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                 IntegrityAlert::ResyncCompleted {
                                     last_update_id: None,
                                 },
-                            );
+                            ).is_err() {
+                                return Err(true);
+                            }
                         } else if sink.is_failed() {
                             return Err(true);
                         }
@@ -801,17 +816,19 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                             None,
                         );
 
-                        if sink.begin_book(&ctx, BookKind::Delta).is_ok() {
-                            if let Ok((side, pl)) = normalize_book_level(&level) {
-                                let raw_text = RawLevelText {
-                                    price: level.price_str(),
-                                    volume: level.amount_str(),
-                                };
-                                let _ = sink.level_raw(side, pl.price, pl.volume, raw_text);
-                            }
-                            let _ = sink.end_book(&ctx, None);
+                        if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                            return Err(true);
                         }
-                        if sink.is_failed() {
+                        if let Ok((side, pl)) = normalize_book_level(&level) {
+                            let raw_text = RawLevelText {
+                                price: level.price_str(),
+                                volume: level.amount_str(),
+                            };
+                            if sink.level_raw(side, pl.price, pl.volume, raw_text).is_err() {
+                                return Err(true);
+                            }
+                        }
+                        if sink.end_book(&ctx, None).is_err() {
                             return Err(true);
                         }
                     } else {
@@ -837,8 +854,7 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                 received_ts,
                                 None,
                             );
-                            let _ = sink.trade(&ctx, &t);
-                            if sink.is_failed() {
+                            if sink.trade(&ctx, &t).is_err() {
                                 return Err(true);
                             }
                         }
@@ -865,8 +881,7 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                         received_ts,
                                         None,
                                     );
-                                    let _ = sink.trade(&ctx, &t);
-                                    if sink.is_failed() {
+                                    if sink.trade(&ctx, &t).is_err() {
                                         return Err(true);
                                     }
                                 }

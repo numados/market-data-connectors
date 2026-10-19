@@ -71,12 +71,14 @@ impl<S: StreamingSink> Connection<S> {
                 exchange_ts: Some(item.exchange_ts),
                 received_ts: now,
                 connection_id: 1,
-                delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+                delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
                 source_sequence: None,
             };
 
             let rate = ReferenceRate::new(item.mid);
-            let _ = self.sink.reference_rate(&ctx, &rate);
+            if self.sink.reference_rate(&ctx, &rate).is_err() {
+                return;
+            }
         }
     }
 }

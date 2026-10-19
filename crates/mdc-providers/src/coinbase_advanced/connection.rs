@@ -1,5 +1,6 @@
 //! Connection driver and WebSocket lifecycle management for Coinbase Advanced Trade.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -42,8 +43,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     run_id: RunId,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let mut fsm = CoinbaseAdvancedFsm::new(symbols.clone(), config.resync_timeout)
         .with_reset_threshold(config.reset_threshold);
@@ -283,17 +286,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Pause) => {
                             info!(connection_id, "Operator paused connector; invalidating books and halting connection");
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
-                                    VenueId::CoinbaseAdvanced,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::Paused,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::CoinbaseAdvanced,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::Paused,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
                             let _ = ws_tx.close().await;
                             is_paused = true;
@@ -326,26 +334,36 @@ pub async fn run_connection_task<S: StreamingSink>(
                             );
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
-                                    VenueId::CoinbaseAdvanced,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
-                                    VenueId::CoinbaseAdvanced,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::SilenceTimeout,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::CoinbaseAdvanced,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if sink
+                                    .emit_alert(
+                                        VenueId::CoinbaseAdvanced,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::SilenceTimeout,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -656,7 +674,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         }
 
                                         if let Some(completed_alert) = fsm.on_snapshot(sym) {
-                                            let _ = sink.emit_alert(
+                                            if sink.emit_alert(
                                                 VenueId::CoinbaseAdvanced,
                                                 sym,
                                                 tag,
@@ -664,7 +682,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 crate::now_nanos(),
                                                 None,
                                                 completed_alert,
-                                            );
+                                            ).is_err() {
+                                                continue 'frame_loop;
+                                            }
                                         }
                                     }
 
@@ -692,7 +712,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     continue 'frame_loop;
                                                 }
                                             }
-                                            let _ = sink.end_book(&ctx, None);
+                                            if sink.end_book(&ctx, None).is_err() {
+                                                continue 'frame_loop;
+                                            }
                                         } else {
                                             debug!(connection_id, symbol = %sym, "L2 update dropped while awaiting snapshot");
                                         }
@@ -743,7 +765,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         // Emit ConnectionLost when socket breaks (if not cleanly paused)
         if !is_paused && !sink.is_failed() {
             for (sym, tag) in &symbols {
-                let _ = sink.emit_alert(
+                sink.best_effort_emit_alert(
                     VenueId::CoinbaseAdvanced,
                     sym,
                     *tag,
@@ -763,7 +785,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
     if cancel.is_cancelled() && !sink.is_failed() {
         for (sym, tag) in &symbols {
-            let _ = sink.emit_alert(
+            sink.best_effort_emit_alert(
                 VenueId::CoinbaseAdvanced,
                 sym,
                 *tag,
@@ -775,5 +797,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                 },
             );
         }
+    }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
     }
 }

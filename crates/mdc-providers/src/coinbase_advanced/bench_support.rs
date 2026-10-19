@@ -62,30 +62,46 @@ impl<S: StreamingSink> Connection<S> {
                 exchange_ts,
                 received_ts: crate::now_nanos(),
                 connection_id: 1,
-                delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+                delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
                 source_sequence: header.sequence_num,
             };
 
             match ev.kind {
                 L2EventKind::Snapshot => {
-                    let _ = self.sink.begin_book(&ctx, BookKind::Snapshot);
+                    if self.sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                        return;
+                    }
                     for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        let _ = self.sink.level(Side::Bid, level.price, level.volume);
+                        if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                            return;
+                        }
                     }
                     for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        let _ = self.sink.level(Side::Ask, level.price, level.volume);
+                        if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                            return;
+                        }
                     }
-                    let _ = self.sink.end_book(&ctx, None);
+                    if self.sink.end_book(&ctx, None).is_err() {
+                        return;
+                    }
                 }
                 L2EventKind::Update => {
-                    let _ = self.sink.begin_book(&ctx, BookKind::Delta);
+                    if self.sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                        return;
+                    }
                     for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        let _ = self.sink.level(Side::Bid, level.price, level.volume);
+                        if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                            return;
+                        }
                     }
                     for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        let _ = self.sink.level(Side::Ask, level.price, level.volume);
+                        if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                            return;
+                        }
                     }
-                    let _ = self.sink.end_book(&ctx, None);
+                    if self.sink.end_book(&ctx, None).is_err() {
+                        return;
+                    }
                 }
             }
         }

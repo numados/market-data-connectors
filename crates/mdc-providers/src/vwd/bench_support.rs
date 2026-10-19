@@ -69,18 +69,30 @@ impl<S: StreamingSink> Connection<S> {
                     exchange_ts: norm.exchange_ts,
                     received_ts: now,
                     connection_id: 1,
-                    delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+                    delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
                     source_sequence: None,
                 };
 
-                let _ = self.sink.begin_book(&ctx, BookKind::Snapshot);
-                let _ = self
+                if self.sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                    return;
+                }
+                if self
                     .sink
-                    .level(Side::Bid, norm.bid, self.config.indicative_size);
-                let _ = self
+                    .level(Side::Bid, norm.bid, self.config.indicative_size)
+                    .is_err()
+                {
+                    return;
+                }
+                if self
                     .sink
-                    .level(Side::Ask, norm.ask, self.config.indicative_size);
-                let _ = self.sink.end_book(&ctx, None);
+                    .level(Side::Ask, norm.ask, self.config.indicative_size)
+                    .is_err()
+                {
+                    return;
+                }
+                if self.sink.end_book(&ctx, None).is_err() {
+                    return;
+                }
             }
         }
     }

@@ -58,7 +58,7 @@ impl<S: StreamingSink> Connection<S> {
             exchange_ts,
             received_ts: crate::now_nanos(),
             connection_id: 1,
-            delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+            delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
             source_sequence: None,
         };
 
@@ -72,9 +72,11 @@ impl<S: StreamingSink> Connection<S> {
             BookKind::Delta
         };
 
-        let _ = self.sink.begin_book(&ctx, kind);
+        if self.sink.begin_book(&ctx, kind).is_err() {
+            return;
+        }
         for raw in &self.scratch.bids {
-            let _ = self.sink.level_raw(
+            if self.sink.level_raw(
                 Side::Bid,
                 raw.price,
                 raw.volume,
@@ -82,10 +84,12 @@ impl<S: StreamingSink> Connection<S> {
                     price: raw.price_raw.as_str(),
                     volume: raw.volume_raw.as_str(),
                 },
-            );
+            ).is_err() {
+                return;
+            }
         }
         for raw in &self.scratch.asks {
-            let _ = self.sink.level_raw(
+            if self.sink.level_raw(
                 Side::Ask,
                 raw.price,
                 raw.volume,
@@ -93,9 +97,13 @@ impl<S: StreamingSink> Connection<S> {
                     price: raw.price_raw.as_str(),
                     volume: raw.volume_raw.as_str(),
                 },
-            );
+            ).is_err() {
+                return;
+            }
         }
-        let _ = self.sink.end_book(&ctx, None);
+        if self.sink.end_book(&ctx, None).is_err() {
+            return;
+        }
     }
 
     /// Returns a reference to the local shadow book.

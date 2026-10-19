@@ -38,16 +38,18 @@ pub async fn run_connection_task<S: StreamingSink>(
     sink: S,
     mut cmd_rx: mpsc::Receiver<Command>,
     cancel_token: CancellationToken,
-) {
+    generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
     let client = match VwdRestClient::new(&config) {
         Ok(c) => c,
         Err(e) => {
             warn!(venue = "vwd", error = %e, "failed to initialize REST client");
-            return;
+            return Ok(());
         }
     };
 
-    let mut sink = ConnectionSink::new(sink, run_id, 1);
+    let mut sink = ConnectionSink::new(sink, run_id, 1)
+        .with_generation_allocator(generation_allocator);
     let mut paused = false;
     let mut scratch = VwdScratch::with_capacity(32);
     let mut stale_map: HashMap<Symbol, bool> = HashMap::new();
@@ -68,7 +70,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             _ = cancel_token.cancelled() => {
                 debug!(venue = "vwd", "polling task cancelled");
                 for sym in &config.symbols {
-                    let _ = sink.emit_alert(
+                    sink.best_effort_emit_alert(
                         VenueId::Vwd,
                         &sym.symbol,
                         SymbolTag::default(),
@@ -99,7 +101,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         debug!(venue = "vwd", "polling task paused");
                         paused = true;
                         for sym in &config.symbols {
-                            let _ = sink.emit_alert(
+                            if sink.emit_alert(
                                 VenueId::Vwd,
                                 &sym.symbol,
                                 SymbolTag::default(),
@@ -109,7 +111,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 IntegrityAlert::ConnectionLost {
                                     reason: DisconnectKind::Paused,
                                 },
-                            );
+                            ).is_err() {
+                                break;
+                            }
                             stale_map.insert(sym.symbol.clone(), true);
                         }
                     }
@@ -143,6 +147,12 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         }
     }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
+    }
 }
 
 async fn execute_poll_cycle<S: StreamingSink>(
@@ -162,7 +172,7 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Err(err_kind) => {
             // Transport or HTTP status failure affects ALL symbols
             for sym in &config.symbols {
-                let _ = sink.emit_alert(
+                if sink.emit_alert(
                     VenueId::Vwd,
                     &sym.symbol,
                     SymbolTag::default(),
@@ -170,7 +180,9 @@ async fn execute_poll_cycle<S: StreamingSink>(
                     crate::now_nanos(),
                     None,
                     IntegrityAlert::SourceError { kind: err_kind },
-                );
+                ).is_err() {
+                    return;
+                }
                 stale_map.insert(sym.symbol.clone(), true);
             }
             return;
@@ -181,7 +193,7 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Ok(s) => s,
         Err(_) => {
             for sym in &config.symbols {
-                let _ = sink.emit_alert(
+                if sink.emit_alert(
                     VenueId::Vwd,
                     &sym.symbol,
                     SymbolTag::default(),
@@ -191,7 +203,9 @@ async fn execute_poll_cycle<S: StreamingSink>(
                     IntegrityAlert::SourceError {
                         kind: SourceErrorKind::Parse,
                     },
-                );
+                ).is_err() {
+                    return;
+                }
                 stale_map.insert(sym.symbol.clone(), true);
             }
             return;
@@ -204,7 +218,7 @@ async fn execute_poll_cycle<S: StreamingSink>(
         .is_err()
     {
         for sym in &config.symbols {
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Vwd,
                 &sym.symbol,
                 SymbolTag::default(),
@@ -214,7 +228,9 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 IntegrityAlert::SourceError {
                     kind: SourceErrorKind::Parse,
                 },
-            );
+            ).is_err() {
+                return;
+            }
             stale_map.insert(sym.symbol.clone(), true);
         }
         return;
@@ -222,7 +238,7 @@ async fn execute_poll_cycle<S: StreamingSink>(
 
     if scratch.quotes.is_empty() {
         for sym in &config.symbols {
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Vwd,
                 &sym.symbol,
                 SymbolTag::default(),
@@ -232,7 +248,9 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 IntegrityAlert::SourceError {
                     kind: SourceErrorKind::MissingQuote,
                 },
-            );
+            ).is_err() {
+                return;
+            }
             stale_map.insert(sym.symbol.clone(), true);
         }
         return;
@@ -252,10 +270,18 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 );
 
                 // Emit full L2Snapshot
-                let _ = sink.begin_book(&ctx, BookKind::Snapshot);
-                let _ = sink.level(Side::Bid, norm.bid, config.indicative_size);
-                let _ = sink.level(Side::Ask, norm.ask, config.indicative_size);
-                let _ = sink.end_book(&ctx, None);
+                if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                    return;
+                }
+                if sink.level(Side::Bid, norm.bid, config.indicative_size).is_err() {
+                    return;
+                }
+                if sink.level(Side::Ask, norm.ask, config.indicative_size).is_err() {
+                    return;
+                }
+                if sink.end_book(&ctx, None).is_err() {
+                    return;
+                }
 
                 if config.emit_book_ticker {
                     let ticker = BookTicker::new(
@@ -263,13 +289,15 @@ async fn execute_poll_cycle<S: StreamingSink>(
                         PriceLevel::new(norm.ask, config.indicative_size),
                         None,
                     );
-                    let _ = sink.book_ticker(&ctx, &ticker);
+                    if sink.book_ticker(&ctx, &ticker).is_err() {
+                        return;
+                    }
                 }
 
                 // If symbol was stale, emit ResyncCompleted alert
                 let was_stale = stale_map.get(&sym.symbol).copied().unwrap_or(true);
                 if was_stale {
-                    let _ = sink.emit_alert(
+                    if sink.emit_alert(
                         VenueId::Vwd,
                         &sym.symbol,
                         SymbolTag::default(),
@@ -279,12 +307,14 @@ async fn execute_poll_cycle<S: StreamingSink>(
                         IntegrityAlert::ResyncCompleted {
                             last_update_id: None,
                         },
-                    );
+                    ).is_err() {
+                        return;
+                    }
                     stale_map.insert(sym.symbol.clone(), false);
                 }
             }
             Err(err_kind) => {
-                let _ = sink.emit_alert(
+                if sink.emit_alert(
                     VenueId::Vwd,
                     &sym.symbol,
                     SymbolTag::default(),
@@ -292,7 +322,9 @@ async fn execute_poll_cycle<S: StreamingSink>(
                     poll_resp.received_ts,
                     None,
                     IntegrityAlert::SourceError { kind: err_kind },
-                );
+                ).is_err() {
+                    return;
+                }
                 stale_map.insert(sym.symbol.clone(), true);
             }
         }

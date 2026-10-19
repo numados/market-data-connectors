@@ -7,6 +7,9 @@ use mdc_core::{
 use rust_decimal::Decimal;
 use tracing::warn;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 /// Error indicating that the downstream streaming sink failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("Downstream streaming sink failed")]
@@ -21,6 +24,7 @@ pub struct ConnectionSink<S> {
     connection_generation: u64,
     delivery_ordinal: u64,
     failed: bool,
+    generation_allocator: Option<Arc<AtomicU64>>,
     active_venue: Option<VenueId>,
     active_symbol: Option<Symbol>,
     active_tag: SymbolTag,
@@ -40,6 +44,7 @@ impl<S: StreamingSink> ConnectionSink<S> {
             connection_generation: 0,
             delivery_ordinal: 0,
             failed: false,
+            generation_allocator: None,
             active_venue: None,
             active_symbol: None,
             active_tag: SymbolTag::default(),
@@ -49,9 +54,19 @@ impl<S: StreamingSink> ConnectionSink<S> {
         }
     }
 
+    /// Injects a run-scoped generation allocator shared across all connections/buckets.
+    pub fn with_generation_allocator(mut self, alloc: Arc<AtomicU64>) -> Self {
+        self.generation_allocator = Some(alloc);
+        self
+    }
+
     /// Increments the connection generation on each physical socket (re)connection.
     pub fn next_generation(&mut self) {
-        self.connection_generation = self.connection_generation.saturating_add(1);
+        if let Some(alloc) = &self.generation_allocator {
+            self.connection_generation = alloc.fetch_add(1, Ordering::Relaxed) + 1;
+        } else {
+            self.connection_generation = self.connection_generation.saturating_add(1);
+        }
     }
 
     /// Returns the current connection generation.
@@ -77,11 +92,45 @@ impl<S: StreamingSink> ConnectionSink<S> {
     /// Returns the next monotonic delivery stamp for this connection.
     pub fn next_stamp(&mut self) -> DeliveryStamp {
         self.delivery_ordinal = self.delivery_ordinal.saturating_add(1);
-        DeliveryStamp::new(
+        DeliveryStamp::with_connection_id(
             self.run_id,
+            self.connection_id,
             self.connection_generation,
             self.delivery_ordinal,
         )
+    }
+
+    /// Best-effort discard helper for alert emissions on teardown paths.
+    ///
+    /// This is the sole permitted best-effort discard on sink emissions.
+    pub fn best_effort_alert(&mut self, ctx: &EventContext<'_>, alert: IntegrityAlert) {
+        let _ = self.sink.alert(ctx, alert);
+    }
+
+    /// Best-effort alert emission with context generation for teardown paths.
+    #[allow(clippy::too_many_arguments)]
+    pub fn best_effort_emit_alert(
+        &mut self,
+        venue: VenueId,
+        symbol: &Symbol,
+        tag: SymbolTag,
+        exchange_ts: Option<UnixNanos>,
+        received_ts: UnixNanos,
+        source_sequence: Option<u64>,
+        alert: IntegrityAlert,
+    ) {
+        if self.failed {
+            return;
+        }
+        let ctx = self.next_context(
+            venue,
+            symbol,
+            tag,
+            exchange_ts,
+            received_ts,
+            source_sequence,
+        );
+        self.best_effort_alert(&ctx, alert);
     }
 
     /// Constructs an [`EventContext`] with a fresh monotonic delivery stamp.
@@ -128,7 +177,7 @@ impl<S: StreamingSink> ConnectionSink<S> {
                 delivery,
                 source_sequence: self.active_source_sequence,
             };
-            let _ = self.sink.alert(&fail_ctx, IntegrityAlert::SinkFailure);
+            self.best_effort_alert(&fail_ctx, IntegrityAlert::SinkFailure);
         }
     }
 
@@ -282,17 +331,29 @@ impl<S: StreamingSink> ConnectionSink<S> {
         if self.failed {
             return Err(SinkError);
         }
+        self.active_venue = Some(ctx.venue);
+        self.active_symbol = Some(ctx.symbol.clone());
+        self.active_tag = ctx.tag;
+        self.active_exchange_ts = ctx.exchange_ts;
+        self.active_received_ts = Some(ctx.received_ts);
+        self.active_source_sequence = ctx.source_sequence;
+
         if let Err(e) = self.sink.alert(ctx, alert) {
-            self.failed = true;
-            warn!(
-                connection_id = self.connection_id,
-                generation = self.connection_generation,
-                alert = ?alert,
-                error = %e,
-                "Downstream streaming sink failed on alert emission"
-            );
+            if alert != IntegrityAlert::SinkFailure {
+                self.handle_sink_error(&e, "alert");
+            } else {
+                self.failed = true;
+                warn!(
+                    connection_id = self.connection_id,
+                    generation = self.connection_generation,
+                    alert = ?alert,
+                    error = %e,
+                    "Downstream streaming sink failed on terminal SinkFailure alert emission"
+                );
+            }
             return Err(SinkError);
         }
+        self.active_symbol = None;
         Ok(())
     }
 
@@ -438,5 +499,67 @@ mod tests {
         // SinkFailure was emitted in-band
         let alerts = fault_sink.alerts();
         assert!(alerts.contains(&IntegrityAlert::SinkFailure));
+    }
+
+    #[test]
+    fn test_fail_closed_on_alert_error() {
+        let sym = Symbol::from("BTCUSDT");
+        let run_id = RunId::from_u128(1);
+        let fault_sink = FaultInjectingSink::new(FaultInjectionPoint::Alert);
+        let mut conn_sink = ConnectionSink::new(fault_sink.clone(), run_id, 1);
+        conn_sink.next_generation();
+
+        let ctx = conn_sink.next_context(
+            VenueId::Binance,
+            &sym,
+            SymbolTag::default(),
+            None,
+            UnixNanos(1),
+            None,
+        );
+
+        // Initial alert trips the fault point and triggers handle_sink_error with terminal SinkFailure
+        let err = conn_sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+        assert!(err.is_err());
+        assert!(conn_sink.is_failed());
+
+        // Terminal SinkFailure was emitted in-band
+        let alerts = fault_sink.alerts();
+        assert!(alerts.contains(&IntegrityAlert::SinkFailure));
+
+        // Subsequent operations fail immediately
+        assert!(conn_sink.begin_book(&ctx, BookKind::Snapshot).is_err());
+        assert!(conn_sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).is_err());
+    }
+
+    #[test]
+    fn test_run_scoped_generation_allocator() {
+        let gen_alloc = Arc::new(AtomicU64::new(0));
+        let run_id = RunId::from_u128(42);
+        let fault_sink = FaultInjectingSink::new(FaultInjectionPoint::Never);
+
+        let mut sink1 = ConnectionSink::new(fault_sink.clone(), run_id, 1)
+            .with_generation_allocator(gen_alloc.clone());
+        let mut sink2 = ConnectionSink::new(fault_sink.clone(), run_id, 2)
+            .with_generation_allocator(gen_alloc.clone());
+
+        sink1.next_generation();
+        assert_eq!(sink1.generation(), 1);
+
+        sink2.next_generation();
+        assert_eq!(sink2.generation(), 2);
+
+        sink1.next_generation();
+        assert_eq!(sink1.generation(), 3);
+
+        let stamp1 = sink1.next_stamp();
+        assert_eq!(stamp1.connection_id, 1);
+        assert_eq!(stamp1.connection_generation, 3);
+        assert_eq!(stamp1.ordinal, 1);
+
+        let stamp2 = sink2.next_stamp();
+        assert_eq!(stamp2.connection_id, 2);
+        assert_eq!(stamp2.connection_generation, 2);
+        assert_eq!(stamp2.ordinal, 1);
     }
 }

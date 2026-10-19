@@ -96,10 +96,8 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
 
     /// Runs the connector until cancelled.
     pub async fn run(self, cancel: CancellationToken) -> Result<(), MdcError> {
-        let run_id = self.run_id.unwrap_or_else(|| {
-            let now = crate::now_nanos().0 as u128;
-            RunId::from_nanos(now)
-        });
+        let run_id = self.run_id.unwrap_or_else(crate::generate_run_id);
+        let generation_allocator = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut conn_tasks = JoinSet::new();
         let mut aux_tasks = JoinSet::new();
         let chunks: Vec<Vec<(Symbol, SymbolTag)>> = self
@@ -107,6 +105,8 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
             .chunks(self.config.symbols_per_connection)
             .map(<[(Symbol, SymbolTag)]>::to_vec)
             .collect();
+        let total_connections = chunks.len();
+        let mut sink_failure_count = 0;
 
         // Forward commands to connection tasks if multiple buckets exist
         let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Command>(32);
@@ -137,6 +137,7 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
             let rest_client = self.rest_client.clone();
             let cancel_conn = cancel.clone();
             let policy_factory = self.resync_policy_factory.clone();
+            let gen_alloc = generation_allocator.clone();
 
             let mut b_rx = broadcast_tx.subscribe();
             let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
@@ -174,8 +175,9 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
                     cancel_conn,
                     run_id,
                     policy_factory,
+                    gen_alloc,
                 )
-                .await;
+                .await
             });
         }
 
@@ -196,8 +198,14 @@ impl<S: StreamingSink + Clone> BinanceConnector<S> {
                 }
                 res = conn_tasks.join_next() => {
                     match res {
-                        Some(Ok(())) => {
+                        Some(Ok(task_res)) => {
+                            if let Err(crate::sink_util::SinkError) = task_res {
+                                sink_failure_count += 1;
+                            }
                             if conn_tasks.is_empty() {
+                                if total_connections > 0 && sink_failure_count == total_connections {
+                                    result = Err(MdcError::Sink(Box::new(crate::sink_util::SinkError)));
+                                }
                                 break;
                             }
                         }

@@ -1,6 +1,7 @@
 //! Coinbase Exchange WebSocket connection worker task.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
@@ -75,8 +76,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     run_id: RunId,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let tag_map: HashMap<Symbol, SymbolTag> = symbols.iter().cloned().collect();
     let symbol_list: Vec<Symbol> = symbols.iter().map(|(s, _)| s.clone()).collect();
@@ -220,7 +223,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             info!(connection_id, "Pausing Coinbase connector");
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Coinbase,
                                     sym,
                                     tag,
@@ -230,7 +233,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Paused,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
                             }
                             let _ = ws_stream.close(None).await;
                             is_paused = true;
@@ -334,7 +339,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Coinbase,
                                     sym,
                                     tag,
@@ -342,8 +347,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Coinbase,
                                     sym,
                                     tag,
@@ -353,7 +360,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
                             }
                             break 'message_loop;
                         }
@@ -518,7 +527,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 continue 'message_loop;
                                             }
 
-                                            let _ = sink.emit_alert(
+                                            if sink.emit_alert(
                                                 VenueId::Coinbase,
                                                 sym,
                                                 tag,
@@ -526,7 +535,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 crate::now_nanos(),
                                                 None,
                                                 IntegrityAlert::ResyncCompleted { last_update_id: None },
-                                            );
+                                            ).is_err() {
+                                                continue 'message_loop;
+                                            }
                                         }
                                     }
                                 }
@@ -558,7 +569,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         continue 'message_loop;
                                                     }
                                                 }
-                                                let _ = sink.end_book(&ctx, None);
+                                                if sink.end_book(&ctx, None).is_err() {
+                                                    continue 'message_loop;
+                                                }
                                             } else {
                                                 debug!(symbol = %sym, "Dropping l2update for out-of-sync symbol");
                                             }
@@ -719,7 +732,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         if !sink.is_failed() {
             for sym in &symbol_list {
                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                let _ = sink.emit_alert(
+                sink.best_effort_emit_alert(
                     VenueId::Coinbase,
                     sym,
                     tag,
@@ -735,4 +748,9 @@ pub async fn run_connection_task<S: StreamingSink>(
     }
 
     info!(connection_id, "Coinbase connection worker task exited");
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
+    }
 }

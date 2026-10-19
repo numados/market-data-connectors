@@ -39,8 +39,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     run_id: RunId,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let mut fsms: HashMap<Symbol, SymbolFsm> = symbols
         .iter()
@@ -122,7 +124,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
             pending_snapshots.push_back(sym.clone());
 
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Huobi,
                 sym,
                 *tag,
@@ -130,7 +132,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                 crate::now_nanos(),
                 None,
                 IntegrityAlert::ResyncStarted,
-            );
+            ).is_err() {
+                break 'reconnect_loop;
+            }
         }
 
         // Send initial subscriptions
@@ -188,7 +192,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        let _ = sink.emit_alert(
+                        sink.best_effort_emit_alert(
                             VenueId::Huobi,
                             sym,
                             *tag,
@@ -208,7 +212,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::ResyncSymbol(sym)) => {
                             if let Some(fsm) = fsms.get_mut(&sym) {
                                 let alert = fsm.trigger_resync(Instant::now());
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Huobi,
                                     &sym,
                                     fsm.tag(),
@@ -216,7 +220,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     alert,
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                                 if !pending_snapshots.contains(&sym) {
                                     pending_snapshots.push_back(sym);
                                 }
@@ -238,7 +244,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Pause) => {
                             is_paused = true;
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Huobi,
                                     sym,
                                     *tag,
@@ -248,7 +254,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Paused,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -271,7 +279,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         WatchdogAction::Reconnect { silent_for } => {
                             let elapsed_ms = silent_for.as_millis() as u64;
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Huobi,
                                     sym,
                                     *tag,
@@ -279,8 +287,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Huobi,
                                     sym,
                                     *tag,
@@ -290,7 +300,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
                             }
                             warn!(
                                 connection_id,
@@ -450,14 +462,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                     received_ts,
                                                                     Some(header.seq_num),
                                                                 );
-                                                                let _ = sink.begin_book(&snap_ctx, BookKind::Snapshot);
+                                                                if sink.begin_book(&snap_ctx, BookKind::Snapshot).is_err() {
+                                                                    break 'frame_loop;
+                                                                }
                                                                 for l in &scratch.bids {
-                                                                    let _ = sink.level(Side::Bid, l.price, l.volume);
+                                                                    if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                                        break 'frame_loop;
+                                                                    }
                                                                 }
                                                                 for l in &scratch.asks {
-                                                                    let _ = sink.level(Side::Ask, l.price, l.volume);
+                                                                    if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                                        break 'frame_loop;
+                                                                    }
                                                                 }
-                                                                let _ = sink.end_book(&snap_ctx, None);
+                                                                if sink.end_book(&snap_ctx, None).is_err() {
+                                                                    break 'frame_loop;
+                                                                }
 
                                                                 // Replay buffered deltas
                                                                 for replayed_event in replay {
@@ -469,18 +489,26 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                         replayed_event.received_ts,
                                                                         replayed_event.source_sequence,
                                                                     );
-                                                                    let _ = sink.begin_book(&rep_ctx, BookKind::Delta);
+                                                                    if sink.begin_book(&rep_ctx, BookKind::Delta).is_err() {
+                                                                        break 'frame_loop;
+                                                                    }
                                                                     for l in &replayed_event.kind.bids {
-                                                                        let _ = sink.level(Side::Bid, l.price, l.volume);
+                                                                        if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                                            break 'frame_loop;
+                                                                        }
                                                                     }
                                                                     for l in &replayed_event.kind.asks {
-                                                                        let _ = sink.level(Side::Ask, l.price, l.volume);
+                                                                        if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                                            break 'frame_loop;
+                                                                        }
                                                                     }
-                                                                    let _ = sink.end_book(&rep_ctx, replayed_event.kind.sequence);
+                                                                    if sink.end_book(&rep_ctx, replayed_event.kind.sequence).is_err() {
+                                                                        break 'frame_loop;
+                                                                    }
                                                                 }
 
                                                                 // Alert ResyncCompleted strictly after snapshot and replay
-                                                                let _ = sink.emit_alert(
+                                                                if sink.emit_alert(
                                                                     VenueId::Huobi,
                                                                     &active_symbol,
                                                                     fsm.tag(),
@@ -490,7 +518,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                     IntegrityAlert::ResyncCompleted {
                                                                         last_update_id: Some(header.seq_num),
                                                                     },
-                                                                );
+                                                                ).is_err() {
+                                                                    break 'frame_loop;
+                                                                }
                                                             }
                                                             Ok(SnapshotOutcome::StaleSnapshot { .. }) => {
                                                                 warn!(
@@ -541,7 +571,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         if let Some(fsm) = fsms.get_mut(&active_symbol) {
                                             fsm.record_snapshot_failure(now);
                                             let resync_alert = fsm.trigger_resync(now);
-                                            let _ = sink.emit_alert(
+                                            if sink.emit_alert(
                                                 VenueId::Huobi,
                                                 &active_symbol,
                                                 fsm.tag(),
@@ -551,8 +581,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 IntegrityAlert::SourceError {
                                                     kind: SourceErrorKind::Parse,
                                                 },
-                                            );
-                                            let _ = sink.emit_alert(
+                                            ).is_err() {
+                                                break 'frame_loop;
+                                            }
+                                            if sink.emit_alert(
                                                 VenueId::Huobi,
                                                 &active_symbol,
                                                 fsm.tag(),
@@ -560,7 +592,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                 crate::now_nanos(),
                                                 None,
                                                 resync_alert,
-                                            );
+                                            ).is_err() {
+                                                break 'frame_loop;
+                                            }
                                         }
                                         if !pending_snapshots.contains(&active_symbol) {
                                             pending_snapshots.push_back(active_symbol);
@@ -608,14 +642,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             received_ts,
                                                             Some(header.seq_num),
                                                         );
-                                                        let _ = sink.begin_book(&ctx, BookKind::Delta);
+                                                        if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                                            break 'frame_loop;
+                                                        }
                                                         for l in &scratch.bids {
-                                                            let _ = sink.level(Side::Bid, l.price, l.volume);
+                                                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                                                break 'frame_loop;
+                                                            }
                                                         }
                                                         for l in &scratch.asks {
-                                                            let _ = sink.level(Side::Ask, l.price, l.volume);
+                                                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                                                break 'frame_loop;
+                                                            }
                                                         }
-                                                        let _ = sink.end_book(&ctx, Some(range));
+                                                        if sink.end_book(&ctx, Some(range)).is_err() {
+                                                            break 'frame_loop;
+                                                        }
                                                     }
                                                     DeltaDecision::Buffer => {
                                                         let event = MarketEvent {
@@ -624,8 +666,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             exchange_ts: Some(UnixNanos::from_millis(ts)),
                                                             received_ts,
                                                             tag: fsm.tag(),
-                                                            delivery: DeliveryStamp::new(
+                                                            delivery: DeliveryStamp::with_connection_id(
                                                                 sink.run_id(),
+                                                                connection_id,
                                                                 sink.generation(),
                                                                 0,
                                                             ),
@@ -643,7 +686,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 "Buffer overflow while buffering Huobi deltas; triggering resync"
                                                             );
                                                             let start_alert = fsm.trigger_resync(now);
-                                                            let _ = sink.emit_alert(
+                                                            if sink.emit_alert(
                                                                 VenueId::Huobi,
                                                                 &symbol,
                                                                 fsm.tag(),
@@ -651,7 +694,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                                 crate::now_nanos(),
                                                                 None,
                                                                 start_alert,
-                                                            );
+                                                            ).is_err() {
+                                                                break 'frame_loop;
+                                                            }
 
                                                             if !pending_snapshots.contains(&symbol) {
                                                                 pending_snapshots.push_back(symbol);
@@ -672,7 +717,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         // Stale or duplicate delta; dropped silently
                                                     }
                                                     DeltaDecision::GapDetected { alert } => {
-                                                        let _ = sink.emit_alert(
+                                                        if sink.emit_alert(
                                                             VenueId::Huobi,
                                                             &symbol,
                                                             fsm.tag(),
@@ -680,10 +725,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             received_ts,
                                                             Some(header.seq_num),
                                                             alert,
-                                                        );
+                                                        ).is_err() {
+                                                            break 'frame_loop;
+                                                        }
 
                                                         let start_alert = fsm.trigger_resync(now);
-                                                        let _ = sink.emit_alert(
+                                                        if sink.emit_alert(
                                                             VenueId::Huobi,
                                                             &symbol,
                                                             fsm.tag(),
@@ -691,7 +738,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                             crate::now_nanos(),
                                                             None,
                                                             start_alert,
-                                                        );
+                                                        ).is_err() {
+                                                            break 'frame_loop;
+                                                        }
 
                                                         if !pending_snapshots.contains(&symbol) {
                                                             pending_snapshots.push_back(symbol);
@@ -734,7 +783,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                         received_ts,
                                                         None,
                                                     );
-                                                    let _ = sink.trade(&ctx, &trade);
+                                                    if sink.trade(&ctx, &trade).is_err() {
+                                                        break 'frame_loop;
+                                                    }
                                                 }
                                             }
                                         }
@@ -802,7 +853,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // On connection drop/disconnect, emit ConnectionLost for all symbols
         for (sym, tag) in &symbols {
-            let _ = sink.emit_alert(
+            sink.best_effort_emit_alert(
                 VenueId::Huobi,
                 sym,
                 *tag,
@@ -818,7 +869,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
     if cancel.is_cancelled() {
         for (sym, tag) in &symbols {
-            let _ = sink.emit_alert(
+            sink.best_effort_emit_alert(
                 VenueId::Huobi,
                 sym,
                 *tag,
@@ -830,6 +881,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                 },
             );
         }
+    }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
     }
 }
 

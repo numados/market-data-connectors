@@ -114,33 +114,49 @@ impl<S: StreamingSink> Connection<S> {
             exchange_ts: header.ts.map(UnixNanos::from_millis),
             received_ts: crate::now_nanos(),
             connection_id: 1,
-            delivery: DeliveryStamp::new(run_id, 1, *delivery_ordinal),
+            delivery: DeliveryStamp::with_connection_id(run_id, 1, 1, *delivery_ordinal),
             source_sequence: Some(header.mbp.seq_num),
         };
 
         if is_snapshot {
-            let _ = sink.begin_book(&ctx, BookKind::Snapshot);
+            if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                return;
+            }
             for level in &scratch.bids {
-                let _ = sink.level(Side::Bid, level.price, level.volume);
+                if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                    return;
+                }
             }
             for level in &scratch.asks {
-                let _ = sink.level(Side::Ask, level.price, level.volume);
+                if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                    return;
+                }
             }
-            let _ = sink.end_book(&ctx, None);
+            if sink.end_book(&ctx, None).is_err() {
+                return;
+            }
         } else {
             let range = header
                 .mbp
                 .prev_seq_num
                 .map(|p| SequenceRange::new(p.saturating_add(1), header.mbp.seq_num));
 
-            let _ = sink.begin_book(&ctx, BookKind::Delta);
+            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                return;
+            }
             for level in &scratch.bids {
-                let _ = sink.level(Side::Bid, level.price, level.volume);
+                if sink.level(Side::Bid, level.price, level.volume).is_err() {
+                    return;
+                }
             }
             for level in &scratch.asks {
-                let _ = sink.level(Side::Ask, level.price, level.volume);
+                if sink.level(Side::Ask, level.price, level.volume).is_err() {
+                    return;
+                }
             }
-            let _ = sink.end_book(&ctx, range);
+            if sink.end_book(&ctx, range).is_err() {
+                return;
+            }
         }
     }
 }

@@ -93,8 +93,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     mut command_rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     run_id: RunId,
-) {
-    let mut sink = ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let tag_map: HashMap<Symbol, SymbolTag> = symbols.iter().cloned().collect();
     let symbol_list: Vec<Symbol> = symbols.iter().map(|(s, _)| s.clone()).collect();
@@ -247,7 +249,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             info!(connection_id, "Pausing Kraken connector");
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Kraken,
                                     sym,
                                     tag,
@@ -257,7 +259,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::Paused,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
                             }
                             let _ = ws_stream.close(None).await;
                             is_paused = true;
@@ -338,7 +342,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                                let _ = sink.emit_alert(
+                                if sink.emit_alert(
                                     VenueId::Kraken,
                                     sym,
                                     tag,
@@ -346,8 +350,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     crate::now_nanos(),
                                     None,
                                     IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
+                                if sink.emit_alert(
                                     VenueId::Kraken,
                                     sym,
                                     tag,
@@ -357,7 +363,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     IntegrityAlert::ConnectionLost {
                                         reason: DisconnectKind::SilenceTimeout,
                                     },
-                                );
+                                ).is_err() {
+                                    break 'message_loop;
+                                }
                             }
                             break 'message_loop;
                         }
@@ -506,7 +514,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         if !sink.is_failed() {
             for sym in &symbol_list {
                 let tag = *tag_map.get(sym).unwrap_or(&0);
-                let _ = sink.emit_alert(
+                sink.best_effort_emit_alert(
                     VenueId::Kraken,
                     sym,
                     tag,
@@ -519,6 +527,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                 );
             }
         }
+    }
+
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
     }
 }
 
@@ -629,13 +643,17 @@ fn handle_frame_text<S: StreamingSink>(
                     pending_resubscribe.insert(sym.clone());
                     let ctx =
                         sink.next_context(VenueId::Kraken, &sym, tag, None, received_ts, None);
-                    let _ = sink.alert(
+                    if sink.alert(
                         &ctx,
                         IntegrityAlert::SourceError {
                             kind: SourceErrorKind::Parse,
                         },
-                    );
-                    let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+                    ).is_err() {
+                        return;
+                    }
+                    if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -666,13 +684,17 @@ fn handle_snapshot<S: StreamingSink>(
         pending_resubscribe.insert(symbol.clone());
         fsm.request_resync(Instant::now());
         let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
-        let _ = sink.alert(
+        if sink.alert(
             &ctx,
             IntegrityAlert::SourceError {
                 kind: SourceErrorKind::Parse,
             },
-        );
-        let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+        ).is_err() {
+            return;
+        }
+        if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
+            return;
+        }
         return;
     }
 
@@ -721,7 +743,7 @@ fn handle_snapshot<S: StreamingSink>(
             if sink.end_book(&ctx, None).is_err() {
                 return;
             }
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Kraken,
                 symbol,
                 tag,
@@ -731,12 +753,14 @@ fn handle_snapshot<S: StreamingSink>(
                 IntegrityAlert::ResyncCompleted {
                     last_update_id: None,
                 },
-            );
+            ).is_err() {
+                return;
+            }
         }
         SnapshotOutcome::RejectedBadChecksum => {
             let expected = data.checksum.unwrap_or(0);
             let calculated = book.checksum();
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Kraken,
                 symbol,
                 tag,
@@ -747,7 +771,9 @@ fn handle_snapshot<S: StreamingSink>(
                     expected,
                     calculated,
                 },
-            );
+            ).is_err() {
+                return;
+            }
         }
     }
 }
@@ -782,13 +808,17 @@ fn handle_update<S: StreamingSink>(
         pending_resubscribe.insert(symbol.clone());
         fsm.request_resync(Instant::now());
         let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
-        let _ = sink.alert(
+        if sink.alert(
             &ctx,
             IntegrityAlert::SourceError {
                 kind: SourceErrorKind::Parse,
             },
-        );
-        let _ = sink.alert(&ctx, IntegrityAlert::ResyncStarted);
+        ).is_err() {
+            return;
+        }
+        if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
+            return;
+        }
         return;
     }
 
@@ -869,7 +899,9 @@ fn handle_update<S: StreamingSink>(
                     return;
                 }
             }
-            let _ = sink.end_book(&ctx, None);
+            if sink.end_book(&ctx, None).is_err() {
+                return;
+            }
         }
         UpdateOutcome::MismatchTriggerResync {
             expected,
@@ -879,7 +911,7 @@ fn handle_update<S: StreamingSink>(
                 symbol = symbol.as_str(),
                 expected, calculated, "Kraken checksum mismatch; resubscribing"
             );
-            let _ = sink.emit_alert(
+            if sink.emit_alert(
                 VenueId::Kraken,
                 symbol,
                 tag,
@@ -890,8 +922,10 @@ fn handle_update<S: StreamingSink>(
                     expected,
                     calculated,
                 },
-            );
-            let _ = sink.emit_alert(
+            ).is_err() {
+                return;
+            }
+            if sink.emit_alert(
                 VenueId::Kraken,
                 symbol,
                 tag,
@@ -899,7 +933,9 @@ fn handle_update<S: StreamingSink>(
                 received_ts,
                 None,
                 IntegrityAlert::ResyncStarted,
-            );
+            ).is_err() {
+                return;
+            }
             pending_resubscribe.insert(symbol.clone());
         }
         UpdateOutcome::DroppedNotSynchronized => {}

@@ -70,8 +70,10 @@ pub async fn run_connection_task<S: StreamingSink>(
     cancel: CancellationToken,
     run_id: RunId,
     policy_factory: crate::binance::connector::ResyncPolicyFactory,
-) {
-    let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id);
+    generation_allocator: Arc<std::sync::atomic::AtomicU64>,
+) -> Result<(), crate::sink_util::SinkError> {
+    let mut sink = crate::sink_util::ConnectionSink::new(sink, run_id, connection_id)
+        .with_generation_allocator(generation_allocator);
 
     let tag_map: HashMap<Symbol, SymbolTag> = symbols.iter().cloned().collect();
     let mut controllers: HashMap<Symbol, ResyncController> = symbols
@@ -207,7 +209,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => {
                     for (sym, tag) in &symbols {
-                        let _ = sink.emit_alert(
+                        sink.best_effort_emit_alert(
                             VenueId::Binance,
                             sym,
                             *tag,
@@ -335,26 +337,36 @@ pub async fn run_connection_task<S: StreamingSink>(
                             disconnect_emitted = true;
                             let elapsed_ms = silent_for.as_millis() as u64;
                             for (sym, tag) in &symbols {
-                                let _ = sink.emit_alert(
-                                    VenueId::Binance,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::SilenceTimeout { elapsed_ms },
-                                );
-                                let _ = sink.emit_alert(
-                                    VenueId::Binance,
-                                    sym,
-                                    *tag,
-                                    None,
-                                    crate::now_nanos(),
-                                    None,
-                                    IntegrityAlert::ConnectionLost {
-                                        reason: DisconnectKind::SilenceTimeout,
-                                    },
-                                );
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Binance,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::SilenceTimeout { elapsed_ms },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Binance,
+                                        sym,
+                                        *tag,
+                                        None,
+                                        crate::now_nanos(),
+                                        None,
+                                        IntegrityAlert::ConnectionLost {
+                                            reason: DisconnectKind::SilenceTimeout,
+                                        },
+                                    )
+                                    .is_err()
+                                {
+                                    break;
+                                }
                             }
                             break 'frame_loop;
                         }
@@ -774,6 +786,11 @@ pub async fn run_connection_task<S: StreamingSink>(
     }
 
     snapshot_tasks.abort_all();
+    if sink.is_failed() {
+        Err(crate::sink_util::SinkError)
+    } else {
+        Ok(())
+    }
 }
 
 fn spawn_snapshot_request(

@@ -60,7 +60,7 @@ impl<S: StreamingSink> Connection<S> {
                 exchange_ts: ts.map(UnixNanos::from_millis),
                 received_ts: crate::now_nanos(),
                 connection_id: 1,
-                delivery: DeliveryStamp::new(self.run_id, 1, self.delivery_ordinal),
+                delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
                 source_sequence: None,
             };
 
@@ -68,13 +68,19 @@ impl<S: StreamingSink> Connection<S> {
                 RawPayload::BookUpdate(level) => {
                     let _ = self.book.apply(&level);
                     if let Ok((side, pl)) = normalize_book_level(&level) {
-                        let _ = self.sink.begin_book(&ctx, BookKind::Delta);
+                        if self.sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                            return;
+                        }
                         let raw_text = RawLevelText {
                             price: level.price_str(),
                             volume: level.amount_str(),
                         };
-                        let _ = self.sink.level_raw(side, pl.price, pl.volume, raw_text);
-                        let _ = self.sink.end_book(&ctx, None);
+                        if self.sink.level_raw(side, pl.price, pl.volume, raw_text).is_err() {
+                            return;
+                        }
+                        if self.sink.end_book(&ctx, None).is_err() {
+                            return;
+                        }
                     }
                 }
                 RawPayload::BookSnapshot(levels) => {
@@ -87,7 +93,9 @@ impl<S: StreamingSink> Connection<S> {
                         }
                     }
 
-                    let _ = self.sink.begin_book(&ctx, BookKind::Snapshot);
+                    if self.sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                        return;
+                    }
                     for l in &self.scratch.levels {
                         let side = if l.amount.is_sign_positive() {
                             Side::Bid
@@ -98,9 +106,13 @@ impl<S: StreamingSink> Connection<S> {
                             price: l.price_raw.as_str(),
                             volume: l.amount_raw.as_str(),
                         };
-                        let _ = self.sink.level_raw(side, l.price, l.amount.abs(), raw_text);
+                        if self.sink.level_raw(side, l.price, l.amount.abs(), raw_text).is_err() {
+                            return;
+                        }
                     }
-                    let _ = self.sink.end_book(&ctx, None);
+                    if self.sink.end_book(&ctx, None).is_err() {
+                        return;
+                    }
                 }
                 _ => {}
             }

@@ -480,6 +480,11 @@ impl FaultInjectingSink {
         *self.tripped.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Returns the number of level invocations attempted.
+    pub fn level_invocations(&self) -> usize {
+        *self.level_count.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     /// Asynchronously waits until at least `count` events have been recorded.
     pub async fn wait_for_events(&self, count: usize) -> Vec<RecordedEvent> {
         self.inner.wait_for_events(count).await
