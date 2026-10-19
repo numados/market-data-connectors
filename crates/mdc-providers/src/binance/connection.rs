@@ -106,14 +106,22 @@ pub async fn run_connection_task<S: StreamingSink>(
         for ctrl in controllers.values_mut() {
             ctrl.reset();
         }
+        snapshot_tasks.abort_all();
+        while snapshot_tasks.join_next().await.is_some() {}
+        while snapshot_rx.try_recv().is_ok() {}
+        in_flight_snapshots.clear();
 
         while is_paused {
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
-                    if let Some(Command::Resume) = cmd {
-                        is_paused = false;
-                        break;
+                    match cmd {
+                        Some(Command::Resume) => {
+                            is_paused = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break 'reconnect_loop,
                     }
                 }
             }
@@ -138,7 +146,10 @@ pub async fn run_connection_task<S: StreamingSink>(
         let ws_url = build_combined_stream_url(&config.ws_base_url, &symbols, &config);
         info!(connection_id, %ws_url, "Connecting to Binance WebSocket");
 
-        let ws_res = tokio_tungstenite::connect_async(ws_url.as_str()).await;
+        let ws_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = tokio_tungstenite::connect_async(ws_url.as_str()) => res,
+        };
         let (mut ws_stream, _) = match ws_res {
             Ok(s) => {
                 reconnect_attempt = 0;
@@ -321,9 +332,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                         Some(Command::Resume) => {
                             is_paused = false;
                         }
-                        None => {}
+                        None => break 'frame_loop,
                     }
                 }
+
+                _ = snapshot_tasks.join_next(), if !snapshot_tasks.is_empty() => {}
 
                 // Silence watchdog
                 _ = watchdog_ticker.tick() => {
@@ -772,6 +785,8 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         snapshot_tasks.abort_all();
+        while snapshot_tasks.join_next().await.is_some() {}
+        while snapshot_rx.try_recv().is_ok() {}
         in_flight_snapshots.clear();
 
         if sink.is_failed() {
@@ -786,6 +801,9 @@ pub async fn run_connection_task<S: StreamingSink>(
     }
 
     snapshot_tasks.abort_all();
+    while snapshot_tasks.join_next().await.is_some() {}
+    while snapshot_rx.try_recv().is_ok() {}
+    in_flight_snapshots.clear();
     if sink.is_failed() {
         Err(crate::sink_util::SinkError)
     } else {

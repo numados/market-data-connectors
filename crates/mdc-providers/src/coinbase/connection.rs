@@ -105,9 +105,13 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
-                    if let Some(Command::Resume) = cmd {
-                        is_paused = false;
-                        break;
+                    match cmd {
+                        Some(Command::Resume) => {
+                            is_paused = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break 'reconnect_loop,
                     }
                 }
             }
@@ -130,6 +134,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                     match cmd {
                         Some(Command::Pause) => { is_paused = true; continue 'reconnect_loop; }
                         Some(Command::Reconnect(_)) => { reconnect_attempt = 0; }
+                        None => break 'reconnect_loop,
                         _ => {}
                     }
                 }
@@ -145,7 +150,10 @@ pub async fn run_connection_task<S: StreamingSink>(
             "Connecting to Coinbase Exchange WebSocket"
         );
 
-        let connect_res = tokio_tungstenite::connect_async(ws_url.as_str()).await;
+        let connect_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = tokio_tungstenite::connect_async(ws_url.as_str()) => res,
+        };
         let (mut ws_stream, _) = match connect_res {
             Ok(pair) => pair,
             Err(e) => {
@@ -167,6 +175,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             config.watchdog_reconnect_after,
             now,
         );
+        let mut disconnect_emitted = false;
 
         // Reset FSMs and heartbeat monitor, emit ResyncStarted for all symbols
         fsms.clear();
@@ -336,6 +345,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 ?silent_for,
                                 "Silence watchdog timeout; forcing reconnect"
                             );
+                            disconnect_emitted = true;
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
@@ -729,7 +739,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             connection_id,
             "Coinbase WebSocket connection lost; emitting ConnectionLost"
         );
-        if !sink.is_failed() {
+        if !sink.is_failed() && !disconnect_emitted {
             for sym in &symbol_list {
                 let tag = *tag_map.get(sym).unwrap_or(&0);
                 sink.best_effort_emit_alert(

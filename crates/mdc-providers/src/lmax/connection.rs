@@ -95,7 +95,11 @@ pub async fn run_connection_task<S: StreamingSink>(
             "Connecting to LMAX Digital WebSocket"
         );
 
-        let ws_stream = match connect_async(config.ws_url.as_str()).await {
+        let ws_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = connect_async(config.ws_url.as_str()) => res,
+        };
+        let ws_stream = match ws_res {
             Ok((stream, _resp)) => {
                 info!(connection_id, "Connected to LMAX Digital WebSocket");
                 conn_backoff = Duration::from_millis(500);

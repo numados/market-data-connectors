@@ -122,9 +122,13 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
-                    if let Some(Command::Resume) = cmd {
-                        is_paused = false;
-                        break;
+                    match cmd {
+                        Some(Command::Resume) => {
+                            is_paused = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break 'reconnect_loop,
                     }
                 }
             }
@@ -147,6 +151,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                     match cmd {
                         Some(Command::Pause) => { is_paused = true; continue 'reconnect_loop; }
                         Some(Command::Reconnect(_)) => { reconnect_attempt = 0; }
+                        None => break 'reconnect_loop,
                         _ => {}
                     }
                 }
@@ -158,7 +163,10 @@ pub async fn run_connection_task<S: StreamingSink>(
         let ws_url = config.ws_base_url.clone();
         info!(connection_id, url = %ws_url, "Connecting to Kraken WebSocket v2");
 
-        let connect_res = tokio_tungstenite::connect_async(ws_url.as_str()).await;
+        let connect_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = tokio_tungstenite::connect_async(ws_url.as_str()) => res,
+        };
         let (mut ws_stream, _) = match connect_res {
             Ok(pair) => pair,
             Err(e) => {
@@ -176,6 +184,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             config.watchdog_reconnect_after,
             now,
         );
+        let mut disconnect_emitted = false;
 
         // Reset FSMs and books, emit ResyncStarted for all symbols
         fsms.clear();
@@ -339,6 +348,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         WatchdogAction::Reconnect { silent_for } => {
                             warn!(connection_id, ?silent_for, "Silence watchdog timeout; forcing reconnect");
+                            disconnect_emitted = true;
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for sym in &symbol_list {
                                 let tag = *tag_map.get(sym).unwrap_or(&0);
@@ -511,7 +521,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         // On socket drop, notify embedder of connection loss for all active symbols if sink not already failed
-        if !sink.is_failed() {
+        if !sink.is_failed() && !disconnect_emitted {
             for sym in &symbol_list {
                 let tag = *tag_map.get(sym).unwrap_or(&0);
                 sink.best_effort_emit_alert(
@@ -635,12 +645,15 @@ fn handle_frame_text<S: StreamingSink>(
                         connection_id,
                         symbol = s,
                         error = ?ack.error,
-                        "Kraken subscription rejected"
+                        "Kraken subscription rejected; quarantining symbol"
                     );
-                    if let Some(fsm) = fsms.get_mut(&sym) {
-                        fsm.request_resync(Instant::now());
-                    }
-                    pending_resubscribe.insert(sym.clone());
+                    let retry_in_ms = if let Some(fsm) = fsms.get_mut(&sym) {
+                        fsm.trigger_quarantine(Instant::now());
+                        fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64
+                    } else {
+                        30_000
+                    };
+                    pending_resubscribe.remove(&sym);
                     let ctx =
                         sink.next_context(VenueId::Kraken, &sym, tag, None, received_ts, None);
                     if sink.alert(
@@ -651,8 +664,39 @@ fn handle_frame_text<S: StreamingSink>(
                     ).is_err() {
                         return;
                     }
-                    if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
+                    if sink.alert(
+                        &ctx,
+                        IntegrityAlert::Quarantined { retry_in_ms },
+                    ).is_err() {
                         return;
+                    }
+                } else {
+                    warn!(
+                        connection_id,
+                        error = ?ack.error,
+                        "Kraken general subscription rejected; quarantining all active symbols"
+                    );
+                    let now = Instant::now();
+                    for (sym, fsm) in fsms.iter_mut() {
+                        fsm.trigger_quarantine(now);
+                        let retry_in_ms = fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64;
+                        pending_resubscribe.remove(sym);
+                        let tag = *tag_map.get(sym).unwrap_or(&0);
+                        let ctx = sink.next_context(VenueId::Kraken, sym, tag, None, received_ts, None);
+                        if sink.alert(
+                            &ctx,
+                            IntegrityAlert::SourceError {
+                                kind: SourceErrorKind::Transport,
+                            },
+                        ).is_err() {
+                            return;
+                        }
+                        if sink.alert(
+                            &ctx,
+                            IntegrityAlert::Quarantined { retry_in_ms },
+                        ).is_err() {
+                            return;
+                        }
                     }
                 }
             }

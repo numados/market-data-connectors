@@ -66,10 +66,14 @@ pub async fn run_connection_task<S: StreamingSink>(
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 cmd = command_rx.recv() => {
-                    if let Some(Command::Resume | Command::Reconnect) = cmd {
-                        is_paused = false;
-                        reconnect_attempt = 0;
-                        break;
+                    match cmd {
+                        Some(Command::Resume | Command::Reconnect) => {
+                            is_paused = false;
+                            reconnect_attempt = 0;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => break 'reconnect_loop,
                     }
                 }
             }
@@ -181,6 +185,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             SilenceWatchdog::new(config.silence_timeout / 2, config.silence_timeout, now_inst);
         let mut watchdog_ticker = tokio::time::interval(Duration::from_secs(1));
         watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut disconnect_emitted = false;
         let mut pending_delayed_resubscribe: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         'frame_loop: loop {
@@ -332,6 +337,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 ?silent_for,
                                 "Silence watchdog timeout on Coinbase Advanced; forcing reconnect"
                             );
+                            disconnect_emitted = true;
                             let elapsed_ms = silent_for.as_millis().min(u64::MAX as u128) as u64;
                             for (sym, tag) in &symbols {
                                 if sink
@@ -763,7 +769,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         // Emit ConnectionLost when socket breaks (if not cleanly paused)
-        if !is_paused && !sink.is_failed() {
+        if !is_paused && !disconnect_emitted && !sink.is_failed() {
             for (sym, tag) in &symbols {
                 sink.best_effort_emit_alert(
                     VenueId::CoinbaseAdvanced,

@@ -110,14 +110,19 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 tokio::select! {
                                     _ = cancel.cancelled() => break 'reconnect_loop,
                                     resume_cmd = command_rx.recv() => {
-                                        if matches!(resume_cmd, Some(Command::Resume)) {
-                                            reconnect_attempt = 0;
-                                            break 'paused_wait;
+                                        match resume_cmd {
+                                            Some(Command::Resume) => {
+                                                reconnect_attempt = 0;
+                                                break 'paused_wait;
+                                            }
+                                            None => break 'reconnect_loop,
+                                            _ => {}
                                         }
                                     }
                                 }
                             }
                         }
+                        None => break 'reconnect_loop,
                         _ => {}
                     }
                 }
@@ -142,12 +147,16 @@ pub async fn run_connection_loop<S: StreamingSink>(
 
         info!(connection_id, url = %ws_url, "Connecting to Bitfinex WebSocket v2");
 
-        let connect_res = tokio_tungstenite::connect_async(ws_url.as_str()).await;
-        let (mut ws_stream, _) = match connect_res {
-            Ok(pair) => pair,
-            Err(e) => {
-                warn!(connection_id, error = %e, "Failed to connect to Bitfinex WebSocket");
-                continue 'reconnect_loop;
+        let (mut ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = tokio_tungstenite::connect_async(ws_url.as_str()) => {
+                match res {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        warn!(connection_id, error = %e, "Failed to connect to Bitfinex WebSocket");
+                        continue 'reconnect_loop;
+                    }
+                }
             }
         };
 
@@ -280,9 +289,13 @@ pub async fn run_connection_loop<S: StreamingSink>(
                                 tokio::select! {
                                     _ = cancel.cancelled() => break 'reconnect_loop,
                                     resume_cmd = command_rx.recv() => {
-                                        if matches!(resume_cmd, Some(Command::Resume)) {
-                                            info!(connection_id, "Resuming Bitfinex connector");
-                                            continue 'reconnect_loop;
+                                        match resume_cmd {
+                                            Some(Command::Resume) => {
+                                                info!(connection_id, "Resuming Bitfinex connector");
+                                                continue 'reconnect_loop;
+                                            }
+                                            None => break 'reconnect_loop,
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -307,6 +320,7 @@ pub async fn run_connection_loop<S: StreamingSink>(
                         }
                         None => {
                             // Control channel closed
+                            break 'reconnect_loop;
                         }
                     }
                 }

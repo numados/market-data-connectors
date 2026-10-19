@@ -14,6 +14,7 @@ use mdc_core::resync::ResyncFailure;
 use mdc_core::sink::{BookKind, StreamingSink};
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -103,8 +104,12 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut backoff = Duration::from_millis(500);
     let max_backoff = Duration::from_secs(10);
     let mut is_paused = false;
+    let mut snapshot_tasks = JoinSet::new();
 
     'reconnect_loop: loop {
+        snapshot_tasks.abort_all();
+        while snapshot_tasks.join_next().await.is_some() {}
+
         while is_paused {
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
@@ -132,7 +137,11 @@ pub async fn run_connection_task<S: StreamingSink>(
             "Connecting to Bitstamp WebSocket"
         );
 
-        let ws_stream = match connect_async(config.ws_url.as_str()).await {
+        let ws_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = connect_async(config.ws_url.as_str()) => res,
+        };
+        let ws_stream = match ws_res {
             Ok((stream, _resp)) => {
                 info!(connection_id, "Connected to Bitstamp WebSocket");
                 backoff = Duration::from_millis(500);
@@ -216,21 +225,13 @@ pub async fn run_connection_task<S: StreamingSink>(
         let mut watchdog_ticker = tokio::time::interval(Duration::from_secs(1));
         watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // At most one snapshot in flight per connection
-        let mut snapshot_task: Option<
-            tokio::task::JoinHandle<(
-                Symbol,
-                Result<crate::bitstamp::raw::RawOrderBookSnapshot, RestError>,
-            )>,
-        > = None;
-
         'frame_loop: loop {
             if sink.is_failed() {
                 break 'frame_loop;
             }
 
             // Check if we can dispatch a pending snapshot request
-            if snapshot_task.is_none() && !snapshot_queue.is_empty() {
+            if snapshot_tasks.is_empty() && !snapshot_queue.is_empty() {
                 let now = Instant::now();
                 let mut found_idx = None;
 
@@ -254,21 +255,20 @@ pub async fn run_connection_task<S: StreamingSink>(
                         let pair_lower = sym.as_str().to_lowercase();
 
                         let cancel_snap = cancel.clone();
-                        snapshot_task = Some(tokio::spawn(async move {
+                        snapshot_tasks.spawn(async move {
                             tokio::select! {
                                 _ = cancel_snap.cancelled() => (sym_clone, Err(RestError::Transport("request cancelled".to_string()))),
                                 res = client.fetch_order_book(&pair_lower, Instant::now()) => (sym_clone, res),
                             }
-                        }));
+                        });
                     }
                 }
             }
 
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    if let Some(task) = snapshot_task.take() {
-                        task.abort();
-                    }
+                    snapshot_tasks.abort_all();
+                    while snapshot_tasks.join_next().await.is_some() {}
                      for (sym, tag) in &symbols {
                         sink.best_effort_emit_alert(
                             VenueId::Bitstamp,
@@ -388,13 +388,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                 }
 
                 // In-flight REST snapshot completion
-                Some(task_res) = async {
-                    match &mut snapshot_task {
-                        Some(handle) => Some(handle.await),
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    snapshot_task = None;
+                Some(task_res) = snapshot_tasks.join_next(), if !snapshot_tasks.is_empty() => {
                     let now = Instant::now();
 
                     if let Ok((sym, res)) = task_res {
@@ -749,10 +743,16 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
         }
 
+        snapshot_tasks.abort_all();
+        while snapshot_tasks.join_next().await.is_some() {}
+
         if sink.is_failed() {
             break 'reconnect_loop;
         }
     }
+
+    snapshot_tasks.abort_all();
+    while snapshot_tasks.join_next().await.is_some() {}
 
     if sink.is_failed() {
         Err(crate::sink_util::SinkError)

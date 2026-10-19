@@ -95,7 +95,11 @@ pub async fn run_connection_task<S: StreamingSink>(
             "Connecting to Huobi WebSocket"
         );
 
-        let ws_stream = match connect_async(config.ws_url.as_str()).await {
+        let ws_res = tokio::select! {
+            _ = cancel.cancelled() => break 'reconnect_loop,
+            res = connect_async(config.ws_url.as_str()) => res,
+        };
+        let ws_stream = match ws_res {
             Ok((stream, _response)) => {
                 reconnect_attempt = 0;
                 stream
@@ -187,6 +191,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             SilenceWatchdog::new(config.silence_timeout / 2, config.silence_timeout, now_inst);
         let mut watchdog_ticker = tokio::time::interval(Duration::from_secs(1));
         watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut disconnect_emitted = false;
 
         'frame_loop: loop {
             tokio::select! {
@@ -239,10 +244,12 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Some(Command::Reconnect) => {
                             info!(connection_id, "Operator requested reconnect");
+                            disconnect_emitted = true;
                             break 'frame_loop;
                         }
                         Some(Command::Pause) => {
                             is_paused = true;
+                            disconnect_emitted = true;
                             for (sym, tag) in &symbols {
                                 if sink.emit_alert(
                                     VenueId::Huobi,
@@ -278,6 +285,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         WatchdogAction::Reconnect { silent_for } => {
                             let elapsed_ms = silent_for.as_millis() as u64;
+                            disconnect_emitted = true;
                             for (sym, tag) in &symbols {
                                 if sink.emit_alert(
                                     VenueId::Huobi,
@@ -852,18 +860,20 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         // On connection drop/disconnect, emit ConnectionLost for all symbols
-        for (sym, tag) in &symbols {
-            sink.best_effort_emit_alert(
-                VenueId::Huobi,
-                sym,
-                *tag,
-                None,
-                crate::now_nanos(),
-                None,
-                IntegrityAlert::ConnectionLost {
-                    reason: DisconnectKind::TransportError,
-                },
-            );
+        if !disconnect_emitted {
+            for (sym, tag) in &symbols {
+                sink.best_effort_emit_alert(
+                    VenueId::Huobi,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ConnectionLost {
+                        reason: DisconnectKind::TransportError,
+                    },
+                );
+            }
         }
     }
 

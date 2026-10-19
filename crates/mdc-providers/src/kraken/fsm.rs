@@ -156,6 +156,18 @@ impl SymbolFsm {
     pub fn reset(&mut self, now: Instant) {
         self.state = SyncState::AwaitingSnapshot { started_at: now };
     }
+
+    /// Transitions the symbol into quarantine (e.g. upon subscription rejection).
+    pub fn trigger_quarantine(&mut self, now: Instant) -> Instant {
+        let until = now.checked_add(self.quarantine).unwrap_or(now);
+        self.state = SyncState::Quarantined { until };
+        until
+    }
+
+    /// Returns the quarantine duration configured for this symbol.
+    pub fn quarantine_duration(&self) -> Duration {
+        self.quarantine
+    }
 }
 
 #[cfg(test)]
