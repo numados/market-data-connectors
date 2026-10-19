@@ -905,3 +905,165 @@ async fn test_multi_event_envelope_dispatches_per_event() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+#[tokio::test]
+async fn test_sequence_reset_recovery_one_alert_per_episode() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = CoinbaseAdvancedConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.reset_threshold = 2;
+
+    let symbols = vec![Symbol::from("BTC-USD")];
+    let sink = RecordingSink::new();
+
+    let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+        .symbols(symbols)
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send initial snapshot with sequence 100
+    let initial_snap = r#"{
+        "channel": "l2_data",
+        "client_id": "",
+        "timestamp": "2023-02-09T20:32:50.000000000Z",
+        "sequence_num": 100,
+        "events": [
+            {
+                "type": "snapshot",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-02-09T20:32:50.000000000Z",
+                        "price_level": "21900.00",
+                        "new_quantity": "1.00000000"
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let _ = ws.broadcast_text(initial_snap.to_string());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        sink.alerts_for("BTC-USD")
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })),
+        "Must be InSync after snapshot"
+    );
+
+    // Inject sequence reset: candidate 1 at sequence 10
+    let reset_frame_1 = r#"{
+        "channel": "l2_data",
+        "client_id": "",
+        "timestamp": "2023-02-09T20:32:51.000000000Z",
+        "sequence_num": 10,
+        "events": [
+            {
+                "type": "update",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-02-09T20:32:51.000000000Z",
+                        "price_level": "21900.00",
+                        "new_quantity": "1.50000000"
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let _ = ws.broadcast_text(reset_frame_1.to_string());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    // Reset frame 2 at sequence 11: reaches threshold 2! Triggers SequenceReset and forces reconnect
+    let reset_frame_2 = r#"{
+        "channel": "l2_data",
+        "client_id": "",
+        "timestamp": "2023-02-09T20:32:52.000000000Z",
+        "sequence_num": 11,
+        "events": [
+            {
+                "type": "update",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-02-09T20:32:52.000000000Z",
+                        "price_level": "21900.00",
+                        "new_quantity": "2.00000000"
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let _ = ws.broadcast_text(reset_frame_2.to_string());
+    // Wait for frame_loop exit and reconnect backoff (400ms)
+    tokio::time::sleep(Duration::from_millis(450)).await;
+
+    // Connection reconnects. Send fresh snapshot on the new epoch (sequence 12)
+    let recovery_snap = r#"{
+        "channel": "l2_data",
+        "client_id": "",
+        "timestamp": "2023-02-09T20:32:53.000000000Z",
+        "sequence_num": 12,
+        "events": [
+            {
+                "type": "snapshot",
+                "product_id": "BTC-USD",
+                "updates": [
+                    {
+                        "side": "bid",
+                        "event_time": "2023-02-09T20:32:53.000000000Z",
+                        "price_level": "21900.00",
+                        "new_quantity": "3.00000000"
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let _ = ws.broadcast_text(recovery_snap.to_string());
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let alerts = sink.alerts_for("BTC-USD");
+    let gap_alerts: Vec<_> = alerts
+        .iter()
+        .filter(|a| {
+            matches!(
+                a,
+                IntegrityAlert::GapDetected {
+                    expected: 101,
+                    received: 11
+                }
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        gap_alerts.len(),
+        1,
+        "Exactly one GapDetected alert for the reset must be emitted per episode, got: {gap_alerts:?}"
+    );
+
+    // Assert that books resynchronized after recovery snapshot
+    let completed_alerts: Vec<_> = alerts
+        .iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .collect();
+    assert_eq!(
+        completed_alerts.len(),
+        2,
+        "Expected 2 ResyncCompleted alerts (initial + post-reset recovery)"
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}

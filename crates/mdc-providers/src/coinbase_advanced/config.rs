@@ -23,6 +23,8 @@ pub struct CoinbaseAdvancedConfig {
     pub silence_timeout: Duration,
     /// Sequence enforcement policy (Required or Optional). Default: Required.
     pub sequence_policy: mdc_core::SequencePolicy,
+    /// Sequence reset threshold before declaring a sequence reset (default: 2).
+    pub reset_threshold: u32,
     /// Injected session run token (generated if not provided).
     pub run_id: Option<mdc_core::RunId>,
 }
@@ -39,6 +41,7 @@ impl Default for CoinbaseAdvancedConfig {
             connection_timeout: Duration::from_secs(10),
             silence_timeout: Duration::from_secs(15),
             sequence_policy: mdc_core::SequencePolicy::Required,
+            reset_threshold: 2,
             run_id: None,
         }
     }
@@ -77,6 +80,9 @@ pub enum ConfigError {
     /// Symbols per connection must be greater than zero.
     #[error("symbols_per_connection must be greater than 0")]
     ZeroSymbolsPerConnection,
+    /// Reset threshold must be greater than zero.
+    #[error("reset_threshold must be greater than 0")]
+    InvalidResetThreshold,
 }
 
 impl CoinbaseAdvancedConfig {
@@ -89,6 +95,9 @@ impl CoinbaseAdvancedConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.symbols_per_connection == 0 {
             return Err(ConfigError::ZeroSymbolsPerConnection);
+        }
+        if self.reset_threshold == 0 {
+            return Err(ConfigError::InvalidResetThreshold);
         }
         Ok(())
     }
@@ -155,6 +164,17 @@ impl CoinbaseAdvancedConfigBuilder {
         self
     }
 
+    /// Sets the sequence reset threshold before declaring a sequence reset. Clamps 0 to 1.
+    pub fn with_reset_threshold(mut self, threshold: u32) -> Self {
+        self.config.reset_threshold = if threshold == 0 { 1 } else { threshold };
+        self
+    }
+
+    /// Sets the sequence reset threshold before declaring a sequence reset. Clamps 0 to 1.
+    pub fn reset_threshold(self, threshold: u32) -> Self {
+        self.with_reset_threshold(threshold)
+    }
+
     /// Injects a specific `RunId` session token (primarily for tests).
     pub fn run_id(mut self, run_id: mdc_core::RunId) -> Self {
         self.config.run_id = Some(run_id);
@@ -179,6 +199,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert_eq!(config.ws_url.as_str(), DEFAULT_WS_URL);
         assert_eq!(config.symbols_per_connection, 25);
+        assert_eq!(config.reset_threshold, 2);
         assert!(config.streams.level2);
         assert!(config.streams.heartbeats);
         assert!(!config.streams.market_trades);
@@ -197,6 +218,30 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_reset_threshold_rejected() {
+        let config = CoinbaseAdvancedConfig {
+            reset_threshold: 0,
+            ..Default::default()
+        };
+        assert_eq!(config.validate(), Err(ConfigError::InvalidResetThreshold));
+    }
+
+    #[test]
+    fn test_builder_with_reset_threshold_clamps_zero() {
+        let config = CoinbaseAdvancedConfig::builder()
+            .with_reset_threshold(0)
+            .build()
+            .unwrap();
+        assert_eq!(config.reset_threshold, 1);
+
+        let config_override = CoinbaseAdvancedConfig::builder()
+            .with_reset_threshold(5)
+            .build()
+            .unwrap();
+        assert_eq!(config_override.reset_threshold, 5);
+    }
+
+    #[test]
     fn test_builder_custom() {
         let custom_url = Url::parse("wss://custom.coinbase.com/ws").unwrap();
         let config = CoinbaseAdvancedConfig::builder()
@@ -204,11 +249,13 @@ mod tests {
             .symbols_per_connection(10)
             .market_trades(true)
             .resync_timeout(Duration::from_secs(3))
+            .with_reset_threshold(4)
             .build()
             .unwrap();
 
         assert_eq!(config.ws_url, custom_url);
         assert_eq!(config.symbols_per_connection, 10);
+        assert_eq!(config.reset_threshold, 4);
         assert!(config.streams.market_trades);
         assert_eq!(config.resync_timeout, Duration::from_secs(3));
     }

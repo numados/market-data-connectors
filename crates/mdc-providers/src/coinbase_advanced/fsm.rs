@@ -63,6 +63,12 @@ impl CoinbaseAdvancedFsm {
         }
     }
 
+    /// Sets the sequence reset threshold on the connection-wide sequence tracker.
+    pub fn with_reset_threshold(mut self, threshold: u32) -> Self {
+        self.tracker = self.tracker.with_reset_threshold(threshold);
+        self
+    }
+
     /// Resets the FSM on connection establishment or disconnect.
     pub fn reset(&mut self) {
         self.tracker.reset();

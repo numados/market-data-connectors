@@ -45,7 +45,8 @@ pub async fn run_connection_task<S: StreamingSink>(
 ) {
     let mut sink = ConnectionSink::new(sink, run_id, connection_id);
 
-    let mut fsm = CoinbaseAdvancedFsm::new(symbols.clone(), config.resync_timeout);
+    let mut fsm = CoinbaseAdvancedFsm::new(symbols.clone(), config.resync_timeout)
+        .with_reset_threshold(config.reset_threshold);
     let mut scratch = CoinbaseAdvancedScratch::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
     let mut is_paused = false;
@@ -195,8 +196,22 @@ pub async fn run_connection_task<S: StreamingSink>(
                     fsm.mark_resync_all(Instant::now());
                     let unsub = build_unsubscribe_frame("level2", &product_strs);
                     let sub = build_subscribe_frame("level2", &product_strs);
-                    let _ = ws_tx.send(Message::Text(unsub)).await;
-                    let _ = ws_tx.send(Message::Text(sub)).await;
+                    if let Err(e) = ws_tx.send(Message::Text(unsub)).await {
+                        warn!(
+                            connection_id,
+                            error = %e,
+                            "Failed to send delayed unsubscribe frame; forcing reconnect"
+                        );
+                        break 'frame_loop;
+                    }
+                    if let Err(e) = ws_tx.send(Message::Text(sub)).await {
+                        warn!(
+                            connection_id,
+                            error = %e,
+                            "Failed to send delayed subscribe frame; forcing reconnect"
+                        );
+                        break 'frame_loop;
+                    }
                 }
 
                 cmd_opt = command_rx.recv() => {
@@ -509,10 +524,10 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     connection_id,
                                     expected,
                                     reset_to,
-                                    "Connection-wide sequence reset detected on Coinbase Advanced; forcing resync"
+                                    "Connection-wide sequence reset detected on Coinbase Advanced; forcing reconnect"
                                 );
 
-                                let (schedule, alerts) = fsm.on_gap(expected, reset_to, now);
+                                let (_schedule, alerts) = fsm.on_gap(expected, reset_to, now);
                                 for (sym, tag, [gap_alert, start_alert]) in alerts {
                                     if sink
                                         .emit_alert(
@@ -526,7 +541,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         )
                                         .is_err()
                                     {
-                                        break 'frame_loop;
+                                        break 'reconnect_loop;
                                     }
 
                                     if sink
@@ -541,26 +556,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         )
                                         .is_err()
                                     {
-                                        break 'frame_loop;
+                                        break 'reconnect_loop;
                                     }
                                 }
 
-                                match schedule {
-                                    ResyncSchedule::Immediate => {
-                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                        let sub = build_subscribe_frame("level2", &product_strs);
-                                        let _ = ws_tx.send(Message::Text(unsub)).await;
-                                        let _ = ws_tx.send(Message::Text(sub)).await;
-                                    }
-                                    ResyncSchedule::Delayed(delay) => {
-                                        if pending_delayed_resubscribe.is_none() {
-                                            pending_delayed_resubscribe =
-                                                Some(Box::pin(tokio::time::sleep(delay)));
-                                        }
-                                    }
-                                }
-
-                                continue 'frame_loop;
+                                break 'frame_loop;
                             }
                         }
                     } else if header.channel == "l2_data"

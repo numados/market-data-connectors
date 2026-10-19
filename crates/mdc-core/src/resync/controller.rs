@@ -155,6 +155,12 @@ impl ResyncController {
         &self.tracker
     }
 
+    /// Sets the sequence reset threshold on the underlying [`SequenceTracker`].
+    pub fn with_reset_threshold(mut self, threshold: u32) -> Self {
+        self.tracker = self.tracker.with_reset_threshold(threshold);
+        self
+    }
+
     /// Resets the controller state to [`SyncState::BufferingDiffs`], clearing the buffer and tracker.
     pub fn reset(&mut self) {
         self.state = SyncState::BufferingDiffs;

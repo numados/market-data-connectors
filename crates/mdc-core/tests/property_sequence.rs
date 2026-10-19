@@ -109,7 +109,7 @@ proptest! {
             if ((idx + 1) as u32) < threshold {
                 prop_assert_eq!(check, SequenceCheck::OldDataIgnored);
                 prop_assert!(!tracker.is_reset());
-            } else {
+            } else if ((idx + 1) as u32) == threshold {
                 prop_assert_eq!(
                     check,
                     SequenceCheck::SequenceReset {
@@ -118,18 +118,18 @@ proptest! {
                     }
                 );
                 prop_assert!(tracker.is_reset());
+            } else {
+                prop_assert_eq!(check, SequenceCheck::OldDataIgnored);
+                prop_assert!(tracker.is_reset());
             }
             curr = next_last + 1;
         }
 
-        // Post-alert overlap does NOT re-anchor without snapshot
+        // Post-alert overlap does NOT re-anchor without snapshot; latched as OldDataIgnored (no alert repetition)
         let overlap = SequenceRange::new(anchor - 10, anchor + 10);
         prop_assert_eq!(
             tracker.check(overlap),
-            SequenceCheck::SequenceReset {
-                current: anchor,
-                reset_to: anchor - 10,
-            }
+            SequenceCheck::OldDataIgnored
         );
 
         // Re-anchor permitted only post-snapshot reset_to
@@ -164,7 +164,7 @@ proptest! {
             if ((idx + 1) as u32) < threshold {
                 prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
                 prop_assert!(!tracker.is_reset());
-            } else {
+            } else if ((idx + 1) as u32) == threshold {
                 prop_assert_eq!(
                     check,
                     GlobalSequenceCheck::SequenceReset {
@@ -173,23 +173,84 @@ proptest! {
                     }
                 );
                 prop_assert!(tracker.is_reset());
+            } else {
+                prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
+                prop_assert!(tracker.is_reset());
             }
             curr = next_val;
         }
 
-        // Post-alert higher sequence does NOT re-anchor without reset
+        // Post-alert higher sequence does NOT re-anchor without reset; latched as OldDataIgnored
         prop_assert_eq!(
             tracker.check(expected + 10),
-            GlobalSequenceCheck::SequenceReset {
-                expected,
-                reset_to: expected + 10,
-            }
+            GlobalSequenceCheck::OldDataIgnored
         );
 
-        // Tracker accepts new epoch only via reset
-        tracker.reset();
+        // Tracker accepts new epoch via reset_to
+        tracker.reset_to(curr);
         prop_assert!(!tracker.is_reset());
-        prop_assert_eq!(tracker.check(curr + 1), GlobalSequenceCheck::First);
+        prop_assert_eq!(tracker.next(), Some(curr + 1));
+        prop_assert_eq!(tracker.check(curr + 1), GlobalSequenceCheck::Valid);
+    }
+
+    #[test]
+    fn property_duplicate_storm_never_yields_false_reset(
+        anchor in 1000u64..100_000,
+        threshold in 2u32..5,
+        candidate in 1u64..500,
+        dup_count in 2usize..20,
+    ) {
+        let mut tracker = SequenceTracker::new().with_reset_threshold(threshold);
+        tracker.reset_to(anchor);
+
+        // Initial candidate in lower epoch
+        let range = SequenceRange::new(candidate, candidate);
+        let check = tracker.check(range);
+        prop_assert_eq!(check, SequenceCheck::OldDataIgnored);
+        prop_assert!(!tracker.is_reset());
+
+        // Repeated duplicate retransmissions must never advance candidate count or trigger reset
+        for _ in 0..dup_count {
+            let dup_check = tracker.check(range);
+            prop_assert_eq!(dup_check, SequenceCheck::OldDataIgnored);
+            prop_assert!(!tracker.is_reset(), "Duplicate retransmission caused false sequence reset!");
+        }
+    }
+
+    #[test]
+    fn property_equality_edge_yields_reset_not_silent_continuity(
+        anchor in 100u64..10_000,
+        threshold in 2u32..5,
+    ) {
+        let mut tracker = SequenceTracker::new().with_reset_threshold(threshold);
+        tracker.reset_to(anchor);
+
+        // Feed threshold - 1 candidates strictly ascending
+        let step = (anchor - 1) / threshold as u64;
+        let mut curr = 1u64;
+        for _ in 1..threshold {
+            let next_last = curr + step.max(1);
+            let check = tracker.check(SequenceRange::new(curr, next_last));
+            prop_assert_eq!(check, SequenceCheck::OldDataIgnored);
+            prop_assert!(!tracker.is_reset());
+            curr = next_last;
+        }
+
+        // Final candidate reaches exactly anchor (equality edge)
+        let edge_check = tracker.check(SequenceRange::new(curr + 1, anchor));
+        prop_assert_eq!(
+            edge_check,
+            SequenceCheck::SequenceReset {
+                current: anchor,
+                reset_to: curr + 1,
+            }
+        );
+        prop_assert!(tracker.is_reset());
+
+        // Stream attempting to continue past anchor must NOT be classified as Valid
+        let post_edge = tracker.check(SequenceRange::new(anchor + 1, anchor + 5));
+        prop_assert_ne!(post_edge, SequenceCheck::Valid, "Equality edge permitted silent continuity!");
+        prop_assert_eq!(post_edge, SequenceCheck::OldDataIgnored);
     }
 
     #[test]

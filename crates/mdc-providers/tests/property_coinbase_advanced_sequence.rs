@@ -183,4 +183,71 @@ proptest! {
             prop_assert_eq!(tracker.check(curr), GlobalSequenceCheck::SequenceExhausted);
         }
     }
+
+    #[test]
+    fn property_tracker_duplicate_storm_never_yields_false_reset(
+        start_seq in 1000u64..100_000,
+        threshold in 2u32..5,
+        candidate in 1u64..500,
+        dup_count in 2usize..20,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(threshold);
+        tracker.check(start_seq);
+        let expected = start_seq + 1;
+        prop_assert_eq!(tracker.next(), Some(expected));
+
+        // First candidate in lower epoch
+        let check = tracker.check(candidate);
+        prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
+        prop_assert!(!tracker.is_reset());
+
+        // Repeated duplicates must not trigger false reset
+        for _ in 0..dup_count {
+            let dup = tracker.check(candidate);
+            prop_assert_eq!(dup, GlobalSequenceCheck::OldDataIgnored);
+            prop_assert!(!tracker.is_reset(), "Duplicate frame caused false reset!");
+        }
+    }
+
+    #[test]
+    fn property_tracker_equality_edge_and_epoch_recovery(
+        start_seq in 100u64..10_000,
+        threshold in 2u32..5,
+    ) {
+        let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(threshold);
+        tracker.check(start_seq);
+        let expected = start_seq + 1;
+
+        // Feed threshold - 1 strictly ascending candidates in lower epoch
+        let step = (start_seq - 1) / threshold as u64;
+        let mut curr = 1u64;
+        for _ in 1..threshold {
+            let check = tracker.check(curr);
+            prop_assert_eq!(check, GlobalSequenceCheck::OldDataIgnored);
+            prop_assert!(!tracker.is_reset());
+            curr += step.max(1);
+        }
+
+        // Final candidate reaches exactly current (start_seq < expected)
+        let edge_check = tracker.check(start_seq);
+        prop_assert_eq!(
+            edge_check,
+            GlobalSequenceCheck::SequenceReset {
+                expected,
+                reset_to: start_seq,
+            }
+        );
+        prop_assert!(tracker.is_reset());
+
+        // Silent continuity is blocked
+        let post_edge = tracker.check(expected);
+        prop_assert_ne!(post_edge, GlobalSequenceCheck::Valid);
+        prop_assert_eq!(post_edge, GlobalSequenceCheck::OldDataIgnored);
+
+        // Epoch recovery via reset_to
+        tracker.reset_to(start_seq);
+        prop_assert!(!tracker.is_reset());
+        prop_assert_eq!(tracker.next(), Some(expected));
+        prop_assert_eq!(tracker.check(expected), GlobalSequenceCheck::Valid);
+    }
 }
