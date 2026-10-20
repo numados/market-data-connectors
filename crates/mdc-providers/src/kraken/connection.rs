@@ -138,7 +138,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         sink.next_generation();
 
         if reconnect_attempt > 0 {
-            let backoff = backoff_policy.next_delay(reconnect_attempt);
+            let backoff = backoff_policy.next_delay(reconnect_attempt.saturating_sub(1));
             info!(
                 connection_id,
                 ?backoff,

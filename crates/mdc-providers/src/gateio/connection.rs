@@ -137,7 +137,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
 
         if reconnect_attempt > 0 {
-            let backoff_secs = (1u64 << reconnect_attempt.min(5)).min(30);
+            let backoff_secs = (1u64 << reconnect_attempt.saturating_sub(1).min(5)).min(30);
             tokio::select! {
                 _ = cancel.cancelled() => break 'reconnect_loop,
                 _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}

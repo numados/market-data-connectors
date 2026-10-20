@@ -202,7 +202,7 @@ impl TimeoutQuarantinePolicy {
 
 /// Reconnect backoff policy for connection retry scheduling.
 pub trait BackoffPolicy: Send + Sync + 'static {
-    /// Computes the delay before retry attempt `attempt`.
+    /// Computes the delay after `attempt` earlier retries (0 for the first retry, which waits `initial`).
     fn next_delay(&mut self, attempt: u32) -> Duration;
 
     /// Resets policy state on successful connection.
@@ -358,5 +358,28 @@ mod tests {
         assert_eq!(backoff.next_delay(3), Duration::from_millis(4000));
         assert_eq!(backoff.next_delay(4), Duration::from_secs(4));
         assert_eq!(backoff.next_delay(100), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_exponential_backoff_default_compatibility() {
+        let mut backoff = ExponentialBackoff::default();
+        let initial = backoff.initial;
+        assert_eq!(backoff.next_delay(0), initial, "first retry waits initial");
+        assert_eq!(backoff.next_delay(1), initial * 2);
+        assert_eq!(backoff.next_delay(2), initial * 4);
+        assert_eq!(backoff.next_delay(20), backoff.max);
+    }
+
+    #[test]
+    fn test_first_retry_attempt_counter_maps_to_initial() {
+        // Call sites hold a 1-based reconnect counter and pass `counter - 1`.
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(500), Duration::from_secs(8));
+        let delays: Vec<_> = (1u32..=6)
+            .map(|counter| backoff.next_delay(counter.saturating_sub(1)))
+            .collect();
+        assert_eq!(delays[0], Duration::from_millis(500));
+        assert_eq!(delays[1], Duration::from_millis(1000));
+        assert_eq!(delays[5], Duration::from_secs(8));
     }
 }
