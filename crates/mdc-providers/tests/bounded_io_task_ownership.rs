@@ -7,14 +7,14 @@
 
 //! Level 4 Integration tests for bounded I/O, task ownership, and configuration validation.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use mdc_core::Symbol;
 use mdc_core::error::MdcError;
 use mdc_core::integrity::{ChecksumStrategy, RawLevelRef};
 use mdc_core::resync::{ResyncDecision, ResyncFailure, ResyncPolicy};
-use mdc_core::{EmbargoTracker, Symbol};
 use mdc_providers::binance::config::BinanceConfig;
 use mdc_providers::binance::connector::BinanceConnectorBuilder;
 use mdc_providers::bitstamp::config::BitstampConfig;
@@ -39,47 +39,44 @@ use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
-#[tokio::test]
-async fn test_forwarder_tasks_exit_on_sender_drop() {
-    // Test that forwarder tasks do not spin at 100% CPU when the broadcast channel is closed
-    let (tx, _rx) = tokio::sync::broadcast::channel::<()>(16);
-    let mut b_rx = tx.subscribe();
-    let (task_cmd_tx, mut task_cmd_rx) = tokio::sync::mpsc::channel(16);
+/// Dropping the control handle closes the command channel. The connector's command fan-out and
+/// per-connection forwarders must wind down on `Closed` without spinning, stopping the
+/// connector, or blocking a later shutdown.
+#[tokio::test(flavor = "current_thread")]
+async fn test_dropping_control_handle_leaves_connector_serving_and_shutdown_clean() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
+
+    let config =
+        BinanceConfig::for_test(ws.ws_url().expect("ws url"), rest.url().expect("rest url"));
+    let (connector, handle) = BinanceConnectorBuilder::new(config)
+        .symbols(["BTCUSDT"])
+        .streaming_sink(RecordingSink::new())
+        .build()
+        .expect("build connector");
+
     let cancel = CancellationToken::new();
-    let cancel_forward = cancel.clone();
+    let cancel_child = cancel.clone();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    let forwarder = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = cancel_forward.cancelled() => break,
-                cmd = b_rx.recv() => {
-                    match cmd {
-                        Ok(c) => {
-                            if task_cmd_tx.send(c).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    }
-                }
-            }
-        }
-    });
+    ws.wait_for_handshakes(1).await;
+    drop(handle);
 
-    // Drop the broadcast sender
-    drop(tx);
-
-    // The forwarder must exit promptly upon observing RecvError::Closed without spinning
-    let res = tokio::time::timeout(Duration::from_millis(200), forwarder).await;
+    // Let the fan-out and forwarders observe the closed channel. On a current-thread runtime a
+    // spinning forwarder would starve this timer and the runner assertions below.
+    // Pacing wait: bounded real-time yield so closed-channel handling has run; no readiness signal exists.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
-        res.is_ok(),
-        "Forwarder task did not exit on broadcast close"
+        !runner.is_finished(),
+        "connector must keep serving after the handle is dropped"
     );
-    assert!(res.unwrap().is_ok());
 
-    // Receiver should see None
-    assert!(task_cmd_rx.recv().await.is_none());
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), runner)
+        .await
+        .expect("shutdown must complete promptly")
+        .expect("connector task must not panic");
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -117,8 +114,8 @@ async fn test_token_cancellation_aborts_inflight_snapshot_request() {
     let start = Instant::now();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Wait a brief moment for connection to spin up, then cancel
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Cancel only once the delayed snapshot request is actually in flight.
+    mock_rest.wait_for_requests(1).await;
     cancel.cancel();
 
     // The runner must abort promptly, far under the 3-second REST delay
@@ -130,74 +127,76 @@ async fn test_token_cancellation_aborts_inflight_snapshot_request() {
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 
+/// Repeated resync triggers while a snapshot request is in flight must coalesce into the one
+/// HTTP request, driven through the real connector (commands, spawn and coalescing included).
 #[tokio::test]
 async fn test_duplicate_snapshot_triggers_coalesce_to_one_http_request() {
-    let mock_rest = MockRest::start().await;
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
 
-    // Mount delayed response template to ensure the first request stays in flight
+    // The delayed response keeps the first request in flight while triggers pile up.
     Mock::given(method("GET"))
         .and(path("/api/v3/depth"))
         .and(query_param("symbol", "BTCUSDT"))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(200))
+                .set_delay(Duration::from_millis(300))
                 .set_body_string(
                     r#"{"lastUpdateId":1000,"bids":[["100.0","1.0"]],"asks":[["101.0","1.0"]]}"#,
                 ),
         )
-        .expect(1) // Exactly 1 request expected due to coalescing
-        .mount(mock_rest.inner())
+        .expect(1)
+        .mount(rest.inner())
         .await;
 
-    let embargo = Arc::new(Mutex::new(EmbargoTracker::new()));
-    let rest_client = mdc_providers::binance::rest::BinanceRestClient::new(
-        mock_rest.url().expect("rest url"),
-        embargo,
-        Duration::from_secs(5),
-    )
-    .expect("create client");
+    let config =
+        BinanceConfig::for_test(ws.ws_url().expect("ws url"), rest.url().expect("rest url"));
+    let sink = RecordingSink::new();
+    let (connector, handle) = BinanceConnectorBuilder::new(config)
+        .symbols(["BTCUSDT"])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-    let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancellationToken::new();
-    let mut tasks = tokio::task::JoinSet::new();
-    let mut in_flight = std::collections::HashSet::new();
+    let cancel_child = cancel.clone();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    let symbol = Symbol::from("BTCUSDT");
+    ws.wait_for_handshakes(1).await;
+    rest.wait_for_requests(1).await;
 
-    // Simulate spawn_snapshot_request logic
-    // First trigger
-    if in_flight.insert(symbol.clone()) {
-        let sym = symbol.clone();
-        let client = rest_client.clone();
-        let sem = semaphore.clone();
-        let tx = tx.clone();
-        let c = cancel.clone();
-        tasks.spawn(async move {
-            tokio::select! {
-                _ = c.cancelled() => {}
-                _ = async {
-                    let _permit = sem.acquire().await.ok()?;
-                    let res = client.fetch_depth(sym.as_str(), Instant::now()).await;
-                    let _ = tx.send((sym, res)).await;
-                    Some(())
-                } => {}
-            }
-        });
+    // Triggers while the first request is still in flight.
+    for _ in 0..3 {
+        handle
+            .request_resync(Symbol::from("BTCUSDT"))
+            .await
+            .expect("resync command");
     }
+    handle
+        .request_resync_all()
+        .await
+        .expect("resync-all command");
 
-    // Second trigger while in-flight
-    let coalesced = !in_flight.insert(symbol.clone());
-    assert!(
-        coalesced,
-        "Second snapshot request must be coalesced and skipped"
+    // A diff bridging the snapshot lets the in-flight response complete the resync.
+    let _ = ws.broadcast_text(
+        r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":999,"u":1002,"b":[["100.0","2.0"]],"a":[]}}"#
+            .to_string(),
     );
+    sink.wait_for_alert_matching(|a| matches!(a, mdc_core::IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
-    // Wait for the in-flight task to complete
-    let _ = tasks.join_next().await;
+    assert_eq!(
+        rest.inner()
+            .received_requests()
+            .await
+            .map_or(0, |requests| requests.len()),
+        1,
+        "all triggers must coalesce onto the single in-flight request"
+    );
+    rest.inner().verify().await;
 
-    // Verify wiremock assertion passes (expect(1))
-    mock_rest.inner().verify().await;
+    cancel.cancel();
+    let _ = runner.await;
 }
 
 #[tokio::test]
