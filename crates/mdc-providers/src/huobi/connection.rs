@@ -203,22 +203,8 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         'frame_loop: loop {
             tokio::select! {
-                _ = cancel.cancelled() => {
-                    for (sym, tag) in &symbols {
-                        sink.best_effort_emit_alert(
-                            VenueId::Huobi,
-                            sym,
-                            *tag,
-                            None,
-                            crate::now_nanos(),
-                            None,
-                            IntegrityAlert::ConnectionLost {
-                                reason: DisconnectKind::Shutdown,
-                            },
-                        );
-                    }
-                    break 'reconnect_loop;
-                }
+                // The post-loop cancellation block emits the single Shutdown alert.
+                _ = cancel.cancelled() => break 'reconnect_loop,
 
                 cmd_opt = command_rx.recv() => {
                     match cmd_opt {
