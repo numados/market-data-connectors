@@ -20,6 +20,8 @@ pub struct BitstampConfig {
     pub request_timeout: Duration,
     /// Maximum number of deltas to buffer per symbol while awaiting a snapshot (default: 1024).
     pub buffer_capacity: usize,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl Default for BitstampConfig {
@@ -36,6 +38,7 @@ impl Default for BitstampConfig {
             snapshot_retry_cooldown: Duration::from_secs(5),
             request_timeout: Duration::from_secs(5),
             buffer_capacity: 1024,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

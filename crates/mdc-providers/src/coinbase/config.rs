@@ -29,6 +29,8 @@ pub struct CoinbaseConfig {
     pub streams: CoinbaseStreams,
     /// Injected session run token (generated if not provided).
     pub run_id: Option<mdc_core::RunId>,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl CoinbaseConfig {
@@ -79,6 +81,7 @@ impl Default for CoinbaseConfig {
             max_backoff: Duration::from_secs(30),
             streams: CoinbaseStreams::default(),
             run_id: None,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

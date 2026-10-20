@@ -13,7 +13,6 @@ use mdc_core::resync::{DeltaDecision, SnapshotOutcome};
 use mdc_core::sink::{BookKind, StreamingSink};
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -103,7 +102,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         let ws_res = tokio::select! {
             _ = cancel.cancelled() => break 'reconnect_loop,
-            res = connect_async(config.ws_url.as_str()) => res,
+            res = crate::ws_util::connect_ws(config.ws_url.as_str(), config.connection_timeout) => res,
         };
         let ws_stream = match ws_res {
             Ok((stream, _response)) => {

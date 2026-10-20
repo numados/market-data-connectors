@@ -28,6 +28,31 @@ pub(crate) mod sink_util;
     feature = "binance",
     feature = "kraken",
     feature = "coinbase",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "lmax",
+    feature = "huobi",
+    feature = "coinbase-advanced",
+))]
+pub(crate) mod supervisor;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "lmax",
+    feature = "huobi",
+    feature = "coinbase-advanced",
+))]
+pub(crate) mod ws_util;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
     feature = "bitfinex",
     feature = "gateio",
     feature = "bitstamp",

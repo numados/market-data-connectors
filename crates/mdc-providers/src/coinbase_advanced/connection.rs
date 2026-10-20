@@ -11,7 +11,6 @@ use mdc_core::{
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -100,28 +99,17 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         let ws_stream = tokio::select! {
             _ = cancel.cancelled() => break 'reconnect_loop,
-            res = tokio::time::timeout(
-                config.connection_timeout,
-                connect_async(config.ws_url.as_str()),
-            ) => match res {
-                Ok(Ok((stream, _response))) => {
+            res = crate::ws_util::connect_ws(config.ws_url.as_str(), config.connection_timeout) => match res {
+                Ok((stream, _response)) => {
                     reconnect_attempt = 0;
                     backoff_policy.reset();
                     stream
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     warn!(
                         connection_id,
                         error = %e,
                         "Failed to connect to Coinbase Advanced WebSocket"
-                    );
-                    reconnect_attempt += 1;
-                    continue 'reconnect_loop;
-                }
-                Err(_) => {
-                    warn!(
-                        connection_id,
-                        "Connection attempt to Coinbase Advanced timed out"
                     );
                     reconnect_attempt += 1;
                     continue 'reconnect_loop;

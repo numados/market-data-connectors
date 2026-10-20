@@ -18,6 +18,8 @@ pub struct GateioConfig {
     pub resync_buffer_capacity: usize,
     /// Timeout before triggering a resubscribe retry on resync failure (default: 5s).
     pub resync_timeout: Duration,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl Default for GateioConfig {
@@ -31,6 +33,7 @@ impl Default for GateioConfig {
             streams: GateioStreams::default(),
             resync_buffer_capacity: 1000,
             resync_timeout: Duration::from_secs(5),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

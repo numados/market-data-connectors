@@ -8,6 +8,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+
+use crate::supervisor::{
+    COMMAND_BROADCAST_CAPACITY, CONNECTION_COMMAND_CAPACITY, SHUTDOWN_GRACE, spawn_command_fanout,
+    spawn_command_forwarder, supervise_connections,
+};
 use url::Url;
 
 use crate::gateio::catalog::DEFAULT_GATEIO_CATALOG_ENDPOINT;
@@ -103,28 +108,15 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
             .map(<[(Symbol, SymbolTag)]>::to_vec)
             .collect();
         let total_connections = chunks.len();
-        let mut sink_failure_count = 0;
 
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel::<Command>(32);
-        let mut command_rx = self.command_rx;
-        let cmd_broadcast = broadcast_tx.clone();
-        let cancel_cmd = cancel.clone();
-
-        aux_tasks.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_cmd.cancelled() => break,
-                    cmd_opt = command_rx.recv() => {
-                        match cmd_opt {
-                            Some(cmd) => {
-                                let _ = cmd_broadcast.send(cmd);
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
+        let (broadcast_tx, _) =
+            tokio::sync::broadcast::channel::<Command>(COMMAND_BROADCAST_CAPACITY);
+        spawn_command_fanout(
+            &mut aux_tasks,
+            self.command_rx,
+            broadcast_tx.clone(),
+            cancel.clone(),
+        );
 
         for (i, chunk) in chunks.into_iter().enumerate() {
             let connection_id = (i + 1) as u32;
@@ -133,30 +125,16 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
             let cancel_conn = cancel.clone();
             let gen_alloc = generation_allocator.clone();
 
-            let mut b_rx = broadcast_tx.subscribe();
-            let (task_cmd_tx, task_cmd_rx) = mpsc::channel(16);
+            let b_rx = broadcast_tx.subscribe();
+            let (task_cmd_tx, task_cmd_rx) = mpsc::channel(CONNECTION_COMMAND_CAPACITY);
 
-            let cancel_forward = cancel.clone();
-            aux_tasks.spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = cancel_forward.cancelled() => break,
-                        cmd = b_rx.recv() => {
-                            match cmd {
-                                Ok(c) => {
-                                    if task_cmd_tx.send(c).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                    tracing::warn!(connection_id, skipped, "Command broadcast lagged; commands dropped");
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+            spawn_command_forwarder(
+                &mut aux_tasks,
+                connection_id,
+                b_rx,
+                task_cmd_tx,
+                cancel.clone(),
+            );
 
             let policy_factory = self.policy_factory.clone();
             conn_tasks.spawn(async move {
@@ -175,53 +153,14 @@ impl<S: StreamingSink + Clone> GateioConnector<S> {
             });
         }
 
-        let mut result = Ok(());
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    while let Some(res) = conn_tasks.join_next().await {
-                        if let Err(e) = res {
-                            if !e.is_cancelled() {
-                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
-                                    format!("Gate.io connection task panicked: {e}"),
-                                ))));
-                            }
-                        }
-                    }
-                    break;
-                }
-                res = conn_tasks.join_next() => {
-                    match res {
-                        Some(Ok(task_res)) => {
-                            if let Err(crate::sink_util::SinkError) = task_res {
-                                sink_failure_count += 1;
-                            }
-                            if conn_tasks.is_empty() {
-                                if total_connections > 0 && sink_failure_count == total_connections {
-                                    result = Err(MdcError::Sink(Box::new(crate::sink_util::SinkError)));
-                                }
-                                break;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            if !e.is_cancelled() {
-                                result = Err(MdcError::Transport(Box::new(std::io::Error::other(
-                                    format!("Gate.io connection task panicked: {e}"),
-                                ))));
-                            }
-                            break;
-                        }
-                        None => break,
-                    }
-                }
-            }
-        }
-        conn_tasks.abort_all();
-        aux_tasks.abort_all();
-        while conn_tasks.join_next().await.is_some() {}
-        while aux_tasks.join_next().await.is_some() {}
-
-        result
+        supervise_connections(
+            conn_tasks,
+            aux_tasks,
+            cancel,
+            total_connections,
+            SHUTDOWN_GRACE,
+        )
+        .await
     }
 }
 

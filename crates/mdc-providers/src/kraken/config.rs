@@ -58,6 +58,8 @@ pub struct KrakenConfig {
     pub run_id: Option<mdc_core::RunId>,
     /// Optional pluggable checksum calculation strategy (default: Kraken CRC32 over top 10 levels).
     pub checksum_strategy: Option<std::sync::Arc<dyn mdc_core::integrity::ChecksumStrategy>>,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl std::fmt::Debug for KrakenConfig {
@@ -71,6 +73,7 @@ impl std::fmt::Debug for KrakenConfig {
             .field("quarantine_duration", &self.quarantine_duration)
             .field("streams", &self.streams)
             .field("watchdog_ping_after", &self.watchdog_ping_after)
+            .field("connection_timeout", &self.connection_timeout)
             .field("watchdog_reconnect_after", &self.watchdog_reconnect_after)
             .field("checksum_policy", &self.checksum_policy)
             .field("initial_backoff", &self.initial_backoff)
@@ -102,6 +105,7 @@ impl Default for KrakenConfig {
             max_backoff: Duration::from_secs(15),
             run_id: None,
             checksum_strategy: None,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

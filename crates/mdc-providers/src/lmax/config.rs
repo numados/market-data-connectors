@@ -60,6 +60,8 @@ pub struct LmaxConfig {
     pub silence_timeout: Duration,
     /// Heartbeat ping interval (default: 30s).
     pub ping_interval: Duration,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl Default for LmaxConfig {
@@ -74,6 +76,7 @@ impl Default for LmaxConfig {
             control_pacing: ControlPacing::default(),
             silence_timeout: Duration::from_secs(45),
             ping_interval: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

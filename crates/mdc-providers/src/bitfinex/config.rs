@@ -65,6 +65,8 @@ pub struct BitfinexConfig {
     pub reconnect_backoff_max: Duration,
     /// Injected session run token (generated if not provided).
     pub run_id: Option<RunId>,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl Default for BitfinexConfig {
@@ -82,6 +84,7 @@ impl Default for BitfinexConfig {
             reconnect_backoff_initial: Duration::from_millis(100),
             reconnect_backoff_max: Duration::from_secs(10),
             run_id: None,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }

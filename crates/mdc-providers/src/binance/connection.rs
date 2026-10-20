@@ -149,7 +149,7 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         let ws_res = tokio::select! {
             _ = cancel.cancelled() => break 'reconnect_loop,
-            res = tokio_tungstenite::connect_async(ws_url.as_str()) => res,
+            res = crate::ws_util::connect_ws(ws_url.as_str(), config.connection_timeout) => res,
         };
         let (mut ws_stream, _) = match ws_res {
             Ok(s) => {

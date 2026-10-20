@@ -327,3 +327,32 @@ async fn test_ws_gap_injection_triggers_resync() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+/// Wiring smoke: a handle command fans out through the shared forwarder to
+/// every bucketed connection task.
+#[tokio::test]
+async fn test_handle_command_reaches_every_bucket() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
+
+    let mut config =
+        BinanceConfig::for_test(ws.ws_url().expect("ws url"), rest.url().expect("rest url"));
+    config.symbols_per_connection = 1;
+
+    let (connector, handle) = BinanceConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTCUSDT"), Symbol::from("ETHUSDT")])
+        .streaming_sink(RecordingSink::new())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    assert_eq!(ws.wait_for_handshakes(2).await.len(), 2);
+    handle.reconnect("operator").await.expect("reconnect");
+    assert!(ws.wait_for_handshakes(4).await.len() >= 4);
+
+    cancel.cancel();
+    let _ = runner.await;
+}

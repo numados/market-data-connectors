@@ -50,6 +50,8 @@ pub struct BinanceConfig {
     pub initial_backoff: Duration,
     /// Maximum reconnect backoff duration. Default: 15 seconds.
     pub max_backoff: Duration,
+    /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
+    pub connection_timeout: Duration,
 }
 
 impl Default for BinanceConfig {
@@ -67,6 +69,7 @@ impl Default for BinanceConfig {
             rest_timeout: Duration::from_secs(30),
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(15),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -86,6 +89,7 @@ impl BinanceConfig {
             rest_timeout: Duration::from_secs(5),
             initial_backoff: Duration::from_millis(20),
             max_backoff: Duration::from_millis(100),
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }
