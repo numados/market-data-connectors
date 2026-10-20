@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, Symbol};
+use mdc_core::{
+    BookKind, DisconnectKind, IntegrityAlert, SequenceRange, Side, SourceErrorKind, Symbol,
+};
 use mdc_providers::huobi::{HuobiConfig, HuobiConnectorBuilder, HuobiStreams};
 use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, load_fixture};
 use rust_decimal::Decimal;
@@ -902,6 +904,195 @@ async fn test_silence_episode_emits_exactly_one_connection_lost() {
         lost_reasons(&sink, "btcusdt"),
         vec![DisconnectKind::SilenceTimeout]
     );
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// Ids of every `mbp` snapshot request the connector has sent, in order.
+fn snapshot_request_ids(ws: &MockWsServer) -> Vec<String> {
+    ws.received_messages()
+        .iter()
+        .filter_map(|msg| {
+            let v = serde_json::from_str::<serde_json::Value>(msg).ok()?;
+            v["req"].as_str()?;
+            v["id"].as_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+/// Waits for the `n`-th snapshot request and returns all ids sent so far.
+async fn wait_for_snapshot_requests(ws: &MockWsServer, n: usize) -> Vec<String> {
+    mdc_testkit::within(Duration::from_secs(5), "snapshot request", async {
+        loop {
+            let ids = snapshot_request_ids(ws);
+            if ids.len() >= n {
+                return ids;
+            }
+            let seen = ws.received_messages().len();
+            ws.wait_for_client_messages(seen + 1).await;
+        }
+    })
+    .await
+}
+
+fn delta_frame(prev: u64, seq: u64) -> Vec<u8> {
+    let raw = load_fixture(UPDATE_FIXTURE).expect("load update");
+    let mut v: serde_json::Value = serde_json::from_str(&raw).expect("parse update");
+    v["tick"]["prevSeqNum"] = serde_json::json!(prev);
+    v["tick"]["seqNum"] = serde_json::json!(seq);
+    gzip_compress(v.to_string().as_bytes())
+}
+
+fn snapshot_frame(req_id: &str, seq: u64) -> serde_json::Value {
+    let raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
+    let mut v: serde_json::Value = serde_json::from_str(&raw).expect("parse snapshot");
+    v["id"] = serde_json::Value::String(req_id.to_owned());
+    v["data"]["seqNum"] = serde_json::json!(seq);
+    v
+}
+
+fn book_kinds(sink: &RecordingSink) -> Vec<BookKind> {
+    sink.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { kind, .. } => Some(kind),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Overflowing the delta buffer while a snapshot is outstanding announces a new resync and
+/// discards the buffered deltas; the outstanding snapshot then recovers the book and the live
+/// stream continues contiguously from it.
+#[tokio::test]
+async fn test_buffer_overflow_restarts_resync_and_recovers() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = HuobiConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.resync_buffer_capacity = 1;
+    config.resync_timeout = Duration::from_millis(50);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = HuobiConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btcusdt")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    let req_id = wait_for_snapshot_requests(&ws, 1).await.remove(0);
+
+    // Capacity 1: the first delta is buffered, the second overflows.
+    let _ = ws.broadcast_binary(delta_frame(100, 101));
+    let _ = ws.broadcast_binary(delta_frame(101, 102));
+    sink.wait_for_alerts_for("btcusdt", 2).await;
+    assert_eq!(
+        sink.alerts_for("btcusdt"),
+        vec![IntegrityAlert::ResyncStarted, IntegrityAlert::ResyncStarted],
+        "connect-time and overflow-triggered resync"
+    );
+    assert!(
+        book_kinds(&sink).is_empty(),
+        "overflowed deltas must not be published"
+    );
+
+    // The outstanding snapshot (taken after the lost deltas) recovers the book.
+    let _ = ws.broadcast_binary(gzip_compress(
+        snapshot_frame(&req_id, 102).to_string().as_bytes(),
+    ));
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ResyncCompleted {
+                last_update_id: Some(102)
+            }
+        )
+    })
+    .await;
+    let _ = ws.broadcast_binary(delta_frame(102, 103));
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::EndBook {
+                seq: Some(SequenceRange {
+                    first: 103,
+                    last: 103
+                }),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(book_kinds(&sink), vec![BookKind::Snapshot, BookKind::Delta]);
+    assert_eq!(
+        snapshot_request_ids(&ws).len(),
+        1,
+        "no extra snapshot request once the book is synchronised"
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// A snapshot reply whose payload cannot be decoded is reported, nothing is published, and the
+/// snapshot is re-requested (with a new id) until a good one arrives.
+#[tokio::test]
+async fn test_malformed_snapshot_is_requeued_and_recovers() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = HuobiConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.resync_timeout = Duration::from_millis(100);
+    config.snapshot_cooldown = Duration::from_millis(100);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = HuobiConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btcusdt")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    let first_id = wait_for_snapshot_requests(&ws, 1).await.remove(0);
+
+    let mut malformed = snapshot_frame(&first_id, 100);
+    malformed["data"]["bids"] = serde_json::json!([["not-a-price", 1.0]]);
+    let _ = ws.broadcast_binary(gzip_compress(malformed.to_string().as_bytes()));
+
+    sink.wait_for_alerts_for("btcusdt", 3).await;
+    assert_eq!(
+        sink.alerts_for("btcusdt"),
+        vec![
+            IntegrityAlert::ResyncStarted,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::ResyncStarted,
+        ]
+    );
+    assert!(
+        book_kinds(&sink).is_empty(),
+        "malformed snapshot is not published"
+    );
+
+    let ids = wait_for_snapshot_requests(&ws, 2).await;
+    assert_eq!(ids.len(), 2, "exactly one re-request");
+    assert_ne!(ids[0], ids[1], "the retry uses a fresh request id");
+
+    let _ = ws.broadcast_binary(gzip_compress(
+        snapshot_frame(&ids[1], 100).to_string().as_bytes(),
+    ));
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+    assert_eq!(book_kinds(&sink), vec![BookKind::Snapshot]);
 
     cancel.cancel();
     let _ = runner.await;

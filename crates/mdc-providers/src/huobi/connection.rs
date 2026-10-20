@@ -586,7 +586,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         );
                                     }
 
-                                    if !snapshot_success {
+                                    if snapshot_success {
+                                        // An overflow may have queued a re-request that this
+                                        // snapshot already made redundant.
+                                        pending_snapshots.retain(|queued| queued != &active_symbol);
+                                    } else {
                                         if let Some(fsm) = fsms.get_mut(&active_symbol) {
                                             fsm.record_snapshot_failure(now);
                                             let resync_alert = fsm.trigger_resync(now);
