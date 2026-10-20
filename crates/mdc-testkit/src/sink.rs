@@ -1,6 +1,7 @@
 //! Streaming sink implementations for testing and benchmarking.
 
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mdc_core::{
@@ -496,6 +497,7 @@ pub struct FaultInjectingSink {
     fault_point: FaultInjectionPoint,
     level_count: Arc<Mutex<usize>>,
     callback_count: Arc<Mutex<usize>>,
+    invocations: Arc<AtomicUsize>,
     tripped: Arc<Mutex<bool>>,
 }
 
@@ -507,6 +509,7 @@ impl FaultInjectingSink {
             fault_point,
             level_count: Arc::new(Mutex::new(0)),
             callback_count: Arc::new(Mutex::new(0)),
+            invocations: Arc::new(AtomicUsize::new(0)),
             tripped: Arc::new(Mutex::new(false)),
         }
     }
@@ -541,6 +544,12 @@ impl FaultInjectingSink {
         *self.tripped.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Returns the number of data and alert callbacks attempted, excluding the
+    /// terminal `SinkFailure` alert that connectors emit after a failure.
+    pub fn callback_invocations(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
+    }
+
     /// Returns the number of level invocations attempted.
     pub fn level_invocations(&self) -> usize {
         *self.level_count.lock().unwrap_or_else(|p| p.into_inner())
@@ -562,6 +571,7 @@ impl FaultInjectingSink {
     }
 
     fn check_callback_fault(&self) -> Result<(), InjectedSinkError> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
         if let FaultInjectionPoint::NthCallback(n) = self.fault_point {
             let mut count = self
                 .callback_count

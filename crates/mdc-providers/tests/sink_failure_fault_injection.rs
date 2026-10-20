@@ -10,6 +10,37 @@
 //! `book_ticker`, and `reference_rate` immediately halt the connector task, emit `IntegrityAlert::SinkFailure`,
 //! and prevent further emissions.
 
+use std::time::Duration;
+
+use mdc_testkit::{FaultInjectingSink, MockWsServer};
+
+/// Awaits the connector task. A timeout or a panicked task fails the test.
+async fn join_halted<T>(runner: tokio::task::JoinHandle<T>, bound: Duration) -> T {
+    tokio::time::timeout(bound, runner)
+        .await
+        .expect("connector task should terminate after sink error")
+        .expect("connector task must not panic")
+}
+
+/// After a sink fault the socket must be closed, the connector must not have
+/// reconnected, and no further sink callbacks may occur.
+async fn assert_halted_cleanly(sink: &FaultInjectingSink, ws: &MockWsServer) {
+    tokio::time::timeout(Duration::from_secs(2), ws.wait_for_disconnects(1))
+        .await
+        .expect("socket must be closed after sink failure");
+    assert_eq!(ws.connection_count(), 1, "no reconnect after sink failure");
+    let callbacks = sink.callback_invocations();
+    // The connector is gone and the socket closed: further server traffic
+    // has no consumer and cannot reach the sink.
+    let _ = ws.broadcast_text("{}".to_string());
+    tokio::task::yield_now().await;
+    assert_eq!(
+        sink.callback_invocations(),
+        callbacks,
+        "no sink callbacks after failure"
+    );
+}
+
 #[cfg(feature = "binance")]
 mod binance_faults {
     use std::time::Duration;
@@ -50,11 +81,13 @@ mod binance_faults {
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
         // Await runner termination on sink fault (should terminate without hang)
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
 
         assert!(
             sink.is_tripped(),
@@ -95,11 +128,13 @@ mod binance_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
 
         assert!(
             sink.is_tripped(),
@@ -140,11 +175,13 @@ mod binance_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
 
         assert!(
             sink.is_tripped(),
@@ -189,11 +226,13 @@ mod binance_faults {
         // Broadcast book ticker that will trigger fault
         let _ = ws.broadcast_text(TICKER_JSON);
 
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
 
         assert!(
             sink.is_tripped(),
@@ -239,11 +278,13 @@ mod binance_faults {
         // Broadcast trade that will trigger fault
         let _ = ws.broadcast_text(TRADE_JSON);
 
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
 
         assert!(
             sink.is_tripped(),
@@ -305,10 +346,11 @@ mod frankfurter_faults {
 
         let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-        let res = tokio::time::timeout(Duration::from_millis(1000), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1000))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
 
         assert!(
@@ -365,11 +407,13 @@ mod coinbase_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -420,11 +464,13 @@ mod kraken_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -482,11 +528,13 @@ mod bitfinex_faults {
         let (_handle, runner) = connector.run(sink.clone(), cancel_child);
         let run_task = tokio::spawn(runner);
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), run_task).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(run_task, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -542,11 +590,13 @@ mod bitstamp_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -599,11 +649,13 @@ mod gateio_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -671,11 +723,13 @@ mod huobi_faults {
         snap_val["data"]["seqNum"] = serde_json::json!(100);
         let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -728,11 +782,13 @@ mod lmax_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -792,10 +848,11 @@ mod vwd_faults {
         let cancel = CancellationToken::new();
 
         let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(1500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
@@ -849,11 +906,13 @@ mod coinbase_advanced_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -888,11 +947,13 @@ mod coinbase_advanced_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -927,11 +988,13 @@ mod coinbase_advanced_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -968,11 +1031,13 @@ mod coinbase_advanced_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(
@@ -1002,11 +1067,13 @@ mod coinbase_advanced_faults {
         let cancel_child = cancel.child_token();
         let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
         assert!(
-            res.is_ok(),
-            "connector task should terminate after sink error"
+            super::join_halted(runner, Duration::from_millis(500))
+                .await
+                .is_err(),
+            "sink failure must surface as an error"
         );
+        super::assert_halted_cleanly(&sink, &ws).await;
         assert!(sink.is_tripped(), "fault point should be tripped");
         let alerts = sink.alerts();
         assert!(

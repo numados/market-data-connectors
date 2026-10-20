@@ -40,12 +40,14 @@ pub struct MockWsServer {
     received_messages: Arc<Mutex<Vec<String>>>,
     connection_count: Arc<AtomicUsize>,
     ping_count: Arc<AtomicUsize>,
+    disconnect_count: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Vec<WsAction>>>>,
     broadcast_tx: broadcast::Sender<Message>,
     conn_notify: Arc<tokio::sync::Notify>,
     handshake_notify: Arc<tokio::sync::Notify>,
     message_notify: Arc<tokio::sync::Notify>,
     ping_notify: Arc<tokio::sync::Notify>,
+    disconnect_notify: Arc<tokio::sync::Notify>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     server_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -61,6 +63,19 @@ impl Drop for MockWsServer {
     }
 }
 
+/// Records the end of an established mock connection when dropped.
+struct DisconnectGuard {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for DisconnectGuard {
+    fn drop(&mut self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
 impl MockWsServer {
     /// Spawns a new `MockWsServer` listening on `127.0.0.1:0`.
     pub async fn spawn() -> Result<Self, std::io::Error> {
@@ -71,6 +86,7 @@ impl MockWsServer {
         let received_messages = Arc::new(Mutex::new(Vec::new()));
         let connection_count = Arc::new(AtomicUsize::new(0));
         let ping_count = Arc::new(AtomicUsize::new(0));
+        let disconnect_count = Arc::new(AtomicUsize::new(0));
         let scripts = Arc::new(Mutex::new(VecDeque::new()));
         let (broadcast_tx, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -79,11 +95,13 @@ impl MockWsServer {
         let handshake_notify = Arc::new(tokio::sync::Notify::new());
         let message_notify = Arc::new(tokio::sync::Notify::new());
         let ping_notify = Arc::new(tokio::sync::Notify::new());
+        let disconnect_notify = Arc::new(tokio::sync::Notify::new());
 
         let server_paths = Arc::clone(&handshake_paths);
         let server_received = Arc::clone(&received_messages);
         let server_conns = Arc::clone(&connection_count);
         let server_pings = Arc::clone(&ping_count);
+        let server_disconnects = Arc::clone(&disconnect_count);
         let server_scripts = Arc::clone(&scripts);
         let server_broadcast = broadcast_tx.clone();
 
@@ -91,6 +109,7 @@ impl MockWsServer {
         let s_handshake_notify = Arc::clone(&handshake_notify);
         let s_message_notify = Arc::clone(&message_notify);
         let s_ping_notify = Arc::clone(&ping_notify);
+        let s_disconnect_notify = Arc::clone(&disconnect_notify);
 
         let server_task = tokio::spawn(async move {
             let mut connection_tasks = tokio::task::JoinSet::new();
@@ -118,6 +137,8 @@ impl MockWsServer {
                         let hs_notify = Arc::clone(&s_handshake_notify);
                         let msg_notify = Arc::clone(&s_message_notify);
                         let ping_notify = Arc::clone(&s_ping_notify);
+                        let disconnects = Arc::clone(&server_disconnects);
+                        let disconnect_notify = Arc::clone(&s_disconnect_notify);
 
                         connection_tasks.spawn(async move {
                             let mut path_capture = String::new();
@@ -135,6 +156,12 @@ impl MockWsServer {
                             let mut ws_stream = match ws_res {
                                 Ok(ws) => ws,
                                 Err(_) => return,
+                            };
+
+                            // Counts the connection as closed on every exit path.
+                            let _closed = DisconnectGuard {
+                                count: disconnects,
+                                notify: disconnect_notify,
                             };
 
                             if !path_capture.is_empty() {
@@ -243,12 +270,14 @@ impl MockWsServer {
             received_messages,
             connection_count,
             ping_count,
+            disconnect_count,
             scripts,
             broadcast_tx,
             conn_notify,
             handshake_notify,
             message_notify,
             ping_notify,
+            disconnect_notify,
             shutdown_tx: Some(shutdown_tx),
             server_task: Some(server_task),
         })
@@ -313,6 +342,24 @@ impl MockWsServer {
             }
             notified.await;
         }
+    }
+
+    /// Waits until at least `target_count` established connections have ended
+    /// (client closed, dropped, or errored).
+    pub async fn wait_for_disconnects(&self, target_count: usize) -> usize {
+        loop {
+            let notified = self.disconnect_notify.notified();
+            let count = self.disconnect_count();
+            if count >= target_count {
+                return count;
+            }
+            notified.await;
+        }
+    }
+
+    /// Returns how many established connections have ended.
+    pub fn disconnect_count(&self) -> usize {
+        self.disconnect_count.load(Ordering::SeqCst)
     }
 
     /// Waits until at least `target_count` ping frames have been received from connected clients.
