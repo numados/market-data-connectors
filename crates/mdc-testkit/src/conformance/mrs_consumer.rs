@@ -40,6 +40,7 @@ pub struct MrsConsumerHarness {
     reference_rate_symbols: HashSet<Symbol>,
     seen_trades: HashMap<(Symbol, NativeTradeIdentity), Trade>,
     stale_symbols: HashSet<Symbol>,
+    awaiting_recovery_snapshot: HashSet<Symbol>,
     last_ordinals: HashMap<u64, u64>,
     stats: MrsConsumerStats,
 }
@@ -54,6 +55,7 @@ impl MrsConsumerHarness {
             reference_rate_symbols: HashSet::new(),
             seen_trades: HashMap::new(),
             stale_symbols: HashSet::new(),
+            awaiting_recovery_snapshot: HashSet::new(),
             last_ordinals: HashMap::new(),
             stats: MrsConsumerStats::default(),
         }
@@ -125,12 +127,26 @@ impl MrsConsumerHarness {
         if let MarketDataKind::IntegrityAlert(alert) = &event.kind {
             match alert {
                 IntegrityAlert::ResyncCompleted { .. } => {
+                    // Recovery is only complete once a snapshot rebuilt the book.
+                    if self.awaiting_recovery_snapshot.contains(&event.symbol) {
+                        return Err(format!(
+                            "ResyncCompleted for {} without an intervening recovery snapshot",
+                            event.symbol
+                        ));
+                    }
                     self.stale_symbols.remove(&event.symbol);
                 }
-                IntegrityAlert::ResyncStarted
-                | IntegrityAlert::GapDetected { .. }
-                | IntegrityAlert::ChecksumMismatch { .. }
-                | IntegrityAlert::SilenceTimeout { .. }
+                IntegrityAlert::GapDetected { .. } | IntegrityAlert::ChecksumMismatch { .. } => {
+                    self.awaiting_recovery_snapshot.insert(event.symbol.clone());
+                    self.stale_symbols.insert(event.symbol.clone());
+                }
+                IntegrityAlert::ResyncStarted => {
+                    if self.requirements.quote_mode == QuoteMode::L2Projection {
+                        self.awaiting_recovery_snapshot.insert(event.symbol.clone());
+                    }
+                    self.stale_symbols.insert(event.symbol.clone());
+                }
+                IntegrityAlert::SilenceTimeout { .. }
                 | IntegrityAlert::HeartbeatTimeout { .. }
                 | IntegrityAlert::ConnectionLost { .. }
                 | IntegrityAlert::SourceError { .. }
@@ -144,6 +160,7 @@ impl MrsConsumerHarness {
         // Snapshot clears stale marker for that symbol
         if let MarketDataKind::L2Snapshot(_) = &event.kind {
             self.stale_symbols.remove(&event.symbol);
+            self.awaiting_recovery_snapshot.remove(&event.symbol);
         }
 
         // ReferenceRate verification rules
@@ -187,19 +204,24 @@ impl MrsConsumerHarness {
                 ));
             }
             if self.requirements.require_verified_side {
-                if let Some(caps) = &self.capabilities {
-                    if !matches!(
-                        caps.trades,
-                        TradeCapability::Verified {
-                            side_semantics: SideSemantics::AggressorTaker,
-                            ..
-                        }
-                    ) {
-                        return Err(format!(
-                            "Trade rejected for symbol {}: consumer requires verified taker side but provider trades capability is {:?}",
-                            event.symbol, caps.trades
-                        ));
+                // Fail closed: without declared capabilities the side cannot be verified.
+                let Some(caps) = &self.capabilities else {
+                    return Err(format!(
+                        "Trade rejected for symbol {}: consumer requires verified taker side but no provider capabilities were supplied",
+                        event.symbol
+                    ));
+                };
+                if !matches!(
+                    caps.trades,
+                    TradeCapability::Verified {
+                        side_semantics: SideSemantics::AggressorTaker,
+                        ..
                     }
+                ) {
+                    return Err(format!(
+                        "Trade rejected for symbol {}: consumer requires verified taker side but provider trades capability is {:?}",
+                        event.symbol, caps.trades
+                    ));
                 }
             }
             if let Some(id) = &trade.identity {
@@ -478,5 +500,90 @@ mod tests {
         let trade2 = Trade::new(None, Decimal::from(50000), Decimal::from(1), Side::Bid);
         let trade2_ev = make_event("BTCUSDT", 1, 4, MarketDataKind::Trade(trade2));
         assert!(harness.ingest_event(&trade2_ev).is_ok());
+    }
+
+    #[test]
+    fn test_verified_side_fails_closed_without_capabilities() {
+        let req = ConsumerRequirements {
+            quote_mode: QuoteMode::NativeTicker,
+            require_stable_trades: false,
+            require_verified_side: true,
+        };
+        let mut harness = MrsConsumerHarness::new(req);
+        harness.register_symbol(Symbol::from("BTCUSDT"), 0, None);
+
+        let trade = Trade::new(None, Decimal::from(50000), Decimal::from(1), Side::Bid);
+        let err = harness
+            .ingest_event(&make_event("BTCUSDT", 1, 1, MarketDataKind::Trade(trade)))
+            .unwrap_err();
+        assert!(err.contains("no provider capabilities"), "{err}");
+    }
+
+    #[test]
+    fn test_gap_then_resync_completed_without_snapshot_is_rejected() {
+        let req = ConsumerRequirements {
+            quote_mode: QuoteMode::L2Projection,
+            require_stable_trades: false,
+            require_verified_side: false,
+        };
+        let mut harness = MrsConsumerHarness::new(req);
+        harness.register_symbol(Symbol::from("BTCUSDT"), 0, Some(10));
+
+        let gap = MarketDataKind::IntegrityAlert(IntegrityAlert::GapDetected {
+            expected: 10,
+            received: 12,
+        });
+        harness
+            .ingest_event(&make_event("BTCUSDT", 1, 1, gap))
+            .unwrap();
+
+        let completed = MarketDataKind::IntegrityAlert(IntegrityAlert::ResyncCompleted {
+            last_update_id: Some(12),
+        });
+        let err = harness
+            .ingest_event(&make_event("BTCUSDT", 1, 2, completed))
+            .unwrap_err();
+        assert!(
+            err.contains("without an intervening recovery snapshot"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_gap_snapshot_resync_completed_is_accepted() {
+        let req = ConsumerRequirements {
+            quote_mode: QuoteMode::L2Projection,
+            require_stable_trades: false,
+            require_verified_side: false,
+        };
+        let mut harness = MrsConsumerHarness::new(req);
+        harness.register_symbol(Symbol::from("BTCUSDT"), 0, Some(10));
+
+        let gap = MarketDataKind::IntegrityAlert(IntegrityAlert::GapDetected {
+            expected: 10,
+            received: 12,
+        });
+        harness
+            .ingest_event(&make_event("BTCUSDT", 1, 1, gap))
+            .unwrap();
+        let snap = L2Snapshot::new(
+            vec![PriceLevel::new(Decimal::from(100), Decimal::ONE)],
+            vec![PriceLevel::new(Decimal::from(101), Decimal::ONE)],
+            Some(12),
+        );
+        harness
+            .ingest_event(&make_event(
+                "BTCUSDT",
+                1,
+                2,
+                MarketDataKind::L2Snapshot(snap),
+            ))
+            .unwrap();
+        let completed = MarketDataKind::IntegrityAlert(IntegrityAlert::ResyncCompleted {
+            last_update_id: Some(12),
+        });
+        harness
+            .ingest_event(&make_event("BTCUSDT", 1, 3, completed))
+            .unwrap();
     }
 }

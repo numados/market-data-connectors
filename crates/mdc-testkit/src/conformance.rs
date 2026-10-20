@@ -2,7 +2,13 @@
 
 pub mod mrs_consumer;
 
-use mdc_core::{BookKind, IntegrityAlert, Symbol};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, MdcError, StreamingSink, Symbol};
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+use crate::barrier::within;
+use crate::ws::MockWsServer;
 use std::collections::{HashMap, HashSet};
 
 use crate::sink::RecordedEvent;
@@ -28,6 +34,18 @@ pub struct ConformanceReport {
     pub alerts_verified: usize,
 }
 
+fn event_symbol(event: &RecordedEvent) -> Option<&Symbol> {
+    match event {
+        RecordedEvent::BeginBook { symbol, .. }
+        | RecordedEvent::EndBook { symbol, .. }
+        | RecordedEvent::Trade { symbol, .. }
+        | RecordedEvent::BookTicker { symbol, .. }
+        | RecordedEvent::ReferenceRate { symbol, .. }
+        | RecordedEvent::Alert { symbol, .. } => Some(symbol),
+        RecordedEvent::Level { .. } => None,
+    }
+}
+
 /// Validates recorded streaming events against streaming sink and lifecycle conformance rules.
 ///
 /// Checks:
@@ -35,11 +53,14 @@ pub struct ConformanceReport {
 /// - No nested or unclosed `begin_book`.
 /// - No market data (`Level`, `Delta`, `Trade`, `BookTicker`) for a symbol between its
 ///   stale-marking alert and the next snapshot / `ResyncCompleted`.
-/// - Alert ordering consistency.
+/// - Alert ordering: `ResyncCompleted` needs a preceding `ResyncStarted`, and nothing follows a
+///   symbol's terminal `Shutdown` alert.
 pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
     let mut report = ConformanceReport::default();
     let mut in_book: HashMap<Symbol, BookKind> = HashMap::new();
     let mut stale_symbols: HashSet<Symbol> = HashSet::new();
+    let mut open_resyncs: HashSet<Symbol> = HashSet::new();
+    let mut shut_down: HashSet<Symbol> = HashSet::new();
     let mut sink_failed = false;
 
     for (idx, event) in events.iter().enumerate() {
@@ -49,6 +70,13 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
             ));
         }
         report.total_events += 1;
+        if let Some(symbol) = event_symbol(event) {
+            if shut_down.contains(symbol) {
+                return Err(format!(
+                    "Event {idx}: Event for {symbol} after its terminal Shutdown alert"
+                ));
+            }
+        }
         match event {
             RecordedEvent::BeginBook { symbol, kind } => {
                 if in_book.contains_key(symbol) {
@@ -123,14 +151,28 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                 report.alerts_verified += 1;
                 match alert {
                     IntegrityAlert::ResyncCompleted { .. } => {
+                        if !open_resyncs.remove(symbol) {
+                            return Err(format!(
+                                "Event {idx}: ResyncCompleted for {symbol} without a preceding ResyncStarted"
+                            ));
+                        }
                         stale_symbols.remove(symbol);
                     }
                     IntegrityAlert::SinkFailure => {
                         sink_failed = true;
                         stale_symbols.insert(symbol.clone());
                     }
-                    IntegrityAlert::ResyncStarted
-                    | IntegrityAlert::GapDetected { .. }
+                    IntegrityAlert::ResyncStarted => {
+                        open_resyncs.insert(symbol.clone());
+                        stale_symbols.insert(symbol.clone());
+                    }
+                    IntegrityAlert::ConnectionLost {
+                        reason: DisconnectKind::Shutdown,
+                    } => {
+                        shut_down.insert(symbol.clone());
+                        stale_symbols.insert(symbol.clone());
+                    }
+                    IntegrityAlert::GapDetected { .. }
                     | IntegrityAlert::ChecksumMismatch { .. }
                     | IntegrityAlert::SilenceTimeout { .. }
                     | IntegrityAlert::HeartbeatTimeout { .. }
@@ -154,8 +196,155 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
 }
 
 /// Runs conformance assertions against recorded streaming sink events, panicking on violation.
-pub fn run(events: &[RecordedEvent]) -> ConformanceReport {
+pub fn run_events(events: &[RecordedEvent]) -> ConformanceReport {
     validate(events).unwrap_or_else(|err| panic!("Conformance violation: {err}"))
+}
+
+/// A recording sink the scenario runner can read back after a scenario.
+pub trait ConformanceSink: StreamingSink + Clone + Send + 'static {
+    /// Returns every event the sink recorded so far.
+    fn recorded_events(&self) -> Vec<RecordedEvent>;
+}
+
+impl ConformanceSink for crate::sink::RecordingSink {
+    fn recorded_events(&self) -> Vec<RecordedEvent> {
+        self.events()
+    }
+}
+
+impl ConformanceSink for crate::sink::FaultInjectingSink {
+    fn recorded_events(&self) -> Vec<RecordedEvent> {
+        self.events()
+    }
+}
+
+/// Standard end-to-end scenarios executed by [`run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scenario {
+    /// Connect, then shut down on request; the connector must exit cleanly.
+    StartupAndShutdown,
+    /// The server closes the socket; the connector must alert, reconnect and
+    /// resynchronize without publishing data in between.
+    ServerCloseAndRecover,
+    /// The sink fails on its first callback; the connector must halt with an error.
+    SinkFault,
+}
+
+impl Scenario {
+    /// All standard scenarios, in execution order.
+    pub const ALL: [Scenario; 3] = [
+        Scenario::StartupAndShutdown,
+        Scenario::ServerCloseAndRecover,
+        Scenario::SinkFault,
+    ];
+}
+
+/// A running connector under test.
+pub struct ConnectorRun {
+    /// The connector's `run` future.
+    pub future: Pin<Box<dyn Future<Output = Result<(), MdcError>> + Send>>,
+    /// Requests graceful shutdown.
+    pub stop: Box<dyn FnOnce() + Send>,
+}
+
+const SCENARIO_BOUND: Duration = Duration::from_secs(10);
+
+/// Executes the standard scenarios end-to-end against the connector `builder`
+/// produces, using sinks from `sink_factory`, and returns the combined report.
+///
+/// `builder` wires a connector to the mock server and sink and starts it;
+/// `sink_factory` supplies a sink per scenario (a failing one for
+/// [`Scenario::SinkFault`]). Every scenario validates the recorded stream:
+/// alert ordering and no market data after an alert that marks the book stale.
+///
+/// # Panics
+///
+/// Panics on any conformance violation, timeout, or unexpected connector result.
+pub async fn run<S, B, F>(builder: B, sink_factory: F) -> ConformanceReport
+where
+    S: ConformanceSink,
+    B: Fn(&MockWsServer, S) -> ConnectorRun,
+    F: Fn(Scenario) -> S,
+{
+    let mut total = ConformanceReport::default();
+    for scenario in Scenario::ALL {
+        let report = run_scenario(scenario, &builder, &sink_factory)
+            .await
+            .unwrap_or_else(|err| panic!("Conformance violation in {scenario:?}: {err}"));
+        total.total_events += report.total_events;
+        total.snapshots_verified += report.snapshots_verified;
+        total.deltas_verified += report.deltas_verified;
+        total.trades_verified += report.trades_verified;
+        total.tickers_verified += report.tickers_verified;
+        total.reference_rates_verified += report.reference_rates_verified;
+        total.alerts_verified += report.alerts_verified;
+    }
+    total
+}
+
+async fn run_scenario<S, B, F>(
+    scenario: Scenario,
+    builder: &B,
+    sink_factory: &F,
+) -> Result<ConformanceReport, String>
+where
+    S: ConformanceSink,
+    B: Fn(&MockWsServer, S) -> ConnectorRun,
+    F: Fn(Scenario) -> S,
+{
+    let ws = MockWsServer::spawn()
+        .await
+        .map_err(|e| format!("mock server: {e}"))?;
+    let sink = sink_factory(scenario);
+    let observer = sink.clone();
+    let ConnectorRun { future, stop } = builder(&ws, sink);
+    let task = tokio::spawn(future);
+
+    let outcome = match scenario {
+        Scenario::StartupAndShutdown => {
+            within(SCENARIO_BOUND, "first handshake", ws.wait_for_handshakes(1)).await;
+            stop();
+            Some(join(task).await?)
+        }
+        Scenario::ServerCloseAndRecover => {
+            within(SCENARIO_BOUND, "first handshake", ws.wait_for_handshakes(1)).await;
+            let _ = ws.broadcast_close();
+            if tokio::time::timeout(SCENARIO_BOUND, ws.wait_for_handshakes(2))
+                .await
+                .is_err()
+            {
+                return Err(format!(
+                    "no reconnect after server close; recorded events: {:?}",
+                    observer.recorded_events()
+                ));
+            }
+            stop();
+            Some(join(task).await?)
+        }
+        Scenario::SinkFault => {
+            let result = join(task).await?;
+            drop(stop);
+            if result.is_ok() {
+                return Err("connector returned Ok after an injected sink fault".to_string());
+            }
+            None
+        }
+    };
+
+    if let Some(Err(e)) = outcome {
+        return Err(format!("connector failed during {scenario:?}: {e}"));
+    }
+    validate(&observer.recorded_events())
+}
+
+async fn join(
+    task: tokio::task::JoinHandle<Result<(), MdcError>>,
+) -> Result<Result<(), MdcError>, String> {
+    match tokio::time::timeout(SCENARIO_BOUND, task).await {
+        Err(_) => Err("connector did not stop within the scenario bound".to_string()),
+        Ok(Err(e)) => Err(format!("connector task panicked: {e}")),
+        Ok(Ok(result)) => Ok(result),
+    }
 }
 
 #[cfg(test)]
@@ -231,7 +420,7 @@ mod tests {
             },
         ];
 
-        let report = run(&events);
+        let report = run_events(&events);
         assert_eq!(report.total_events, 12);
         assert_eq!(report.snapshots_verified, 1);
         assert_eq!(report.deltas_verified, 1);
@@ -415,6 +604,34 @@ mod tests {
             price: Decimal::new(25000, 0),
             volume: Decimal::ONE,
         }];
-        run(&events);
+        run_events(&events);
+    }
+
+    #[test]
+    fn test_conformance_resync_completed_without_started_fails_closed() {
+        let events = vec![RecordedEvent::Alert {
+            symbol: sym(),
+            alert: IntegrityAlert::ResyncCompleted {
+                last_update_id: None,
+            },
+        }];
+        let err = validate(&events).unwrap_err();
+        assert!(err.contains("without a preceding ResyncStarted"), "{err}");
+    }
+
+    #[test]
+    fn test_conformance_event_after_shutdown_fails_closed() {
+        let shutdown = |symbol: Symbol| RecordedEvent::Alert {
+            symbol,
+            alert: IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Shutdown,
+            },
+        };
+        // A duplicate Shutdown alert is also an event after the terminal one.
+        let err = validate(&[shutdown(sym()), shutdown(sym())]).unwrap_err();
+        assert!(err.contains("after its terminal Shutdown"), "{err}");
+
+        // Other symbols are unaffected.
+        assert!(validate(&[shutdown(sym()), shutdown(Symbol::from("ETHUSDT"))]).is_ok());
     }
 }
