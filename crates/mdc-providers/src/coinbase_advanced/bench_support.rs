@@ -1,131 +1,60 @@
 //! Benchmark support harness demonstrating hot-path zero-heap frame processing for Coinbase Advanced.
+//!
+//! The harness drives the production [`dispatch_frame`](crate::coinbase_advanced::connection)
+//! path, so the measured and allocation-checked code is the code the connector runs. Only the
+//! connection-wide sequence check is skipped, so the same frame can be replayed.
 
-use mdc_core::{
-    BookKind, DeliveryStamp, EventContext, RunId, Side, StreamingSink, Symbol, SymbolTag, VenueId,
-};
+use std::time::Duration;
+
+use mdc_core::{RunId, StreamingSink, Symbol, SymbolTag};
 use serde::de::DeserializeSeed;
 
-use crate::coinbase_advanced::normalize::parse_rfc3339_nanos;
-use crate::coinbase_advanced::raw::{
-    CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, L2EventKind,
-};
+use crate::coinbase_advanced::connection::dispatch_frame;
+use crate::coinbase_advanced::fsm::CoinbaseAdvancedFsm;
+use crate::coinbase_advanced::raw::{CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch};
+use crate::sink_util::ConnectionSink;
 
 /// Harness connection maintaining pre-allocated scratch buffers for benchmarking.
 pub struct Connection<S> {
     scratch: CoinbaseAdvancedScratch,
-    sink: S,
-    run_id: RunId,
-    symbol: Symbol,
-    tag: SymbolTag,
-    delivery_ordinal: u64,
+    fsm: CoinbaseAdvancedFsm,
+    sink: ConnectionSink<S>,
 }
 
 impl<S: StreamingSink> Connection<S> {
     /// Creates a new connection with pre-allocated scratch capacity.
     pub fn new(sink: S) -> Self {
+        let symbols = vec![(Symbol::from("BTC-USD"), SymbolTag::default())];
         Self {
             scratch: CoinbaseAdvancedScratch::with_capacity(1_024),
-            sink,
-            run_id: RunId::from_u128(1),
-            symbol: Symbol::from("BTC-USD"),
-            tag: SymbolTag::default(),
-            delivery_ordinal: 0,
+            fsm: CoinbaseAdvancedFsm::new(symbols, Duration::from_secs(5)),
+            sink: ConnectionSink::new(sink, RunId::from_u128(1), 1),
         }
     }
 
     /// Handles an uncompressed JSON frame slice with zero heap allocations after warm-up.
     pub fn handle_raw_frame(&mut self, frame: &[u8]) {
-        let frame_str = match std::str::from_utf8(frame) {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok(text) = std::str::from_utf8(frame) else {
+            return;
         };
 
-        let mut deserializer = serde_json::Deserializer::from_str(frame_str);
-        let header = match CoinbaseAdvancedFrameSeed::new(&mut self.scratch)
-            .deserialize(&mut deserializer)
-        {
-            Ok(h) => h,
-            Err(_) => return,
+        let mut deserializer = serde_json::Deserializer::from_str(text);
+        let Ok(header) =
+            CoinbaseAdvancedFrameSeed::new(&mut self.scratch).deserialize(&mut deserializer)
+        else {
+            return;
         };
 
-        let exchange_ts = header.timestamp.and_then(|ts| parse_rfc3339_nanos(ts).ok());
-        for ev in &self.scratch.events {
-            if ev.product_id != self.symbol {
-                continue;
-            }
-
-            self.delivery_ordinal = self.delivery_ordinal.saturating_add(1);
-            let ctx = EventContext {
-                venue: VenueId::CoinbaseAdvanced,
-                symbol: &self.symbol,
-                tag: self.tag,
-                exchange_ts,
-                received_ts: crate::now_nanos(),
-                connection_id: 1,
-                delivery: DeliveryStamp::with_connection_id(
-                    self.run_id,
-                    1,
-                    1,
-                    self.delivery_ordinal,
-                ),
-                source_sequence: header.sequence_num,
-            };
-
-            match ev.kind {
-                L2EventKind::Snapshot => {
-                    if self.sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
-                        return;
-                    }
-                    for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        if self
-                            .sink
-                            .level(Side::Bid, level.price, level.volume)
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        if self
-                            .sink
-                            .level(Side::Ask, level.price, level.volume)
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    if self.sink.end_book(&ctx, None).is_err() {
-                        return;
-                    }
-                }
-                L2EventKind::Update => {
-                    if self.sink.begin_book(&ctx, BookKind::Delta).is_err() {
-                        return;
-                    }
-                    for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        if self
-                            .sink
-                            .level(Side::Bid, level.price, level.volume)
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        if self
-                            .sink
-                            .level(Side::Ask, level.price, level.volume)
-                            .is_err()
-                        {
-                            return;
-                        }
-                    }
-                    if self.sink.end_book(&ctx, None).is_err() {
-                        return;
-                    }
-                }
-            }
-        }
+        dispatch_frame(
+            1,
+            false,
+            &header,
+            text,
+            crate::now_nanos(),
+            &self.scratch,
+            &mut self.fsm,
+            &mut self.sink,
+        );
     }
 
     /// Handles an uncompressed JSON frame slice (alias for [`Self::handle_raw_frame`]).
@@ -168,5 +97,30 @@ mod tests {
             allocs_upd.count_total, 0,
             "update streaming path must not allocate after warm-up"
         );
+    }
+
+    #[test]
+    fn test_harness_publishes_through_production_dispatch() {
+        use mdc_core::BookKind;
+        use mdc_testkit::{RecordedEvent, RecordingSink};
+
+        let snap_raw =
+            include_bytes!("../../tests/fixtures/coinbase_advanced/order_book_snapshot.json");
+        let upd_raw = include_bytes!("../../tests/fixtures/coinbase_advanced/depth_update.json");
+
+        let sink = RecordingSink::new();
+        let mut conn = Connection::new(sink.clone());
+        conn.handle_frame(snap_raw);
+        conn.handle_frame(upd_raw);
+
+        let kinds: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                RecordedEvent::BeginBook { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec![BookKind::Snapshot, BookKind::Delta]);
     }
 }

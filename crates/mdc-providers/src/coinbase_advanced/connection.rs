@@ -7,7 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use mdc_core::{
     BackoffPolicy, BookKind, DisconnectKind, ExponentialBackoff, GlobalSequenceCheck,
     IntegrityAlert, RunId, SequencePolicy, Side, SilenceWatchdog, StreamingSink, Symbol, SymbolTag,
-    VenueId, WatchdogAction,
+    UnixNanos, VenueId, WatchdogAction,
 };
 use serde::de::DeserializeSeed;
 use tokio::sync::mpsc;
@@ -22,8 +22,8 @@ use crate::coinbase_advanced::control::Command;
 use crate::coinbase_advanced::fsm::{CoinbaseAdvancedFsm, ResyncSchedule};
 use crate::coinbase_advanced::normalize::{normalize_trade, parse_rfc3339_nanos};
 use crate::coinbase_advanced::raw::{
-    CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, L2EventKind, RawTradesEnvelope,
-    build_subscribe_frame, build_unsubscribe_frame,
+    CoinbaseAdvancedFrameSeed, CoinbaseAdvancedScratch, FrameHeader, L2EventKind,
+    RawTradesEnvelope, build_subscribe_frame, build_unsubscribe_frame,
 };
 
 /// Sends the level2 unsubscribe/subscribe pair for `products`, stopping at the
@@ -44,6 +44,158 @@ where
     ws_tx
         .send(Message::Text(build_subscribe_frame("level2", products)))
         .await
+}
+
+/// Dispatches one parsed frame to the sink.
+///
+/// Shared by the connection loop and the benchmark harness so both exercise the same code.
+/// A failed sink send aborts the frame; the caller observes it through [`ConnectionSink::is_failed`].
+pub(crate) fn dispatch_frame<S: StreamingSink>(
+    connection_id: u32,
+    market_trades: bool,
+    header: &FrameHeader<'_>,
+    text: &str,
+    received_ts: UnixNanos,
+    scratch: &CoinbaseAdvancedScratch,
+    fsm: &mut CoinbaseAdvancedFsm,
+    sink: &mut ConnectionSink<S>,
+) {
+    match header.channel {
+        "heartbeats" => {
+            // Watchdog already stamped above
+        }
+
+        "subscriptions" => {
+            debug!(connection_id, "Subscription acknowledged");
+        }
+
+        "error" => {
+            warn!(connection_id, payload = %text, "Error frame received from Coinbase Advanced");
+        }
+
+        "l2_data" => {
+            let exchange_ts = header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok());
+            for ev in &scratch.events {
+                let sym = &ev.product_id;
+                let Some(tag) = fsm.tag(sym) else {
+                    continue;
+                };
+                match ev.kind {
+                    L2EventKind::Snapshot => {
+                        let ctx = sink.next_context(
+                            VenueId::CoinbaseAdvanced,
+                            sym,
+                            tag,
+                            exchange_ts,
+                            received_ts,
+                            header.sequence_num,
+                        );
+
+                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
+                            return;
+                        }
+                        for l in &scratch.bids[ev.bids_start..ev.bids_end] {
+                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                return;
+                            }
+                        }
+                        for l in &scratch.asks[ev.asks_start..ev.asks_end] {
+                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                return;
+                            }
+                        }
+                        if sink.end_book(&ctx, None).is_err() {
+                            return;
+                        }
+
+                        if let Some(completed_alert) = fsm.on_snapshot(sym) {
+                            if sink
+                                .emit_alert(
+                                    VenueId::CoinbaseAdvanced,
+                                    sym,
+                                    tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    completed_alert,
+                                )
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+
+                    L2EventKind::Update => {
+                        if fsm.is_in_sync(sym) {
+                            let ctx = sink.next_context(
+                                VenueId::CoinbaseAdvanced,
+                                sym,
+                                tag,
+                                exchange_ts,
+                                received_ts,
+                                header.sequence_num,
+                            );
+
+                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
+                                return;
+                            }
+                            for l in &scratch.bids[ev.bids_start..ev.bids_end] {
+                                if sink.level(Side::Bid, l.price, l.volume).is_err() {
+                                    return;
+                                }
+                            }
+                            for l in &scratch.asks[ev.asks_start..ev.asks_end] {
+                                if sink.level(Side::Ask, l.price, l.volume).is_err() {
+                                    return;
+                                }
+                            }
+                            if sink.end_book(&ctx, None).is_err() {
+                                return;
+                            }
+                        } else {
+                            debug!(connection_id, symbol = %sym, "L2 update dropped while awaiting snapshot");
+                        }
+                    }
+                }
+            }
+        }
+
+        "market_trades" => {
+            if market_trades {
+                if let Ok(trades_env) = serde_json::from_str::<RawTradesEnvelope<'_>>(text) {
+                    for trade_ev in &trades_env.events {
+                        for t in &trade_ev.trades {
+                            let sym = Symbol::from(t.product_id);
+                            if let Some(tag) = fsm.tag(&sym) {
+                                if let Ok((exchange_ts, canonical_trade)) = normalize_trade(t) {
+                                    let ctx = sink.next_context(
+                                        VenueId::CoinbaseAdvanced,
+                                        &sym,
+                                        tag,
+                                        Some(exchange_ts),
+                                        received_ts,
+                                        trades_env.sequence_num.or(header.sequence_num),
+                                    );
+                                    if sink.trade(&ctx, &canonical_trade).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        _ => {
+            debug!(
+                connection_id,
+                channel = header.channel,
+                "Unhandled channel frame"
+            );
+        }
+    }
 }
 
 /// Runs a single Coinbase Advanced Trade WebSocket connection worker managing a slice of products.
@@ -658,136 +810,16 @@ pub async fn run_connection_task<S: StreamingSink>(
                         continue 'frame_loop;
                     }
 
-                    // Dispatch according to channel
-                    match header.channel {
-                        "heartbeats" => {
-                            // Watchdog already stamped above
-                        }
-
-                        "subscriptions" => {
-                            debug!(connection_id, "Subscription acknowledged");
-                        }
-
-                        "error" => {
-                            warn!(connection_id, payload = %text, "Error frame received from Coinbase Advanced");
-                        }
-
-                        "l2_data" => {
-                            let exchange_ts = header.timestamp.and_then(|t| parse_rfc3339_nanos(t).ok());
-                            for ev in &scratch.events {
-                                let sym = &ev.product_id;
-                                let Some(tag) = fsm.tag(sym) else {
-                                    continue;
-                                };
-                                match ev.kind {
-                                    L2EventKind::Snapshot => {
-                                        let ctx = sink.next_context(
-                                            VenueId::CoinbaseAdvanced,
-                                            sym,
-                                            tag,
-                                            exchange_ts,
-                                            received_ts,
-                                            header.sequence_num,
-                                        );
-
-                                        if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
-                                            continue 'frame_loop;
-                                        }
-                                        for l in &scratch.bids[ev.bids_start..ev.bids_end] {
-                                            if sink.level(Side::Bid, l.price, l.volume).is_err() {
-                                                continue 'frame_loop;
-                                            }
-                                        }
-                                        for l in &scratch.asks[ev.asks_start..ev.asks_end] {
-                                            if sink.level(Side::Ask, l.price, l.volume).is_err() {
-                                                continue 'frame_loop;
-                                            }
-                                        }
-                                        if sink.end_book(&ctx, None).is_err() {
-                                            continue 'frame_loop;
-                                        }
-
-                                        if let Some(completed_alert) = fsm.on_snapshot(sym) {
-                                            if sink.emit_alert(
-                                                VenueId::CoinbaseAdvanced,
-                                                sym,
-                                                tag,
-                                                None,
-                                                crate::now_nanos(),
-                                                None,
-                                                completed_alert,
-                                            ).is_err() {
-                                                continue 'frame_loop;
-                                            }
-                                        }
-                                    }
-
-                                    L2EventKind::Update => {
-                                        if fsm.is_in_sync(sym) {
-                                            let ctx = sink.next_context(
-                                                VenueId::CoinbaseAdvanced,
-                                                sym,
-                                                tag,
-                                                exchange_ts,
-                                                received_ts,
-                                                header.sequence_num,
-                                            );
-
-                                            if sink.begin_book(&ctx, BookKind::Delta).is_err() {
-                                                continue 'frame_loop;
-                                            }
-                                            for l in &scratch.bids[ev.bids_start..ev.bids_end] {
-                                                if sink.level(Side::Bid, l.price, l.volume).is_err() {
-                                                    continue 'frame_loop;
-                                                }
-                                            }
-                                            for l in &scratch.asks[ev.asks_start..ev.asks_end] {
-                                                if sink.level(Side::Ask, l.price, l.volume).is_err() {
-                                                    continue 'frame_loop;
-                                                }
-                                            }
-                                            if sink.end_book(&ctx, None).is_err() {
-                                                continue 'frame_loop;
-                                            }
-                                        } else {
-                                            debug!(connection_id, symbol = %sym, "L2 update dropped while awaiting snapshot");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        "market_trades" => {
-                            if config.streams.market_trades {
-                                if let Ok(trades_env) = serde_json::from_str::<RawTradesEnvelope<'_>>(text) {
-                                    for trade_ev in &trades_env.events {
-                                        for t in &trade_ev.trades {
-                                            let sym = Symbol::from(t.product_id);
-                                            if let Some(tag) = fsm.tag(&sym) {
-                                                if let Ok((exchange_ts, canonical_trade)) = normalize_trade(t) {
-                                                    let ctx = sink.next_context(
-                                                        VenueId::CoinbaseAdvanced,
-                                                        &sym,
-                                                        tag,
-                                                        Some(exchange_ts),
-                                                        received_ts,
-                                                        trades_env.sequence_num.or(header.sequence_num),
-                                                    );
-                                                    if sink.trade(&ctx, &canonical_trade).is_err() {
-                                                        continue 'frame_loop;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        _ => {
-                            debug!(connection_id, channel = header.channel, "Unhandled channel frame");
-                        }
-                    }
+                    dispatch_frame(
+                        connection_id,
+                        config.streams.market_trades,
+                        &header,
+                        text,
+                        received_ts,
+                        &scratch,
+                        &mut fsm,
+                        &mut sink,
+                    );
                 }
             }
         }

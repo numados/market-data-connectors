@@ -380,6 +380,128 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
     let _ = runner.await;
 }
 
+fn level2_frame(sequence_num: u64, kind: &str, product: &str, price: &str) -> String {
+    serde_json::json!({
+        "channel": "l2_data",
+        "sequence_num": sequence_num,
+        "timestamp": "2023-02-09T20:32:50.000000Z",
+        "events": [{
+            "type": kind,
+            "product_id": product,
+            "updates": [{
+                "side": "bid",
+                "event_time": "2023-02-09T20:32:50.000000Z",
+                "price_level": price,
+                "new_quantity": "1.00"
+            }]
+        }]
+    })
+    .to_string()
+}
+
+fn level2_unsubscribes(ws: &MockWsServer) -> usize {
+    ws.received_messages()
+        .iter()
+        .filter(|m| {
+            serde_json::from_str::<serde_json::Value>(m)
+                .is_ok_and(|v| v["type"] == "unsubscribe" && v["channel"] == "level2")
+        })
+        .count()
+}
+
+/// A second gap inside the resync cooldown must not strand the books: the connector defers the
+/// resubscribe, sends it once the cooldown elapses without any operator input, and recovers.
+#[tokio::test]
+async fn test_gap_inside_cooldown_resubscribes_after_cooldown() {
+    const COOLDOWN: Duration = Duration::from_millis(600);
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = CoinbaseAdvancedConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.resync_timeout = COOLDOWN;
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC-USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(1).await;
+    let _ = ws.broadcast_text(level2_frame(1, "snapshot", "BTC-USD", "21900.00"));
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+
+    // First gap: resubscribed immediately.
+    let _ = ws.broadcast_text(level2_frame(5, "update", "BTC-USD", "21950.00"));
+    mdc_testkit::within(Duration::from_secs(5), "first gap resubscribe", async {
+        while level2_unsubscribes(&ws) < 1 {
+            let seen = ws.received_messages().len();
+            ws.wait_for_client_messages(seen + 1).await;
+        }
+    })
+    .await;
+    let first_resubscribe = std::time::Instant::now();
+
+    // Second gap while the cooldown is still running: nothing may be sent yet.
+    let _ = ws.broadcast_text(level2_frame(9, "update", "BTC-USD", "21960.00"));
+    ws.sync_barrier().await;
+    assert_eq!(
+        level2_unsubscribes(&ws),
+        1,
+        "resubscribe inside the cooldown must be deferred"
+    );
+
+    // Liveness: the deferred resubscribe is sent on its own, no sooner than the cooldown.
+    mdc_testkit::within(Duration::from_secs(5), "deferred resubscribe", async {
+        while level2_unsubscribes(&ws) < 2 {
+            let seen = ws.received_messages().len();
+            ws.wait_for_client_messages(seen + 1).await;
+        }
+    })
+    .await;
+    assert!(
+        first_resubscribe.elapsed() >= COOLDOWN - Duration::from_millis(100),
+        "deferred resubscribe came after only {:?}",
+        first_resubscribe.elapsed()
+    );
+
+    // The venue answers the resubscribe with a fresh snapshot and the book recovers.
+    let completed_before = sink
+        .alerts_for("BTC-USD")
+        .iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .count();
+    let _ = ws.broadcast_text(level2_frame(10, "snapshot", "BTC-USD", "21970.00"));
+    mdc_testkit::within(Duration::from_secs(5), "recovery after deferral", async {
+        loop {
+            let completed = sink
+                .alerts_for("BTC-USD")
+                .iter()
+                .filter(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+                .count();
+            if completed > completed_before {
+                break;
+            }
+            sink.wait_for_events(sink.len() + 1).await;
+        }
+    })
+    .await;
+    let gaps = sink
+        .alerts_for("BTC-USD")
+        .iter()
+        .filter(|a| matches!(a, IntegrityAlert::GapDetected { .. }))
+        .count();
+    assert_eq!(gaps, 2);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
 #[tokio::test]
 async fn test_stale_and_duplicate_sequence_dropped() {
     let ws = MockWsServer::spawn().await.expect("spawn mock ws");
