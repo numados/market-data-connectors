@@ -131,17 +131,15 @@ async fn test_mrs_consumer_end_to_end_conformance_with_binance() {
 
     let mut quote_seen = false;
     for _ in 0..10 {
-        tokio::select! {
-            res_opt = rx.recv() => {
-                let res = res_opt.expect("channel stream item");
-                let ev = res.expect("ok market event");
-                let proj = harness.ingest_event(&ev).expect("valid event");
-                if let Some(QuoteProjection::Available { .. }) = proj {
-                    quote_seen = true;
-                    break;
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => break,
+        let Ok(res_opt) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await else {
+            break;
+        };
+        let res = res_opt.expect("channel stream item");
+        let ev = res.expect("ok market event");
+        let proj = harness.ingest_event(&ev).expect("valid event");
+        if let Some(QuoteProjection::Available { .. }) = proj {
+            quote_seen = true;
+            break;
         }
     }
 
@@ -191,8 +189,13 @@ async fn test_mrs_delivery_fault_overflow_halts_connector() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Wait briefly for delivery overflow to occur
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait for the channel to cancel the producer on delivery overflow
+    mdc_testkit::within(
+        Duration::from_secs(5),
+        "delivery overflow cancels producer",
+        cancel.cancelled(),
+    )
+    .await;
 
     // The producer cancellation token must be cancelled by the channel
     assert!(cancel.is_cancelled());

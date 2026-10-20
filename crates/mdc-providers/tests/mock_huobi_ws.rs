@@ -336,7 +336,7 @@ async fn test_ws_delta_buffering_before_snapshot() {
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     // At this point, no books should have been emitted
     let events_before_snap = sink.events();
@@ -531,7 +531,7 @@ async fn test_ws_stale_snapshot_handling() {
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     // Snapshot arrives with seqNum 90 (older than buffered delta's first sequence 101) -> stale
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
@@ -540,7 +540,7 @@ async fn test_ws_stale_snapshot_handling() {
     snap_val["data"]["seqNum"] = serde_json::json!(90);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     // Stale snapshot must not emit ResyncCompleted

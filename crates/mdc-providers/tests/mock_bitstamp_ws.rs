@@ -414,7 +414,7 @@ async fn test_connector_handle_control_pause_resume() {
 
     // Send Resume command
     handle.resume().await.expect("send resume");
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     cancel.cancel();
     let _ = runner.await;

@@ -354,8 +354,8 @@ async fn test_ws_channel_leak_guard_forces_reconnect() {
     let _ = ws.broadcast_text(leak2);
     let _ = ws.broadcast_text(leak3);
 
-    // The watchdog timer runs every 250ms and checks channel leak guard
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // The leak guard breaks the message loop; wait for the reconnect it forces.
+    ws.wait_for_connections(2).await;
 
     // Leak guard breaks the message loop, causing reconnect.
     // Therefore connection_count on mock WS should increase to at least 2.
@@ -388,11 +388,11 @@ async fn test_ws_control_pause_resume_cancel() {
 
     // Send Pause command
     handle.pause().await.expect("send pause");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Send Resume command
     handle.resume().await.expect("send resume");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Cancel gracefully
     cancel.cancel();
@@ -473,7 +473,7 @@ async fn test_ws_current_thread_runtime_compatibility() {
 
     // Spawn on current_thread
     let run_task = tokio::spawn(runner);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_handshakes(1).await;
 
     cancel.cancel();
     let result = run_task.await.expect("task join");

@@ -45,15 +45,16 @@ async fn test_ws_control_pacing_and_subscription() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Before initial_delay (at 50ms): no subscribe messages should be sent yet
+    // Pacing wait: negative assertion inside the wall-clock initial_delay window; no
+    // readiness signal exists for "nothing sent yet".
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(
         ws.received_messages().is_empty(),
         "No messages should be sent before initial_delay"
     );
 
-    // After initial_delay (at 220ms): subscribe message should be sent
-    tokio::time::sleep(Duration::from_millis(180)).await;
+    // After initial_delay: subscribe message should be sent
+    ws.wait_for_client_messages(1).await;
     let msgs = ws.received_messages();
     assert_eq!(msgs.len(), 1, "Expected exactly 1 subscribe frame");
 
@@ -95,7 +96,7 @@ async fn test_ws_continuous_full_snapshots_and_resync_lifecycle() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Wait for connect and initial subscribe
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Verify initial ResyncStarted was emitted on connect
     let events_init = sink.events();
@@ -221,7 +222,7 @@ async fn test_ws_high_throughput_snapshot_stream() {
         }
     }
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     let snapshot_count = events
@@ -285,7 +286,7 @@ async fn test_ws_resync_batching_and_pacing() {
         .expect("request resync eth");
 
     // Wait for batching timer (200ms) + UNSUBSCRIBE send + pacing delay (150ms) + SUBSCRIBE send
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    ws.wait_for_client_messages(3).await;
 
     let msgs = ws.received_messages();
     // Expected message order:
@@ -390,7 +391,15 @@ async fn test_ws_control_pause_resume() {
     ws.wait_for_client_messages(1).await;
 
     handle.pause().await.expect("send pause");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let has_paused = events.iter().any(|e| {
@@ -407,7 +416,7 @@ async fn test_ws_control_pause_resume() {
     assert!(has_paused, "Pause must emit ConnectionLost(Paused)");
 
     handle.resume().await.expect("send resume");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     cancel.cancel();
     let _ = runner.await;
@@ -440,7 +449,15 @@ async fn test_lmax_pause_then_cancel() {
     ws.wait_for_client_messages(1).await;
 
     handle.pause().await.expect("send pause");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let has_paused = events.iter().any(|e| {
