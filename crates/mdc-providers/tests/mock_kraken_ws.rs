@@ -715,7 +715,7 @@ async fn test_malformed_update_level_invalidates_book_and_resubscribes() {
     assert_eq!(book_begins(&sink), vec![BookKind::Snapshot]);
     let alerts_before = sink.alerts_for("BTC/USD").len();
 
-    let _ = ws.broadcast_text(&bad.to_string());
+    let _ = ws.broadcast_text(bad.to_string());
     ws.sync_barrier().await;
 
     assert_eq!(
@@ -762,7 +762,7 @@ async fn test_malformed_snapshot_level_is_not_published() {
     let (sink, cancel, runner) = start_kraken(&ws, |_| {}).await;
     let alerts_before = sink.alerts_for("BTC/USD").len();
 
-    let _ = ws.broadcast_text(&bad.to_string());
+    let _ = ws.broadcast_text(bad.to_string());
     ws.sync_barrier().await;
 
     assert!(
@@ -812,7 +812,7 @@ async fn test_depth_truncation_converges_downstream_book() {
 
     let (sink, cancel, runner) = start_kraken(&ws, |c| c.depth = DEPTH).await;
     let _ = ws.broadcast_text(&snap_json);
-    let _ = ws.broadcast_text(&update.to_string());
+    let _ = ws.broadcast_text(update.to_string());
     ws.sync_barrier().await;
 
     assert_eq!(
