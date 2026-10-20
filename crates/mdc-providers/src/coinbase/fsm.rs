@@ -56,7 +56,7 @@ use mdc_core::resync::{ResyncDecision, ResyncPolicy, TimeoutQuarantinePolicy};
 #[derive(Debug, Clone)]
 pub struct SymbolFsm {
     symbol: Symbol,
-    state: SyncState,
+    in_sync: bool,
     policy: TimeoutQuarantinePolicy,
 }
 
@@ -68,35 +68,54 @@ impl SymbolFsm {
         policy.on_started(&symbol, started_at);
         Self {
             symbol,
-            state: SyncState::AwaitingSnapshot { started_at },
+            in_sync: false,
             policy,
         }
     }
 
+    fn begin_wait(&mut self, now: Instant) {
+        self.in_sync = false;
+        self.policy.on_started(&self.symbol, now);
+    }
+
     /// Returns the current synchronization state.
+    ///
+    /// Derived from the timeout-quarantine policy, which owns the wait and
+    /// quarantine timestamps; only the in-sync flag lives here.
     pub fn state(&self) -> SyncState {
-        self.state
+        if self.in_sync {
+            SyncState::InSync
+        } else if let Some(until) = self.policy.quarantined_until(&self.symbol) {
+            SyncState::Quarantined { until }
+        } else if let Some(started_at) = self.policy.awaiting_since(&self.symbol) {
+            SyncState::AwaitingSnapshot { started_at }
+        } else {
+            // Unreachable by construction: every non-synced path records
+            // `on_started`. Fail safe as a fresh wait.
+            SyncState::AwaitingSnapshot {
+                started_at: Instant::now(),
+            }
+        }
     }
 
     /// Returns true if the symbol is in the `InSync` state.
     pub fn is_in_sync(&self) -> bool {
-        matches!(self.state, SyncState::InSync)
+        self.in_sync
     }
 
     /// Handles arrival of an order book snapshot.
     pub fn on_snapshot(&mut self) -> SnapshotOutcome {
-        self.state = SyncState::InSync;
+        self.in_sync = true;
         self.policy.on_completed(&self.symbol, Instant::now());
         SnapshotOutcome::Accepted
     }
 
     /// Handles arrival of an incremental order book update.
     pub fn on_update(&self) -> UpdateOutcome {
-        match self.state {
-            SyncState::InSync => UpdateOutcome::Accepted,
-            SyncState::AwaitingSnapshot { .. } | SyncState::Quarantined { .. } => {
-                UpdateOutcome::DroppedNotSynchronized
-            }
+        if self.in_sync {
+            UpdateOutcome::Accepted
+        } else {
+            UpdateOutcome::DroppedNotSynchronized
         }
     }
 
@@ -106,17 +125,15 @@ impl SymbolFsm {
     /// be triggered. Returns `false` if the symbol is already `AwaitingSnapshot` within timeout or
     /// in quarantine to prevent resubscribe storms.
     pub fn request_resync(&mut self, now: Instant) -> bool {
-        match self.state {
+        match self.state() {
             SyncState::InSync => {
-                self.state = SyncState::AwaitingSnapshot { started_at: now };
-                self.policy.on_started(&self.symbol, now);
+                self.begin_wait(now);
                 true
             }
             SyncState::AwaitingSnapshot { .. } => match self.policy.decide(&self.symbol, now) {
                 ResyncDecision::Wait(_) => false,
                 _ => {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    self.policy.on_started(&self.symbol, now);
+                    self.begin_wait(now);
                     true
                 }
             },
@@ -126,19 +143,15 @@ impl SymbolFsm {
 
     /// Polls periodic timers (snapshot timeout and quarantine expiry).
     pub fn poll(&mut self, now: Instant) -> PollOutcome {
-        match self.state {
+        match self.state() {
             SyncState::InSync => PollOutcome::None,
             SyncState::AwaitingSnapshot { .. } => match self.policy.decide(&self.symbol, now) {
-                ResyncDecision::Quarantine(until) => {
-                    self.state = SyncState::Quarantined { until };
-                    PollOutcome::TimeoutQuarantined { until }
-                }
+                ResyncDecision::Quarantine(until) => PollOutcome::TimeoutQuarantined { until },
                 _ => PollOutcome::None,
             },
             SyncState::Quarantined { .. } => match self.policy.decide(&self.symbol, now) {
                 ResyncDecision::Proceed => {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    self.policy.on_started(&self.symbol, now);
+                    self.begin_wait(now);
                     PollOutcome::QuarantineExpiredTriggerResubscribe
                 }
                 _ => PollOutcome::None,
@@ -148,8 +161,7 @@ impl SymbolFsm {
 
     /// Explicitly resets the symbol (e.g. upon socket reconnect).
     pub fn reset(&mut self, now: Instant) {
-        self.state = SyncState::AwaitingSnapshot { started_at: now };
-        self.policy.on_started(&self.symbol, now);
+        self.begin_wait(now);
     }
 }
 
@@ -223,5 +235,32 @@ mod tests {
         fsm.poll(t0 + Duration::from_secs(5));
         assert_eq!(fsm.on_snapshot(), SnapshotOutcome::Accepted);
         assert!(fsm.is_in_sync());
+    }
+
+    #[test]
+    fn test_state_is_derived_from_policy_timestamps() {
+        let t0 = Instant::now();
+        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        assert_eq!(fsm.state(), SyncState::AwaitingSnapshot { started_at: t0 });
+
+        let t_timeout = t0 + Duration::from_secs(5);
+        assert!(matches!(
+            fsm.poll(t_timeout),
+            PollOutcome::TimeoutQuarantined { .. }
+        ));
+        assert_eq!(
+            fsm.state(),
+            SyncState::Quarantined {
+                until: t_timeout + Duration::from_secs(30)
+            }
+        );
+
+        // Snapshot lifts quarantine immediately; the policy forgets the symbol.
+        fsm.on_snapshot();
+        assert_eq!(fsm.state(), SyncState::InSync);
+        assert_eq!(
+            fsm.poll(t_timeout + Duration::from_secs(60)),
+            PollOutcome::None
+        );
     }
 }

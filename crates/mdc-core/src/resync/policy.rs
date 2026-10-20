@@ -191,12 +191,98 @@ impl ResyncPolicy for TimeoutQuarantinePolicy {
 }
 
 impl TimeoutQuarantinePolicy {
+    /// Returns when the current snapshot wait for `symbol` began, if one is tracked.
+    pub fn awaiting_since(&self, symbol: &Symbol) -> Option<Instant> {
+        match self.tracking.get(symbol) {
+            Some(QuarantineTracking::AwaitingSnapshot { started_at }) => Some(*started_at),
+            _ => None,
+        }
+    }
+
+    /// Returns the instant until which `symbol` is held, if it is recorded in
+    /// quarantine (whether or not that instant has passed yet).
+    pub fn quarantined_until(&self, symbol: &Symbol) -> Option<Instant> {
+        match self.tracking.get(symbol) {
+            Some(QuarantineTracking::Quarantined { until }) => Some(*until),
+            _ => None,
+        }
+    }
+
+    /// Holds `symbol` until `until` regardless of the configured quarantine
+    /// duration, for callers that decide the hold length themselves.
+    pub fn hold_until(&mut self, symbol: &Symbol, until: Instant) {
+        self.tracking
+            .insert(symbol.clone(), QuarantineTracking::Quarantined { until });
+    }
+
     /// Returns true if `symbol` is currently recorded in quarantine.
     pub fn is_quarantined(&self, symbol: &Symbol, now: Instant) -> bool {
         match self.tracking.get(symbol) {
             Some(QuarantineTracking::Quarantined { until }) => now < *until,
             _ => false,
         }
+    }
+}
+
+/// Decision returned by a [`RejectionPolicy`] after a venue rejects a subscription.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionDecision {
+    /// Retry is allowed again at the given instant.
+    Cooldown(Instant),
+    /// Repeated rejections: hold the symbol until the given instant.
+    Quarantine(Instant),
+}
+
+/// Strategy deciding how long to hold a symbol after the venue rejects its subscription.
+pub trait RejectionPolicy: Send + 'static {
+    /// Records a rejection for `symbol` and returns how long to hold it.
+    fn on_rejected(&mut self, symbol: &Symbol, now: Instant) -> RejectionDecision;
+
+    /// Records a successful subscription for `symbol`, clearing its rejection history.
+    fn on_accepted(&mut self, symbol: &Symbol);
+}
+
+/// Escalating rejection policy: rejections below `escalate_after` cool down for
+/// `cooldown`; the `escalate_after`-th consecutive rejection (and every one after)
+/// quarantines for `quarantine`. A successful subscription clears the count.
+#[derive(Debug, Clone)]
+pub struct EscalatingRejectionPolicy {
+    cooldown: Duration,
+    quarantine: Duration,
+    escalate_after: u32,
+    strikes: HashMap<Symbol, u32>,
+}
+
+impl EscalatingRejectionPolicy {
+    /// Creates a policy; `escalate_after` is clamped to at least 1.
+    pub fn new(cooldown: Duration, quarantine: Duration, escalate_after: u32) -> Self {
+        Self {
+            cooldown,
+            quarantine,
+            escalate_after: escalate_after.max(1),
+            strikes: HashMap::new(),
+        }
+    }
+
+    /// Returns the quarantine duration applied on escalation.
+    pub fn quarantine(&self) -> Duration {
+        self.quarantine
+    }
+}
+
+impl RejectionPolicy for EscalatingRejectionPolicy {
+    fn on_rejected(&mut self, symbol: &Symbol, now: Instant) -> RejectionDecision {
+        let strikes = self.strikes.entry(symbol.clone()).or_insert(0);
+        *strikes = strikes.saturating_add(1);
+        if *strikes >= self.escalate_after {
+            RejectionDecision::Quarantine(now.checked_add(self.quarantine).unwrap_or(now))
+        } else {
+            RejectionDecision::Cooldown(now.checked_add(self.cooldown).unwrap_or(now))
+        }
+    }
+
+    fn on_accepted(&mut self, symbol: &Symbol) {
+        self.strikes.remove(symbol);
     }
 }
 
@@ -381,5 +467,45 @@ mod tests {
         assert_eq!(delays[0], Duration::from_millis(500));
         assert_eq!(delays[1], Duration::from_millis(1000));
         assert_eq!(delays[5], Duration::from_secs(8));
+    }
+
+    #[test]
+    fn test_rejection_policy_escalates_from_cooldown_to_quarantine() {
+        let mut policy =
+            EscalatingRejectionPolicy::new(Duration::from_secs(5), Duration::from_secs(60), 2);
+        let sym = Symbol::from("BTC/USD");
+        let t0 = Instant::now();
+
+        assert_eq!(
+            policy.on_rejected(&sym, t0),
+            RejectionDecision::Cooldown(t0 + Duration::from_secs(5))
+        );
+        let t1 = t0 + Duration::from_secs(6);
+        assert_eq!(
+            policy.on_rejected(&sym, t1),
+            RejectionDecision::Quarantine(t1 + Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn test_rejection_policy_acceptance_clears_history_per_symbol() {
+        let mut policy =
+            EscalatingRejectionPolicy::new(Duration::from_secs(5), Duration::from_secs(60), 2);
+        let a = Symbol::from("BTC/USD");
+        let b = Symbol::from("ETH/USD");
+        let t0 = Instant::now();
+
+        policy.on_rejected(&a, t0);
+        policy.on_rejected(&b, t0);
+        policy.on_accepted(&a);
+
+        assert!(matches!(
+            policy.on_rejected(&a, t0),
+            RejectionDecision::Cooldown(_)
+        ));
+        assert!(matches!(
+            policy.on_rejected(&b, t0),
+            RejectionDecision::Quarantine(_)
+        ));
     }
 }
