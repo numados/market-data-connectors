@@ -214,7 +214,7 @@ impl GzipDecoder {
             let in_slice = &deflate_data[before_in..];
             let status = self
                 .decompressor
-                .decompress(in_slice, &mut chunk, FlushDecompress::Finish)
+                .decompress(in_slice, &mut chunk, FlushDecompress::None)
                 .map_err(|e| GzipError::DecompressFailed(e.to_string()))?;
 
             let after_out = self.decompressor.total_out() as usize;
@@ -230,18 +230,15 @@ impl GzipDecoder {
 
             match status {
                 Status::StreamEnd => break,
-                Status::Ok => {
+                // `BufError` only means no progress was possible on this call; a full
+                // output chunk is reported as `Ok`, so both are judged by progress.
+                Status::Ok | Status::BufError => {
                     let after_in = self.decompressor.total_in() as usize;
                     if after_in == before_in && written == 0 {
                         return Err(GzipError::DecompressFailed(
                             "decompressor made no forward progress".to_string(),
                         ));
                     }
-                }
-                Status::BufError => {
-                    return Err(GzipError::DecompressFailed(
-                        "unexpected buffer error during decompression".to_string(),
-                    ));
                 }
             }
         }
@@ -381,5 +378,82 @@ mod tests {
         let res = decoder.decompress(gz);
         assert_eq!(res, Err(GzipError::FrameTooLarge { limit: 64 }));
         assert!(decoder.capacity() <= 64);
+    }
+
+    /// Deterministic printable payload that deflate cannot shrink to a few bytes.
+    fn payload(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                b'!' + ((state >> 33) % 90) as u8
+            })
+            .collect()
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn test_decompress_output_spanning_multiple_16k_chunks() {
+        // Around and across the 16 KiB scratch chunk boundary, including exact multiples.
+        for len in [16 * 1024 - 1, 16 * 1024, 16 * 1024 + 1, 32 * 1024, 70_000] {
+            let raw = payload(len);
+            let gz = gzip(&raw);
+            let mut decoder = GzipDecoder::new();
+            let out = decoder.decompress(&gz).unwrap();
+            assert_eq!(out.len(), raw.len(), "len {len}");
+            assert_eq!(out, &raw[..], "len {len}");
+        }
+    }
+
+    #[test]
+    fn test_decompress_highly_compressible_multi_chunk_frame() {
+        // Tiny input inflating to ~200 KiB exercises many chunk iterations on little input.
+        let raw = vec![b'a'; 200 * 1024];
+        let gz = gzip(&raw);
+        assert!(gz.len() < 1024);
+        let mut decoder = GzipDecoder::with_capacity(4096);
+        assert_eq!(decoder.decompress(&gz).unwrap(), &raw[..]);
+    }
+
+    #[test]
+    fn test_multi_chunk_frame_over_custom_cap_is_rejected() {
+        let raw = payload(40_000);
+        let gz = gzip(&raw);
+        let mut decoder = GzipDecoder::with_capacity_and_limit(4096, 20_000);
+        assert_eq!(
+            decoder.decompress(&gz),
+            Err(GzipError::FrameTooLarge { limit: 20_000 })
+        );
+    }
+
+    #[test]
+    fn test_multi_chunk_decoder_is_reusable() {
+        let big = payload(50_000);
+        let small = payload(100);
+        let mut decoder = GzipDecoder::new();
+        assert_eq!(decoder.decompress(&gzip(&big)).unwrap(), &big[..]);
+        assert_eq!(decoder.decompress(&gzip(&small)).unwrap(), &small[..]);
+        assert_eq!(decoder.decompress(&gzip(&big)).unwrap(), &big[..]);
+    }
+
+    #[test]
+    fn test_truncated_multi_chunk_stream_fails_instead_of_hanging() {
+        let gz = gzip(&payload(50_000));
+        let mut truncated = gz[..gz.len() - 2000].to_vec();
+        truncated.extend_from_slice(&gz[gz.len() - 8..]);
+        let mut decoder = GzipDecoder::new();
+        assert!(matches!(
+            decoder.decompress(&truncated),
+            Err(GzipError::DecompressFailed(_))
+        ));
     }
 }
