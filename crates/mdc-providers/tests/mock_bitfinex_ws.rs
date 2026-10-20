@@ -248,6 +248,69 @@ async fn test_ws_trade_execution_event() {
     let _ = run_task.await;
 }
 
+/// Bitfinex reports each execution twice (`te`, then `tu`) with the same trade id. The pair must
+/// publish once, while the same numeric id on a different symbol is a different trade.
+#[tokio::test]
+async fn test_ws_te_tu_pair_publishes_once_and_ids_are_per_symbol() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let conf_ok = load_fixture(CONF_OK_FIXTURE).expect("load conf_ok");
+    let btc_ack = r#"{"event":"subscribed","channel":"trades","chanId":17470,"symbol":"tBTCUSD","pair":"BTCUSD"}"#;
+    let eth_ack = r#"{"event":"subscribed","channel":"trades","chanId":17471,"symbol":"tETHUSD","pair":"ETHUSD"}"#;
+
+    let sink = RecordingSink::new();
+    let connector = BitfinexConnector::builder()
+        .ws_url(ws.ws_url().expect("ws url").to_string())
+        .symbols(["tBTCUSD", "tETHUSD"])
+        .enable_depth(false)
+        .enable_trades(true)
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let (_handle, runner) = connector.run(sink.clone(), cancel_child);
+    let run_task = tokio::spawn(runner);
+
+    ws.wait_for_client_messages(1).await;
+    let _ = ws.broadcast_text(&conf_ok);
+    let _ = ws.broadcast_text(btc_ack);
+    let _ = ws.broadcast_text(eth_ack);
+    ws.sync_barrier().await;
+
+    let trade_body = "[401597395,1574694478808,0.005,7245.3]";
+    for frame in [
+        format!(r#"[17470,"te",{trade_body},1574694478900]"#),
+        format!(r#"[17470,"tu",{trade_body},1574694478950]"#),
+        format!(r#"[17471,"te",{trade_body},1574694478960]"#),
+        format!(r#"[17471,"tu",{trade_body},1574694478970]"#),
+    ] {
+        let _ = ws.broadcast_text(&frame);
+    }
+    ws.sync_barrier().await;
+
+    let trades: Vec<_> = sink
+        .events()
+        .into_iter()
+        .filter_map(|ev| match ev {
+            RecordedEvent::Trade { symbol, trade } => Some((symbol, trade)),
+            _ => None,
+        })
+        .collect();
+    let symbols: Vec<&str> = trades.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(
+        symbols,
+        vec!["tBTCUSD", "tETHUSD"],
+        "each symbol publishes its te/tu pair exactly once"
+    );
+    for (_, trade) in &trades {
+        assert_eq!(trade.identity.as_ref().unwrap().value.as_str(), "401597395");
+    }
+
+    cancel.cancel();
+    let _ = run_task.await;
+}
+
 #[tokio::test]
 async fn test_ws_checksum_mismatch_triggers_in_place_resubscribe() {
     let ws = MockWsServer::spawn().await.expect("spawn mock ws");
