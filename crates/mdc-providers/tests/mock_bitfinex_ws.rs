@@ -41,7 +41,8 @@ async fn test_ws_handshake_conf_flags_and_subscribes() {
     let (_handle, runner) = connector.run(sink, cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // conf + book + trades subscriptions
+    ws.wait_for_client_messages(3).await;
 
     let received = ws.received_messages();
     assert!(
@@ -94,20 +95,20 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let (_handle, runner) = connector.run(sink.clone(), cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send conf ack and book subscription confirmation
     let _ = ws.broadcast_text(&conf_ok);
     let _ = ws.broadcast_text(&sub_book);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Send order book snapshot
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Send depth update
     let _ = ws.broadcast_text(&upd_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     let mut has_resync_started = false;
@@ -219,15 +220,15 @@ async fn test_ws_trade_execution_event() {
     let (_handle, runner) = connector.run(sink.clone(), cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     let _ = ws.broadcast_text(&conf_ok);
     let _ = ws.broadcast_text(trade_sub_ack);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Send trade event
     let _ = ws.broadcast_text(&trade_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let trades: Vec<_> = sink
         .events()
@@ -269,20 +270,20 @@ async fn test_ws_checksum_mismatch_triggers_in_place_resubscribe() {
     let (_handle, runner) = connector.run(sink.clone(), cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     let _ = ws.broadcast_text(&conf_ok);
     let _ = ws.broadcast_text(&sub_book);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Enter InSync with snapshot
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Broadcast checksum frame with bogus checksum value 999999999
     let bad_cs_msg = r#"[266343, "cs", 999999999, 1614604253634]"#;
     let _ = ws.broadcast_text(bad_cs_msg);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws.sync_barrier().await;
 
     // Check alerts
     let alerts = sink.alerts_for("tBTCUSD");
@@ -340,7 +341,7 @@ async fn test_ws_channel_leak_guard_forces_reconnect() {
     let (_handle, runner) = connector.run(sink, cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     let _ = ws.broadcast_text(&conf_ok);
 
@@ -383,7 +384,7 @@ async fn test_ws_control_pause_resume_cancel() {
     let (handle, runner) = connector.run(sink, cancel_child);
     let run_task = tokio::spawn(runner);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send Pause command
     handle.pause().await.expect("send pause");

@@ -46,7 +46,7 @@ async fn test_ws_handshake_and_obu_subscription() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     let received = ws.received_messages();
     assert!(!received.is_empty(), "Expected subscribe frame");
@@ -84,13 +84,13 @@ async fn test_ws_spot_ping_answered_with_spot_pong() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send spot.ping from server
     let ping_json = load_fixture(PING_FIXTURE).expect("load ping fixture");
     let _ = ws.broadcast_text(&ping_json);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     let received = ws.received_messages();
     assert!(
@@ -128,7 +128,7 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send sub ack
     let ack_json = load_fixture(SUB_ACK_FIXTURE).expect("load sub ack fixture");
@@ -138,13 +138,13 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
     let _ = ws.broadcast_text(&snap_json);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Send incremental delta
     let upd_json = load_fixture(UPDATE_FIXTURE).expect("load update fixture");
     let _ = ws.broadcast_text(&upd_json);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
 
@@ -224,7 +224,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send snapshot (u=100)
     let snap_frame = serde_json::json!({
@@ -243,7 +243,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
     .to_string();
     let _ = ws.broadcast_text(&snap_frame);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Clear received messages to check resubscribe frames specifically
     let pre_gap_count = ws.received_messages().len();
@@ -264,7 +264,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
     .to_string();
     let _ = ws.broadcast_text(&gap_frame);
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws.sync_barrier().await;
 
     // Check sink received GapDetected
     let events = sink.events();
@@ -323,7 +323,7 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
     .to_string();
     let _ = ws.broadcast_text(&fresh_snap_frame);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     assert!(
@@ -363,7 +363,7 @@ async fn test_ws_one_sided_updates() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Snapshot u=123460
     let snap = serde_json::json!({
@@ -381,17 +381,17 @@ async fn test_ws_one_sided_updates() {
     })
     .to_string();
     let _ = ws.broadcast_text(&snap);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Bid-only update [123461, 123462]
     let bid_only = load_fixture(BID_ONLY_FIXTURE).expect("load bid only");
     let _ = ws.broadcast_text(&bid_only);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Ask-only update [123463, 123464]
     let ask_only = load_fixture(ASK_ONLY_FIXTURE).expect("load ask only");
     let _ = ws.broadcast_text(&ask_only);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     assert!(
@@ -450,7 +450,7 @@ async fn test_ws_public_trades() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     let received = ws.received_messages();
     assert!(
@@ -467,7 +467,7 @@ async fn test_ws_public_trades() {
     let trade_json = load_fixture(TRADE_FIXTURE).expect("load trade fixture");
     let _ = ws.broadcast_text(&trade_json);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     assert!(
@@ -507,11 +507,19 @@ async fn test_ws_control_pause_resume_cancel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Pause
     handle.pause().await.expect("pause command");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     assert!(
@@ -529,7 +537,7 @@ async fn test_ws_control_pause_resume_cancel() {
 
     // Resume
     handle.resume().await.expect("resume command");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_handshakes(2).await;
 
     cancel.cancel();
     let _ = runner.await;

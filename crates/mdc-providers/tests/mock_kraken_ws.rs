@@ -44,7 +44,7 @@ async fn test_ws_subscribe_message_and_chunking() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(2).await;
 
     let received = ws.received_messages();
     assert_eq!(received.len(), 2, "Expected 2 chunked subscribe frames");
@@ -86,15 +86,15 @@ async fn test_ws_snapshot_and_update_lifecycle() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send valid snapshot
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     // Send valid update
     let _ = ws.broadcast_text(&upd_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     let mut has_resync_started = false;
@@ -171,15 +171,15 @@ async fn test_ws_checksum_mismatch_resubscribes() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send valid snapshot to enter InSync
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     // Send corrupt checksum update
     let _ = ws.broadcast_text(&bad_upd_str);
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    ws.sync_barrier().await;
 
     // Check alerts
     let alerts = sink.alerts_for("BTC/USD");
@@ -193,6 +193,9 @@ async fn test_ws_checksum_mismatch_resubscribes() {
         )
     });
     assert!(has_mismatch, "Must emit ChecksumMismatch alert");
+
+    // The in-place resubscribe is flushed on the next timer tick: subscribe, unsubscribe, subscribe.
+    ws.wait_for_client_messages(3).await;
 
     // Check mock server received unsubscribe followed by subscribe
     let messages = ws.received_messages();
@@ -245,37 +248,29 @@ async fn test_ws_resubscribe_timeout_quarantine() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send valid snapshot -> InSync
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     // Send mismatch -> triggers resubscribe, transitioning to AwaitingSnapshot
     let _ = ws.broadcast_text(&bad_upd_str);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
-    // Server deliberately does NOT send snapshot back
-    // Wait past resubscribe_timeout (80ms) and timer tick (100ms) to trigger quarantine
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Server deliberately does NOT send snapshot back; the resubscribe timeout
+    // (80ms, checked on the 100ms timer tick) must drive the symbol into quarantine.
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::Quarantined { .. }))
+        .await;
 
     let alerts = sink.alerts_for("BTC/USD");
-    let has_quarantine = alerts
-        .iter()
-        .any(|a| matches!(a, IntegrityAlert::Quarantined { .. }));
-    assert!(
-        has_quarantine,
-        "Must emit Quarantined alert after resubscribe timeout"
-    );
-
-    // Wait past quarantine_duration (150ms) and timer tick to re-trigger resubscribe
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
     let resync_starts = alerts
         .iter()
         .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
         .count();
-    let new_alerts = sink.alerts_for("BTC/USD");
+
+    // Quarantine expiry (150ms, next timer tick) must announce a new resync.
+    let new_alerts = sink.wait_for_alerts_for("BTC/USD", alerts.len() + 1).await;
     let new_resync_starts = new_alerts
         .iter()
         .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
@@ -313,24 +308,17 @@ async fn test_ws_snapshot_during_quarantine_lifts_quarantine() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Initial subscribe without snapshot -> times out into quarantine
-    tokio::time::sleep(Duration::from_millis(180)).await;
-
-    let alerts = sink.alerts_for("BTC/USD");
-    assert!(
-        alerts
-            .iter()
-            .any(|a| matches!(a, IntegrityAlert::Quarantined { .. })),
-        "Symbol must enter quarantine"
-    );
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::Quarantined { .. }))
+        .await;
 
     // Send valid snapshot DURING quarantine
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     // Send valid update -> must be accepted immediately!
     sink.clear();
     let _ = ws.broadcast_text(&upd_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     let has_delta = events.iter().any(|e| {
@@ -375,14 +363,15 @@ async fn test_ws_batch_chunking_mismatch() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Operator requests ResyncAll across all 40 symbols
     handle
         .request_resync_all()
         .await
         .expect("request resync all");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // 2 initial subscribes + 2 unsubscribe + 2 subscribe batches.
+    ws.wait_for_client_messages(6).await;
 
     let received = ws.received_messages();
     let unsubs: Vec<_> = received
@@ -431,6 +420,8 @@ async fn test_ws_heartbeat_silence_watchdog() {
 
     // Send heartbeats every 40ms for 200ms (longer than watchdog_ping_after 120ms)
     for _ in 0..5 {
+        // Pacing wait: the watchdog is wall-clock driven, so heartbeats must arrive
+        // spaced inside its window; no readiness signal can replace the spacing.
         tokio::time::sleep(Duration::from_millis(40)).await;
         let _ = ws.broadcast_text(&heartbeat_json);
     }
@@ -484,11 +475,11 @@ async fn test_ws_checksumless_update_fails_closed() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send valid snapshot -> InSync
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     let books_after_snap: Vec<_> = sink
         .events()
@@ -503,7 +494,7 @@ async fn test_ws_checksumless_update_fails_closed() {
 
     // Send checksum-less update -> must fail closed
     let _ = ws.broadcast_text(&bad_upd_str);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.sync_barrier().await;
 
     // Verify: no book delta was emitted
     let books_after_update: Vec<_> = sink

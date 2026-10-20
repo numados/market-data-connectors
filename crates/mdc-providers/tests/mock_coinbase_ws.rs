@@ -239,6 +239,8 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
             "time": "2014-11-07T08:19:28.464459Z"
         });
         let _ = ws.broadcast_text(hb.to_string());
+        // Pacing wait: the heartbeat watchdog is wall-clock driven, so BTC-USD heartbeats
+        // must keep arriving across ETH-USD's silence window; no readiness signal can replace it.
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
 

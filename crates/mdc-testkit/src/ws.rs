@@ -41,6 +41,7 @@ pub struct MockWsServer {
     received_messages: Arc<Mutex<Vec<String>>>,
     connection_count: Arc<AtomicUsize>,
     ping_count: Arc<AtomicUsize>,
+    pong_count: Arc<AtomicUsize>,
     disconnect_count: Arc<AtomicUsize>,
     refuse_handshakes: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Vec<WsAction>>>>,
@@ -49,6 +50,7 @@ pub struct MockWsServer {
     handshake_notify: Arc<tokio::sync::Notify>,
     message_notify: Arc<tokio::sync::Notify>,
     ping_notify: Arc<tokio::sync::Notify>,
+    pong_notify: Arc<tokio::sync::Notify>,
     disconnect_notify: Arc<tokio::sync::Notify>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     server_task: Option<tokio::task::JoinHandle<()>>,
@@ -69,12 +71,15 @@ impl Drop for MockWsServer {
 struct DisconnectGuard {
     count: Arc<AtomicUsize>,
     notify: Arc<tokio::sync::Notify>,
+    /// Also woken so [`MockWsServer::sync_barrier`] sees connections ending.
+    pong_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for DisconnectGuard {
     fn drop(&mut self) {
         self.count.fetch_add(1, Ordering::SeqCst);
         self.notify.notify_waiters();
+        self.pong_notify.notify_waiters();
     }
 }
 
@@ -88,6 +93,7 @@ impl MockWsServer {
         let received_messages = Arc::new(Mutex::new(Vec::new()));
         let connection_count = Arc::new(AtomicUsize::new(0));
         let ping_count = Arc::new(AtomicUsize::new(0));
+        let pong_count = Arc::new(AtomicUsize::new(0));
         let disconnect_count = Arc::new(AtomicUsize::new(0));
         let refuse_handshakes = Arc::new(AtomicUsize::new(0));
         let scripts = Arc::new(Mutex::new(VecDeque::new()));
@@ -98,12 +104,14 @@ impl MockWsServer {
         let handshake_notify = Arc::new(tokio::sync::Notify::new());
         let message_notify = Arc::new(tokio::sync::Notify::new());
         let ping_notify = Arc::new(tokio::sync::Notify::new());
+        let pong_notify = Arc::new(tokio::sync::Notify::new());
         let disconnect_notify = Arc::new(tokio::sync::Notify::new());
 
         let server_paths = Arc::clone(&handshake_paths);
         let server_received = Arc::clone(&received_messages);
         let server_conns = Arc::clone(&connection_count);
         let server_pings = Arc::clone(&ping_count);
+        let server_pongs = Arc::clone(&pong_count);
         let server_disconnects = Arc::clone(&disconnect_count);
         let server_refuse = Arc::clone(&refuse_handshakes);
         let server_scripts = Arc::clone(&scripts);
@@ -113,6 +121,7 @@ impl MockWsServer {
         let s_handshake_notify = Arc::clone(&handshake_notify);
         let s_message_notify = Arc::clone(&message_notify);
         let s_ping_notify = Arc::clone(&ping_notify);
+        let s_pong_notify = Arc::clone(&pong_notify);
         let s_disconnect_notify = Arc::clone(&disconnect_notify);
 
         let server_task = tokio::spawn(async move {
@@ -145,6 +154,8 @@ impl MockWsServer {
                         let paths = Arc::clone(&server_paths);
                         let received = Arc::clone(&server_received);
                         let pings = Arc::clone(&server_pings);
+                        let pongs = Arc::clone(&server_pongs);
+                        let pong_notify = Arc::clone(&s_pong_notify);
                         let scripts = Arc::clone(&server_scripts);
                         let mut broadcast_rx = server_broadcast.subscribe();
                         let hs_notify = Arc::clone(&s_handshake_notify);
@@ -175,6 +186,7 @@ impl MockWsServer {
                             let _closed = DisconnectGuard {
                                 count: disconnects,
                                 notify: disconnect_notify,
+                                pong_notify: Arc::clone(&pong_notify),
                             };
 
                             if !path_capture.is_empty() {
@@ -251,6 +263,10 @@ impl MockWsServer {
                                                 pings.fetch_add(1, Ordering::SeqCst);
                                                 ping_notify.notify_waiters();
                                             }
+                                            Some(Ok(Message::Pong(_))) => {
+                                                pongs.fetch_add(1, Ordering::SeqCst);
+                                                pong_notify.notify_waiters();
+                                            }
                                             Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                                             _ => {}
                                         }
@@ -283,6 +299,7 @@ impl MockWsServer {
             received_messages,
             connection_count,
             ping_count,
+            pong_count,
             disconnect_count,
             refuse_handshakes,
             scripts,
@@ -291,6 +308,7 @@ impl MockWsServer {
             handshake_notify,
             message_notify,
             ping_notify,
+            pong_notify,
             disconnect_notify,
             shutdown_tx: Some(shutdown_tx),
             server_task: Some(server_task),
@@ -399,6 +417,38 @@ impl MockWsServer {
     /// Returns the total number of TCP connections accepted.
     pub fn connection_count(&self) -> usize {
         self.connection_count.load(Ordering::SeqCst)
+    }
+
+    /// Returns the total number of WebSocket pongs received across all connections.
+    pub fn pong_count(&self) -> usize {
+        self.pong_count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `target_count` pong frames have been received from clients.
+    pub async fn wait_for_pongs(&self, target_count: usize) -> usize {
+        wait_until(&self.pong_notify, || {
+            let count = self.pong_count();
+            (count >= target_count).then_some(count)
+        })
+        .await
+    }
+
+    /// Round-trip barrier: sends a ping to every connected client and waits until
+    /// each has either answered with a pong or ended its connection. Frames are
+    /// handled in order, so once that holds every frame broadcast before this
+    /// call has been read and processed by the clients. Use it to prove a
+    /// negative ("nothing was emitted") without sleeping.
+    pub async fn sync_barrier(&self) {
+        let pongs_before = self.pong_count();
+        let ended_before = self.disconnect_count();
+        if let Ok(connections) = self.broadcast_tx.send(Message::Ping(Vec::new())) {
+            wait_until(&self.pong_notify, || {
+                let answered = self.pong_count().saturating_sub(pongs_before);
+                let ended = self.disconnect_count().saturating_sub(ended_before);
+                (answered + ended >= connections).then_some(())
+            })
+            .await;
+        }
     }
 
     /// Returns the total number of WebSocket pings received across all connections.

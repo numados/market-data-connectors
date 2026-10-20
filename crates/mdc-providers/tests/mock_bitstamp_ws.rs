@@ -189,7 +189,7 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
     .to_string();
 
     let _ = ws.broadcast_text(stale_diff);
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     assert!(
         sink.events().is_empty(),

@@ -9,10 +9,12 @@
 
 use std::time::Duration;
 
-use mdc_core::{IntegrityAlert, Symbol};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, Symbol};
 use mdc_providers::binance::{BinanceConfig, BinanceConnectorBuilder};
 use mdc_testkit::{MockRest, MockWsServer, RecordedEvent, RecordingSink, WsAction, load_fixture};
 use tokio_util::sync::CancellationToken;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, ResponseTemplate};
 
 #[tokio::test]
 async fn test_ws_handshake_and_stream_subscription() {
@@ -181,7 +183,7 @@ async fn test_ws_server_close_reconnects() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Wait for first close and second connect
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws.wait_for_connections(2).await;
     assert!(ws.connection_count() >= 2, "reconnected after close");
 
     cancel.cancel();
@@ -214,16 +216,24 @@ async fn test_ws_control_pause_resume_cancel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_handshakes(1).await;
 
     // Pause connector
     handle.pause().await.expect("pause connector");
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     // Broadcast a ticker while paused
     let ticker_json = r#"{"stream":"btcusdt@bookTicker","data":{"u":400900217,"s":"BTCUSDT","b":"25000.00","B":"1.20","a":"25000.10","A":"2.40"}}"#;
     let _ = ws.broadcast_text(ticker_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     // Verify no ticker was emitted while paused
     let events_during_pause = sink.events();
@@ -235,11 +245,12 @@ async fn test_ws_control_pause_resume_cancel() {
 
     // Resume connector
     handle.resume().await.expect("resume connector");
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_handshakes(2).await;
 
     // Broadcast another ticker while resumed
     let _ = ws.broadcast_text(ticker_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_event_matching(|e| matches!(e, RecordedEvent::BookTicker { .. }))
+        .await;
 
     let events_after_resume = sink.events();
     let ticker_count = events_after_resume
@@ -254,15 +265,26 @@ async fn test_ws_control_pause_resume_cancel() {
     assert!(res.is_ok(), "task completed upon cancellation");
 }
 
+/// Gap → fast snapshot → recovery, all the way through `ResyncCompleted`.
 #[tokio::test]
 async fn test_ws_gap_injection_triggers_resync() {
     let ws = MockWsServer::spawn().await.expect("spawn mock ws");
     let rest = MockRest::start().await;
 
-    // Snapshot with lastUpdateId = 100
-    let snapshot_json =
-        r#"{"lastUpdateId":100,"bids":[["25000.00","1.0"]],"asks":[["25001.00","2.0"]]}"#;
-    rest.mock_binance_depth_ok("BTCUSDT", snapshot_json).await;
+    // First snapshot (lastUpdateId = 100) bridges d1; the fast re-snapshot after the
+    // gap (lastUpdateId = 122) bridges the gapped frame d3 (U=120..u=125).
+    let first = r#"{"lastUpdateId":100,"bids":[["25000.00","1.0"]],"asks":[["25001.00","2.0"]]}"#;
+    let second = r#"{"lastUpdateId":122,"bids":[["25000.00","1.7"]],"asks":[["25001.00","2.7"]]}"#;
+    for (body, once) in [(first, true), (second, false)] {
+        let mock = Mock::given(method("GET"))
+            .and(path("/api/v3/depth"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"));
+        if once {
+            mock.up_to_n_times(1).mount(rest.inner()).await;
+        } else {
+            mock.mount(rest.inner()).await;
+        }
+    }
 
     // Depth update 1: U=95, u=105 (bridges snapshot 100)
     let d1 = r#"{"stream":"btcusdt@depth@100ms","data":{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":95,"u":105,"b":[["25000.00","1.5"]],"a":[["25001.00","2.5"]]}}"#;
@@ -283,6 +305,7 @@ async fn test_ws_gap_injection_triggers_resync() {
     config.ws_base_url = ws.ws_url().expect("ws url");
     config.rest_base_url = rest.url().expect("rest url");
     config.initial_backoff = Duration::from_millis(20);
+    config.snapshot_retry_cooldown = Duration::from_millis(10);
 
     let sink = RecordingSink::new();
     let (connector, _handle) = BinanceConnectorBuilder::new(config)
@@ -295,15 +318,8 @@ async fn test_ws_gap_injection_triggers_resync() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Wait for all scripted updates and resync reconciliation to occur
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let alerts = sink.alerts_for("BTCUSDT");
-    // Verify alert progression: ResyncStarted -> ResyncCompleted -> GapDetected -> ResyncStarted
-    assert!(
-        alerts.len() >= 4,
-        "expected at least 4 alerts, got {alerts:?}"
-    );
+    // The full episode: start, complete, gap, restart, complete again.
+    let alerts = sink.wait_for_alerts_for("BTCUSDT", 5).await;
     assert_eq!(alerts[0], IntegrityAlert::ResyncStarted);
     assert_eq!(
         alerts[1],
@@ -323,6 +339,30 @@ async fn test_ws_gap_injection_triggers_resync() {
         alerts[2]
     );
     assert_eq!(alerts[3], IntegrityAlert::ResyncStarted);
+    assert_eq!(
+        alerts[4],
+        IntegrityAlert::ResyncCompleted {
+            last_update_id: Some(122)
+        },
+        "recovery must complete from the fast snapshot, got {alerts:?}"
+    );
+
+    // Two snapshots were published (initial and recovery) and exactly two REST calls made.
+    let snapshots = sink
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                RecordedEvent::BeginBook {
+                    kind: BookKind::Snapshot,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(snapshots, 2);
+    assert_eq!(rest.wait_for_requests(2).await, 2);
 
     cancel.cancel();
     let _ = runner.await;

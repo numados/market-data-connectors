@@ -362,7 +362,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
         }]
     });
     let _ = ws.broadcast_text(delta_frame.to_string());
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     // No new BeginBook event should have been added
     let delta_added = sink.events()[pre_snap_events_count..].iter().any(|e| {
@@ -448,7 +448,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
     });
     let _ = ws.broadcast_text(old_frame.to_string());
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     // No new events should have been processed
     assert_eq!(
@@ -515,7 +515,7 @@ async fn test_heartbeat_keeps_watchdog_alive() {
             }]
         });
         let _ = ws.broadcast_text(hb.to_string());
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        ws.sync_barrier().await;
     }
 
     // Must still have exactly 1 connection (no watchdog reconnect)
@@ -641,7 +641,7 @@ async fn test_operator_commands_resync_and_pause() {
     let pre_pause_count = sink.events().len();
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
     let _ = ws.broadcast_text(upd_raw.clone());
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    ws.sync_barrier().await;
 
     assert_eq!(
         sink.events().len(),

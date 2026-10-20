@@ -117,7 +117,7 @@ async fn test_ws_continuous_full_snapshots_and_resync_lifecycle() {
 
     // Send 1st order book frame
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events1 = sink.events();
     let has_snapshot1 = events1.iter().any(|e| {
@@ -149,7 +149,7 @@ async fn test_ws_continuous_full_snapshots_and_resync_lifecycle() {
 
     // Send 2nd order book frame
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events2 = sink.events();
     let has_snapshot2 = events2.iter().any(|e| {
@@ -209,7 +209,7 @@ async fn test_ws_high_throughput_snapshot_stream() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
     sink.clear();
 
     // Stream 1,000 snapshots rapidly, yielding periodically to avoid broadcast channel buffer lag
@@ -272,7 +272,7 @@ async fn test_ws_resync_batching_and_pacing() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Trigger resync for both symbols within a short batching window
     handle
@@ -341,11 +341,11 @@ async fn test_ws_trade_normalization() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
     sink.clear();
 
     let _ = ws.broadcast_text(trade_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.sync_barrier().await;
 
     let events = sink.events();
     let trade_event = events.iter().find_map(|e| match e {
@@ -387,7 +387,7 @@ async fn test_ws_control_pause_resume() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
 
     handle.pause().await.expect("send pause");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -437,7 +437,7 @@ async fn test_lmax_pause_then_cancel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_messages(1).await;
 
     handle.pause().await.expect("send pause");
     tokio::time::sleep(Duration::from_millis(50)).await;

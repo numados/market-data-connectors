@@ -12,15 +12,23 @@ use tokio::sync::Notify;
 /// wakes every future created before the call, so a notification that lands
 /// between registration and the check is never lost: the check either sees the
 /// new state or the already-registered future completes immediately.
+///
+/// A barrier that never opens fails the test after [`BARRIER_TIMEOUT`] instead of hanging it.
 pub async fn wait_until<T>(notify: &Notify, mut check: impl FnMut() -> Option<T>) -> T {
-    loop {
-        let notified = notify.notified();
-        if let Some(value) = check() {
-            return value;
+    let wait = async {
+        loop {
+            let notified = notify.notified();
+            if let Some(value) = check() {
+                return value;
+            }
+            notified.await;
         }
-        notified.await;
-    }
+    };
+    within(BARRIER_TIMEOUT, "readiness barrier", wait).await
 }
+
+/// Upper bound for any single readiness barrier.
+pub const BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Awaits `fut`, panicking with `what` if it does not finish within `bound`.
 ///
