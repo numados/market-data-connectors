@@ -26,6 +26,26 @@ use crate::coinbase_advanced::raw::{
     build_subscribe_frame, build_unsubscribe_frame,
 };
 
+/// Sends the level2 unsubscribe/subscribe pair for `products`, stopping at the
+/// first failed send so the caller can reconnect instead of waiting on a
+/// subscription that never arrived.
+// The error type is tungstenite's own; it is consumed immediately by the caller.
+#[allow(clippy::result_large_err)]
+async fn send_level2_resubscribe<W>(
+    ws_tx: &mut W,
+    products: &[&str],
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
+where
+    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    ws_tx
+        .send(Message::Text(build_unsubscribe_frame("level2", products)))
+        .await?;
+    ws_tx
+        .send(Message::Text(build_subscribe_frame("level2", products)))
+        .await
+}
+
 /// Runs a single Coinbase Advanced Trade WebSocket connection worker managing a slice of products.
 #[allow(clippy::too_many_lines)]
 pub async fn run_connection_task<S: StreamingSink>(
@@ -45,6 +65,7 @@ pub async fn run_connection_task<S: StreamingSink>(
         .with_reset_threshold(config.reset_threshold);
     let mut scratch = CoinbaseAdvancedScratch::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
+    let mut resync_announced = false;
     let mut backoff_policy =
         ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(30));
     let mut is_paused = false;
@@ -121,20 +142,24 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Reset FSM and emit ResyncStarted for all products
         fsm.reset();
-        for (sym, tag) in &symbols {
-            if sink
-                .emit_alert(
-                    VenueId::CoinbaseAdvanced,
-                    sym,
-                    *tag,
-                    None,
-                    crate::now_nanos(),
-                    None,
-                    IntegrityAlert::ResyncStarted,
-                )
-                .is_err()
-            {
-                break 'reconnect_loop;
+        // A sequence-reset episode already announced ResyncStarted before
+        // dropping the socket; do not announce the same episode twice.
+        if !std::mem::take(&mut resync_announced) {
+            for (sym, tag) in &symbols {
+                if sink
+                    .emit_alert(
+                        VenueId::CoinbaseAdvanced,
+                        sym,
+                        *tag,
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::ResyncStarted,
+                    )
+                    .is_err()
+                {
+                    break 'reconnect_loop;
+                }
             }
         }
 
@@ -175,6 +200,12 @@ pub async fn run_connection_task<S: StreamingSink>(
         let mut pending_delayed_resubscribe: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         'frame_loop: loop {
+            // Checked at the top so a `continue 'frame_loop` after a sink
+            // failure exits promptly instead of waiting for the next event.
+            if sink.is_failed() {
+                break 'reconnect_loop;
+            }
+
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break 'reconnect_loop;
@@ -188,21 +219,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                 }, if pending_delayed_resubscribe.is_some() => {
                     pending_delayed_resubscribe = None;
                     fsm.mark_resync_all(Instant::now());
-                    let unsub = build_unsubscribe_frame("level2", &product_strs);
-                    let sub = build_subscribe_frame("level2", &product_strs);
-                    if let Err(e) = ws_tx.send(Message::Text(unsub)).await {
+                    if let Err(e) = send_level2_resubscribe(&mut ws_tx, &product_strs).await {
                         warn!(
                             connection_id,
                             error = %e,
-                            "Failed to send delayed unsubscribe frame; forcing reconnect"
-                        );
-                        break 'frame_loop;
-                    }
-                    if let Err(e) = ws_tx.send(Message::Text(sub)).await {
-                        warn!(
-                            connection_id,
-                            error = %e,
-                            "Failed to send delayed subscribe frame; forcing reconnect"
+                            "Failed to send delayed resubscribe frames; forcing reconnect"
                         );
                         break 'frame_loop;
                     }
@@ -228,10 +249,14 @@ pub async fn run_connection_task<S: StreamingSink>(
                                 }
 
                                 let sym_str = sym.as_str();
-                                let unsub = build_unsubscribe_frame("level2", &[sym_str]);
-                                let sub = build_subscribe_frame("level2", &[sym_str]);
-                                let _ = ws_tx.send(Message::Text(unsub)).await;
-                                let _ = ws_tx.send(Message::Text(sub)).await;
+                                if let Err(e) = send_level2_resubscribe(&mut ws_tx, &[sym_str]).await {
+                                    warn!(
+                                        connection_id,
+                                        error = %e,
+                                        "Failed to send resubscribe frames; forcing reconnect"
+                                    );
+                                    break 'frame_loop;
+                                }
                             }
                         }
 
@@ -256,10 +281,14 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                             match schedule {
                                 ResyncSchedule::Immediate => {
-                                    let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                    let sub = build_subscribe_frame("level2", &product_strs);
-                                    let _ = ws_tx.send(Message::Text(unsub)).await;
-                                    let _ = ws_tx.send(Message::Text(sub)).await;
+                                    if let Err(e) = send_level2_resubscribe(&mut ws_tx, &product_strs).await {
+                                        warn!(
+                                            connection_id,
+                                            error = %e,
+                                            "Failed to send resubscribe frames; forcing reconnect"
+                                        );
+                                        break 'frame_loop;
+                                    }
                                 }
                                 ResyncSchedule::Delayed(delay) => {
                                     if pending_delayed_resubscribe.is_none() {
@@ -457,10 +486,14 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 match schedule {
                                     ResyncSchedule::Immediate => {
-                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                        let sub = build_subscribe_frame("level2", &product_strs);
-                                        let _ = ws_tx.send(Message::Text(unsub)).await;
-                                        let _ = ws_tx.send(Message::Text(sub)).await;
+                                        if let Err(e) = send_level2_resubscribe(&mut ws_tx, &product_strs).await {
+                                            warn!(
+                                                connection_id,
+                                                error = %e,
+                                                "Failed to send resubscribe frames; forcing reconnect"
+                                            );
+                                            break 'frame_loop;
+                                        }
                                     }
                                     ResyncSchedule::Delayed(delay) => {
                                         if pending_delayed_resubscribe.is_none() {
@@ -514,10 +547,14 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                                 match schedule {
                                     ResyncSchedule::Immediate => {
-                                        let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                        let sub = build_subscribe_frame("level2", &product_strs);
-                                        let _ = ws_tx.send(Message::Text(unsub)).await;
-                                        let _ = ws_tx.send(Message::Text(sub)).await;
+                                        if let Err(e) = send_level2_resubscribe(&mut ws_tx, &product_strs).await {
+                                            warn!(
+                                                connection_id,
+                                                error = %e,
+                                                "Failed to send resubscribe frames; forcing reconnect"
+                                            );
+                                            break 'frame_loop;
+                                        }
                                     }
                                     ResyncSchedule::Delayed(delay) => {
                                         if pending_delayed_resubscribe.is_none() {
@@ -570,6 +607,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     }
                                 }
 
+                                resync_announced = true;
                                 break 'frame_loop;
                             }
                         }
@@ -600,10 +638,14 @@ pub async fn run_connection_task<S: StreamingSink>(
 
                         match schedule {
                             ResyncSchedule::Immediate => {
-                                let unsub = build_unsubscribe_frame("level2", &product_strs);
-                                let sub = build_subscribe_frame("level2", &product_strs);
-                                let _ = ws_tx.send(Message::Text(unsub)).await;
-                                let _ = ws_tx.send(Message::Text(sub)).await;
+                                if let Err(e) = send_level2_resubscribe(&mut ws_tx, &product_strs).await {
+                                    warn!(
+                                        connection_id,
+                                        error = %e,
+                                        "Failed to send resubscribe frames; forcing reconnect"
+                                    );
+                                    break 'frame_loop;
+                                }
                             }
                             ResyncSchedule::Delayed(delay) => {
                                 if pending_delayed_resubscribe.is_none() {
@@ -748,10 +790,6 @@ pub async fn run_connection_task<S: StreamingSink>(
                     }
                 }
             }
-
-            if sink.is_failed() {
-                break 'reconnect_loop;
-            }
         }
 
         // Emit ConnectionLost when socket breaks (if not cleanly paused)
@@ -796,5 +834,93 @@ pub async fn run_connection_task<S: StreamingSink>(
         Err(crate::sink_util::SinkError)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio_tungstenite::tungstenite::Error as WsError;
+
+    /// Sink that records frames and fails every send from `fail_from` onwards.
+    struct FlakySink {
+        sent: Vec<String>,
+        fail_from: usize,
+        attempts: usize,
+    }
+
+    impl futures_util::Sink<Message> for FlakySink {
+        type Error = WsError;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), WsError> {
+            self.attempts += 1;
+            if self.attempts > self.fail_from {
+                return Err(WsError::ConnectionClosed);
+            }
+            if let Message::Text(t) = item {
+                self.sent.push(t);
+            }
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), WsError>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn resubscribe_sends_unsubscribe_then_subscribe() {
+        let mut sink = FlakySink {
+            sent: Vec::new(),
+            fail_from: usize::MAX,
+            attempts: 0,
+        };
+        send_level2_resubscribe(&mut sink, &["BTC-USD"])
+            .await
+            .unwrap();
+        assert_eq!(sink.sent.len(), 2);
+        assert!(sink.sent[0].contains("\"unsubscribe\""));
+        assert!(sink.sent[1].contains("\"subscribe\""));
+    }
+
+    #[tokio::test]
+    async fn failed_unsubscribe_surfaces_error_and_skips_subscribe() {
+        let mut sink = FlakySink {
+            sent: Vec::new(),
+            fail_from: 0,
+            attempts: 0,
+        };
+        assert!(
+            send_level2_resubscribe(&mut sink, &["BTC-USD"])
+                .await
+                .is_err()
+        );
+        assert_eq!(sink.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn failed_subscribe_surfaces_error() {
+        let mut sink = FlakySink {
+            sent: Vec::new(),
+            fail_from: 1,
+            attempts: 0,
+        };
+        assert!(
+            send_level2_resubscribe(&mut sink, &["BTC-USD"])
+                .await
+                .is_err()
+        );
+        assert_eq!(sink.sent.len(), 1, "only the unsubscribe went out");
     }
 }

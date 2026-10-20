@@ -1102,9 +1102,17 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         ]
     }"#;
     let _ = ws.broadcast_text(recovery_snap.to_string());
-    sink.wait_for_alerts(7).await;
+    sink.wait_for_alerts(6).await;
 
     let alerts = sink.alerts_for("BTC-USD");
+    let started = alerts
+        .iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
+        .count();
+    assert_eq!(
+        started, 2,
+        "one ResyncStarted for the initial sync and exactly one for the reset episode, got: {alerts:?}"
+    );
     let gap_alerts: Vec<_> = alerts
         .iter()
         .filter(|a| {
