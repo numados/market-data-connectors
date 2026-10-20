@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod barrier;
 pub mod catalog;
 pub mod conformance;
 pub mod fixture;
@@ -10,6 +11,7 @@ pub mod rest_quote;
 pub mod sink;
 pub mod ws;
 
+pub use barrier::{wait_until, within};
 pub use catalog::MockCatalogServer;
 pub use conformance::{ConformanceReport, MrsConsumerHarness, MrsConsumerStats};
 pub use fixture::{load_fixture, load_fixture_bytes};

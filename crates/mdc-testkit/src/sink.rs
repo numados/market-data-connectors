@@ -10,6 +10,8 @@ use mdc_core::{
 };
 use rust_decimal::Decimal;
 
+use crate::barrier::wait_until;
+
 /// No-op streaming sink that discards all market data and alerts.
 ///
 /// Allocates nothing and executes with minimal overhead; suitable for zero-heap benchmarks.
@@ -189,38 +191,29 @@ impl RecordingSink {
 
     /// Asynchronously waits until at least `count` events have been recorded, returning all recorded events.
     pub async fn wait_for_events(&self, count: usize) -> Vec<RecordedEvent> {
-        loop {
-            let notified = self.notify.notified();
+        wait_until(&self.notify, || {
             let events = self.events();
-            if events.len() >= count {
-                return events;
-            }
-            notified.await;
-        }
+            (events.len() >= count).then_some(events)
+        })
+        .await
     }
 
     /// Asynchronously waits until at least `count` alerts have been recorded, returning all recorded alerts.
     pub async fn wait_for_alerts(&self, count: usize) -> Vec<IntegrityAlert> {
-        loop {
-            let notified = self.notify.notified();
+        wait_until(&self.notify, || {
             let alerts = self.alerts();
-            if alerts.len() >= count {
-                return alerts;
-            }
-            notified.await;
-        }
+            (alerts.len() >= count).then_some(alerts)
+        })
+        .await
     }
 
     /// Asynchronously waits until at least `count` alerts have been recorded for a specific symbol.
     pub async fn wait_for_alerts_for(&self, symbol: &str, count: usize) -> Vec<IntegrityAlert> {
-        loop {
-            let notified = self.notify.notified();
+        wait_until(&self.notify, || {
             let alerts = self.alerts_for(symbol);
-            if alerts.len() >= count {
-                return alerts;
-            }
-            notified.await;
-        }
+            (alerts.len() >= count).then_some(alerts)
+        })
+        .await
     }
 
     /// Asynchronously waits until an event matching `predicate` is recorded and returns it.
@@ -228,14 +221,7 @@ impl RecordingSink {
     where
         F: Fn(&RecordedEvent) -> bool,
     {
-        loop {
-            let notified = self.notify.notified();
-            let events = self.events();
-            if let Some(event) = events.into_iter().find(&predicate) {
-                return event;
-            }
-            notified.await;
-        }
+        wait_until(&self.notify, || self.events().into_iter().find(&predicate)).await
     }
 
     /// Asynchronously waits until an alert matching `predicate` is recorded and returns it.
@@ -243,32 +229,21 @@ impl RecordingSink {
     where
         F: Fn(&IntegrityAlert) -> bool,
     {
-        loop {
-            let notified = self.notify.notified();
-            let alerts = self.alerts();
-            if let Some(alert) = alerts.into_iter().find(&predicate) {
-                return alert;
-            }
-            notified.await;
-        }
+        wait_until(&self.notify, || self.alerts().into_iter().find(&predicate)).await
     }
 
     /// Asynchronously waits until at least `count` delivery stamps have been recorded.
     pub async fn wait_for_delivery_stamps(&self, count: usize) -> Vec<mdc_core::DeliveryStamp> {
-        loop {
-            let notified = self.notify.notified();
+        wait_until(&self.notify, || {
             let stamps = self.delivery_stamps();
-            if stamps.len() >= count {
-                return stamps;
-            }
-            notified.await;
-        }
+            (stamps.len() >= count).then_some(stamps)
+        })
+        .await
     }
 
     /// Asynchronously waits until at least `count` trades have been recorded.
     pub async fn wait_for_trades(&self, count: usize) -> Vec<mdc_core::Trade> {
-        loop {
-            let notified = self.notify.notified();
+        wait_until(&self.notify, || {
             let trades: Vec<_> = self
                 .events()
                 .into_iter()
@@ -277,11 +252,9 @@ impl RecordingSink {
                     _ => None,
                 })
                 .collect();
-            if trades.len() >= count {
-                return trades;
-            }
-            notified.await;
-        }
+            (trades.len() >= count).then_some(trades)
+        })
+        .await
     }
 
     /// Clears all recorded events and delivery stamps.

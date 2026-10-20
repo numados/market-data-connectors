@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::barrier::wait_until;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -308,38 +309,29 @@ impl MockWsServer {
 
     /// Waits until at least `target_count` TCP connections have been accepted.
     pub async fn wait_for_connections(&self, target_count: usize) -> usize {
-        loop {
-            let notified = self.conn_notify.notified();
+        wait_until(&self.conn_notify, || {
             let count = self.connection_count();
-            if count >= target_count {
-                return count;
-            }
-            notified.await;
-        }
+            (count >= target_count).then_some(count)
+        })
+        .await
     }
 
     /// Waits until at least `target_count` WebSocket handshakes have been established.
     pub async fn wait_for_handshakes(&self, target_count: usize) -> Vec<String> {
-        loop {
-            let notified = self.handshake_notify.notified();
+        wait_until(&self.handshake_notify, || {
             let paths = self.handshake_paths();
-            if paths.len() >= target_count {
-                return paths;
-            }
-            notified.await;
-        }
+            (paths.len() >= target_count).then_some(paths)
+        })
+        .await
     }
 
     /// Waits until at least `target_count` text messages have been received from connected clients.
     pub async fn wait_for_client_messages(&self, target_count: usize) -> Vec<String> {
-        loop {
-            let notified = self.message_notify.notified();
+        wait_until(&self.message_notify, || {
             let msgs = self.received_messages();
-            if msgs.len() >= target_count {
-                return msgs;
-            }
-            notified.await;
-        }
+            (msgs.len() >= target_count).then_some(msgs)
+        })
+        .await
     }
 
     /// Waits until a client message matching `predicate` is received and returns it.
@@ -347,27 +339,20 @@ impl MockWsServer {
     where
         F: Fn(&str) -> bool,
     {
-        loop {
-            let notified = self.message_notify.notified();
-            let msgs = self.received_messages();
-            if let Some(found) = msgs.iter().find(|m| predicate(m)) {
-                return found.clone();
-            }
-            notified.await;
-        }
+        wait_until(&self.message_notify, || {
+            self.received_messages().into_iter().find(|m| predicate(m))
+        })
+        .await
     }
 
     /// Waits until at least `target_count` established connections have ended
     /// (client closed, dropped, or errored).
     pub async fn wait_for_disconnects(&self, target_count: usize) -> usize {
-        loop {
-            let notified = self.disconnect_notify.notified();
+        wait_until(&self.disconnect_notify, || {
             let count = self.disconnect_count();
-            if count >= target_count {
-                return count;
-            }
-            notified.await;
-        }
+            (count >= target_count).then_some(count)
+        })
+        .await
     }
 
     /// Makes the next `count` accepted TCP connections close before the
@@ -383,14 +368,11 @@ impl MockWsServer {
 
     /// Waits until at least `target_count` ping frames have been received from connected clients.
     pub async fn wait_for_pings(&self, target_count: usize) -> usize {
-        loop {
-            let notified = self.ping_notify.notified();
+        wait_until(&self.ping_notify, || {
             let count = self.ping_count();
-            if count >= target_count {
-                return count;
-            }
-            notified.await;
-        }
+            (count >= target_count).then_some(count)
+        })
+        .await
     }
 
     /// Returns the WebSocket base URL of this mock server.
