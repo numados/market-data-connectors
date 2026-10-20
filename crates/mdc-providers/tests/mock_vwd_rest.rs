@@ -364,6 +364,81 @@ async fn test_rest_symbol_specific_errors() {
     );
 }
 
+/// A raw quote that is valid (`bid < ask`) can become invalid through the configured
+/// transformation: inverting and rounding to few significant digits collapses the spread. The
+/// result must be rejected as an invalid quote, not published as a crossed or locked book.
+#[tokio::test]
+async fn test_rest_transformation_induced_invalid_quote_is_rejected() {
+    let mock = MockRest::start().await;
+    let body = load_fixture(INVERSE_FIXTURE).expect("load fixture");
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+        .mount(mock.inner())
+        .await;
+
+    // The raw USDEUR quote is 0.92217 / 0.92234; the inverse 1.0842 / 1.0844 rounds to 1.1 / 1.1
+    // at two significant digits.
+    let config = VwdConfig::builder()
+        .base_url(mock.url().expect("valid mock url"))
+        .account_path("acct")
+        .credentials(VwdCredentials::new("user", "pass"))
+        .add_symbol(VwdSymbol::with_inverse("EURUSD"))
+        .significant_digits(2)
+        .poll_interval(Duration::from_millis(50))
+        .build()
+        .expect("build config");
+
+    let connector = VwdConnector::builder(config)
+        .build()
+        .expect("build connector");
+    let sink = RecordingSink::new();
+    let cancel = CancellationToken::new();
+    let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
+
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::InvalidQuote
+            }
+        )
+    })
+    .await;
+    // A later poll fails the same way: the connector keeps running and keeps rejecting.
+    let rejected = sink
+        .wait_for_alerts(sink.alerts().len() + 1)
+        .await
+        .into_iter()
+        .filter(|a| {
+            matches!(
+                a,
+                IntegrityAlert::SourceError {
+                    kind: SourceErrorKind::InvalidQuote
+                }
+            )
+        })
+        .count();
+    assert!(rejected >= 1);
+    cancel.cancel();
+    let _ = runner.await;
+
+    let published = sink.events().iter().any(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook { .. } | RecordedEvent::Level { .. }
+        )
+    });
+    assert!(!published, "a rejected quote must not publish any book");
+    assert!(
+        !sink
+            .alerts()
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })),
+        "a rejected quote must not complete a resync"
+    );
+}
+
 #[tokio::test]
 async fn test_rest_empty_array_error() {
     let mock = MockRest::start().await;
