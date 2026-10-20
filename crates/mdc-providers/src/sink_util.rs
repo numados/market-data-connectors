@@ -7,8 +7,8 @@ use mdc_core::{
 use rust_decimal::Decimal;
 use tracing::warn;
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Error indicating that the downstream streaming sink failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -529,7 +529,11 @@ mod tests {
 
         // Subsequent operations fail immediately
         assert!(conn_sink.begin_book(&ctx, BookKind::Snapshot).is_err());
-        assert!(conn_sink.level(Side::Bid, Decimal::ONE, Decimal::ONE).is_err());
+        assert!(
+            conn_sink
+                .level(Side::Bid, Decimal::ONE, Decimal::ONE)
+                .is_err()
+        );
     }
 
     #[test]

@@ -49,8 +49,8 @@ pub enum PollOutcome {
     QuarantineExpiredTriggerResubscribe,
 }
 
-use mdc_core::resync::{ResyncDecision, ResyncPolicy, TimeoutQuarantinePolicy};
 use mdc_core::Symbol;
+use mdc_core::resync::{ResyncDecision, ResyncPolicy, TimeoutQuarantinePolicy};
 
 /// Per-product synchronization controller.
 #[derive(Debug, Clone)]
@@ -112,16 +112,14 @@ impl SymbolFsm {
                 self.policy.on_started(&self.symbol, now);
                 true
             }
-            SyncState::AwaitingSnapshot { .. } => {
-                match self.policy.decide(&self.symbol, now) {
-                    ResyncDecision::Wait(_) => false,
-                    _ => {
-                        self.state = SyncState::AwaitingSnapshot { started_at: now };
-                        self.policy.on_started(&self.symbol, now);
-                        true
-                    }
+            SyncState::AwaitingSnapshot { .. } => match self.policy.decide(&self.symbol, now) {
+                ResyncDecision::Wait(_) => false,
+                _ => {
+                    self.state = SyncState::AwaitingSnapshot { started_at: now };
+                    self.policy.on_started(&self.symbol, now);
+                    true
                 }
-            }
+            },
             SyncState::Quarantined { .. } => false,
         }
     }
@@ -130,25 +128,21 @@ impl SymbolFsm {
     pub fn poll(&mut self, now: Instant) -> PollOutcome {
         match self.state {
             SyncState::InSync => PollOutcome::None,
-            SyncState::AwaitingSnapshot { .. } => {
-                match self.policy.decide(&self.symbol, now) {
-                    ResyncDecision::Quarantine(until) => {
-                        self.state = SyncState::Quarantined { until };
-                        PollOutcome::TimeoutQuarantined { until }
-                    }
-                    _ => PollOutcome::None,
+            SyncState::AwaitingSnapshot { .. } => match self.policy.decide(&self.symbol, now) {
+                ResyncDecision::Quarantine(until) => {
+                    self.state = SyncState::Quarantined { until };
+                    PollOutcome::TimeoutQuarantined { until }
                 }
-            }
-            SyncState::Quarantined { .. } => {
-                match self.policy.decide(&self.symbol, now) {
-                    ResyncDecision::Proceed => {
-                        self.state = SyncState::AwaitingSnapshot { started_at: now };
-                        self.policy.on_started(&self.symbol, now);
-                        PollOutcome::QuarantineExpiredTriggerResubscribe
-                    }
-                    _ => PollOutcome::None,
+                _ => PollOutcome::None,
+            },
+            SyncState::Quarantined { .. } => match self.policy.decide(&self.symbol, now) {
+                ResyncDecision::Proceed => {
+                    self.state = SyncState::AwaitingSnapshot { started_at: now };
+                    self.policy.on_started(&self.symbol, now);
+                    PollOutcome::QuarantineExpiredTriggerResubscribe
                 }
-            }
+                _ => PollOutcome::None,
+            },
         }
     }
 

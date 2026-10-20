@@ -61,12 +61,20 @@ impl<S: StreamingSink> Connection<S> {
             return;
         }
         for level in &self.scratch.bids {
-            if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+            if self
+                .sink
+                .level(Side::Bid, level.price, level.volume)
+                .is_err()
+            {
                 return;
             }
         }
         for level in &self.scratch.asks {
-            if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+            if self
+                .sink
+                .level(Side::Ask, level.price, level.volume)
+                .is_err()
+            {
                 return;
             }
         }

@@ -131,7 +131,8 @@ mod tests {
             r#"{{"run":{},"connection_generation":2,"ordinal":42}}"#,
             serde_json::to_string(&stamp.run).expect("serialize run")
         );
-        let decoded_legacy: DeliveryStamp = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+        let decoded_legacy: DeliveryStamp =
+            serde_json::from_str(&legacy_json).expect("deserialize legacy");
         assert_eq!(decoded_legacy.connection_id, 0);
         assert_eq!(decoded_legacy.connection_generation, 2);
         assert_eq!(decoded_legacy.ordinal, 42);

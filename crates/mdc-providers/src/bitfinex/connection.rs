@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use mdc_core::MdcError;
 use mdc_core::integrity::{SilenceWatchdog, WatchdogAction};
-use mdc_core::model::{
-    DisconnectKind, IntegrityAlert, Symbol, SymbolTag, UnixNanos, VenueId,
-};
+use mdc_core::model::{DisconnectKind, IntegrityAlert, Symbol, SymbolTag, UnixNanos, VenueId};
 use mdc_core::sink::{BookKind, RawLevelText, StreamingSink};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -708,18 +706,21 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     "Bitfinex CRC32 checksum mismatch; triggering channel resubscribe"
                                 );
 
-                                if sink.emit_alert(
-                                    VenueId::Bitfinex,
-                                    &sym,
-                                    tag,
-                                    exchange_ts,
-                                    received_ts,
-                                    None,
-                                    IntegrityAlert::ChecksumMismatch {
-                                        expected: expected as u32,
-                                        calculated: calculated as u32,
-                                    },
-                                ).is_err() {
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Bitfinex,
+                                        &sym,
+                                        tag,
+                                        exchange_ts,
+                                        received_ts,
+                                        None,
+                                        IntegrityAlert::ChecksumMismatch {
+                                            expected: expected as u32,
+                                            calculated: calculated as u32,
+                                        },
+                                    )
+                                    .is_err()
+                                {
                                     return Err(true);
                                 }
 
@@ -727,15 +728,18 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
                                     fsm.on_checksum_mismatch(Instant::now());
                                 }
 
-                                if sink.emit_alert(
-                                    VenueId::Bitfinex,
-                                    &sym,
-                                    tag,
-                                    exchange_ts,
-                                    received_ts,
-                                    None,
-                                    IntegrityAlert::ResyncStarted,
-                                ).is_err() {
+                                if sink
+                                    .emit_alert(
+                                        VenueId::Bitfinex,
+                                        &sym,
+                                        tag,
+                                        exchange_ts,
+                                        received_ts,
+                                        None,
+                                        IntegrityAlert::ResyncStarted,
+                                    )
+                                    .is_err()
+                                {
                                     return Err(true);
                                 }
 
@@ -796,17 +800,20 @@ async fn handle_frame_text<S: StreamingSink, W: SinkExt<Message> + Unpin>(
 
                             // ResyncCompleted must be emitted strictly AFTER begin_book and end_book,
                             // consuming a fresh monotonic delivery ordinal.
-                            if sink.emit_alert(
-                                VenueId::Bitfinex,
-                                &sym,
-                                tag,
-                                exchange_ts,
-                                received_ts,
-                                None,
-                                IntegrityAlert::ResyncCompleted {
-                                    last_update_id: None,
-                                },
-                            ).is_err() {
+                            if sink
+                                .emit_alert(
+                                    VenueId::Bitfinex,
+                                    &sym,
+                                    tag,
+                                    exchange_ts,
+                                    received_ts,
+                                    None,
+                                    IntegrityAlert::ResyncCompleted {
+                                        last_update_id: None,
+                                    },
+                                )
+                                .is_err()
+                            {
                                 return Err(true);
                             }
                         } else if sink.is_failed() {

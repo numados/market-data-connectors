@@ -657,18 +657,21 @@ fn handle_frame_text<S: StreamingSink>(
                     pending_resubscribe.remove(&sym);
                     let ctx =
                         sink.next_context(VenueId::Kraken, &sym, tag, None, received_ts, None);
-                    if sink.alert(
-                        &ctx,
-                        IntegrityAlert::SourceError {
-                            kind: SourceErrorKind::Parse,
-                        },
-                    ).is_err() {
+                    if sink
+                        .alert(
+                            &ctx,
+                            IntegrityAlert::SourceError {
+                                kind: SourceErrorKind::Parse,
+                            },
+                        )
+                        .is_err()
+                    {
                         return;
                     }
-                    if sink.alert(
-                        &ctx,
-                        IntegrityAlert::Quarantined { retry_in_ms },
-                    ).is_err() {
+                    if sink
+                        .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
+                        .is_err()
+                    {
                         return;
                     }
                 } else {
@@ -680,22 +683,27 @@ fn handle_frame_text<S: StreamingSink>(
                     let now = Instant::now();
                     for (sym, fsm) in fsms.iter_mut() {
                         fsm.trigger_quarantine(now);
-                        let retry_in_ms = fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64;
+                        let retry_in_ms =
+                            fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64;
                         pending_resubscribe.remove(sym);
                         let tag = *tag_map.get(sym).unwrap_or(&0);
-                        let ctx = sink.next_context(VenueId::Kraken, sym, tag, None, received_ts, None);
-                        if sink.alert(
-                            &ctx,
-                            IntegrityAlert::SourceError {
-                                kind: SourceErrorKind::Transport,
-                            },
-                        ).is_err() {
+                        let ctx =
+                            sink.next_context(VenueId::Kraken, sym, tag, None, received_ts, None);
+                        if sink
+                            .alert(
+                                &ctx,
+                                IntegrityAlert::SourceError {
+                                    kind: SourceErrorKind::Transport,
+                                },
+                            )
+                            .is_err()
+                        {
                             return;
                         }
-                        if sink.alert(
-                            &ctx,
-                            IntegrityAlert::Quarantined { retry_in_ms },
-                        ).is_err() {
+                        if sink
+                            .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -729,12 +737,15 @@ fn handle_snapshot<S: StreamingSink>(
         pending_resubscribe.insert(symbol.clone());
         fsm.request_resync(Instant::now());
         let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
-        if sink.alert(
-            &ctx,
-            IntegrityAlert::SourceError {
-                kind: SourceErrorKind::Parse,
-            },
-        ).is_err() {
+        if sink
+            .alert(
+                &ctx,
+                IntegrityAlert::SourceError {
+                    kind: SourceErrorKind::Parse,
+                },
+            )
+            .is_err()
+        {
             return;
         }
         if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
@@ -788,35 +799,41 @@ fn handle_snapshot<S: StreamingSink>(
             if sink.end_book(&ctx, None).is_err() {
                 return;
             }
-            if sink.emit_alert(
-                VenueId::Kraken,
-                symbol,
-                tag,
-                None,
-                crate::now_nanos(),
-                None,
-                IntegrityAlert::ResyncCompleted {
-                    last_update_id: None,
-                },
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Kraken,
+                    symbol,
+                    tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncCompleted {
+                        last_update_id: None,
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
         }
         SnapshotOutcome::RejectedBadChecksum => {
             let expected = data.checksum.unwrap_or(0);
             let calculated = book.checksum();
-            if sink.emit_alert(
-                VenueId::Kraken,
-                symbol,
-                tag,
-                None,
-                received_ts,
-                None,
-                IntegrityAlert::ChecksumMismatch {
-                    expected,
-                    calculated,
-                },
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Kraken,
+                    symbol,
+                    tag,
+                    None,
+                    received_ts,
+                    None,
+                    IntegrityAlert::ChecksumMismatch {
+                        expected,
+                        calculated,
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
         }
@@ -853,12 +870,15 @@ fn handle_update<S: StreamingSink>(
         pending_resubscribe.insert(symbol.clone());
         fsm.request_resync(Instant::now());
         let ctx = sink.next_context(VenueId::Kraken, symbol, tag, None, received_ts, None);
-        if sink.alert(
-            &ctx,
-            IntegrityAlert::SourceError {
-                kind: SourceErrorKind::Parse,
-            },
-        ).is_err() {
+        if sink
+            .alert(
+                &ctx,
+                IntegrityAlert::SourceError {
+                    kind: SourceErrorKind::Parse,
+                },
+            )
+            .is_err()
+        {
             return;
         }
         if sink.alert(&ctx, IntegrityAlert::ResyncStarted).is_err() {
@@ -956,29 +976,35 @@ fn handle_update<S: StreamingSink>(
                 symbol = symbol.as_str(),
                 expected, calculated, "Kraken checksum mismatch; resubscribing"
             );
-            if sink.emit_alert(
-                VenueId::Kraken,
-                symbol,
-                tag,
-                None,
-                received_ts,
-                None,
-                IntegrityAlert::ChecksumMismatch {
-                    expected,
-                    calculated,
-                },
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Kraken,
+                    symbol,
+                    tag,
+                    None,
+                    received_ts,
+                    None,
+                    IntegrityAlert::ChecksumMismatch {
+                        expected,
+                        calculated,
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
-            if sink.emit_alert(
-                VenueId::Kraken,
-                symbol,
-                tag,
-                None,
-                received_ts,
-                None,
-                IntegrityAlert::ResyncStarted,
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Kraken,
+                    symbol,
+                    tag,
+                    None,
+                    received_ts,
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
                 return;
             }
             pending_resubscribe.insert(symbol.clone());

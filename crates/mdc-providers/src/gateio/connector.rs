@@ -354,9 +354,7 @@ impl<S: StreamingSink + Clone> GateioConnectorBuilder<S> {
 
         let policy_factory = self.policy_factory.unwrap_or_else(|| {
             let timeout = self.config.resync_timeout;
-            Arc::new(move || {
-                Box::new(mdc_core::resync::CooldownPolicy::new(timeout))
-            })
+            Arc::new(move || Box::new(mdc_core::resync::CooldownPolicy::new(timeout)))
         });
 
         let (command_tx, command_rx) = mpsc::channel(32);

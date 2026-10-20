@@ -31,7 +31,10 @@ impl VwdConnector {
         self,
         sink: S,
         cancel_token: CancellationToken,
-    ) -> (ConnectorHandle, tokio::task::JoinHandle<Result<(), mdc_core::MdcError>>) {
+    ) -> (
+        ConnectorHandle,
+        tokio::task::JoinHandle<Result<(), mdc_core::MdcError>>,
+    ) {
         let run_id = self.run_id.unwrap_or_else(crate::generate_run_id);
         let generation_allocator = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);

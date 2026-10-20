@@ -134,15 +134,18 @@ pub async fn run_connection_task<S: StreamingSink>(
             }
             pending_snapshots.push_back(sym.clone());
 
-            if sink.emit_alert(
-                VenueId::Huobi,
-                sym,
-                *tag,
-                None,
-                crate::now_nanos(),
-                None,
-                IntegrityAlert::ResyncStarted,
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Huobi,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
                 break 'reconnect_loop;
             }
         }

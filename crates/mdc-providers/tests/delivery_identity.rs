@@ -132,7 +132,9 @@ async fn test_alert_fault_injection_terminal_sink_failure() {
     assert!(sink.is_tripped(), "fault point should have tripped");
     let alerts = sink.alerts();
     assert!(
-        alerts.iter().any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+        alerts
+            .iter()
+            .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
         "expected terminal SinkFailure alert, got: {alerts:?}"
     );
 }
@@ -198,7 +200,8 @@ async fn test_huobi_mid_book_abort() {
 
     // Verify mid-book abort: exactly 1 level was attempted
     assert_eq!(
-        sink.level_invocations(), 1,
+        sink.level_invocations(),
+        1,
         "Huobi mid-book abort should stop on first failure without subsequent level iterations"
     );
 }

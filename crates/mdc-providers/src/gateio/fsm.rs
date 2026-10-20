@@ -236,12 +236,8 @@ mod tests {
         let config = GateioConfig::default();
         let sym = Symbol::from("BTC_USDT");
         let custom_policy = CooldownPolicy::new(Duration::from_secs(42));
-        let mut fsm = SymbolFsm::with_policy(
-            sym,
-            SymbolTag::default(),
-            &config,
-            Box::new(custom_policy),
-        );
+        let mut fsm =
+            SymbolFsm::with_policy(sym, SymbolTag::default(), &config, Box::new(custom_policy));
         assert!(fsm.can_resubscribe(Instant::now()));
     }
 }

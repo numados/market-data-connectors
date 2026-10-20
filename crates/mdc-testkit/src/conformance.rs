@@ -82,14 +82,10 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                     ));
                 }
                 if *price <= rust_decimal::Decimal::ZERO {
-                    return Err(format!(
-                        "Event {idx}: Non-positive price level {price}"
-                    ));
+                    return Err(format!("Event {idx}: Non-positive price level {price}"));
                 }
                 if *volume < rust_decimal::Decimal::ZERO {
-                    return Err(format!(
-                        "Event {idx}: Negative volume {volume}"
-                    ));
+                    return Err(format!("Event {idx}: Negative volume {volume}"));
                 }
             }
 
@@ -219,12 +215,7 @@ mod tests {
             },
             RecordedEvent::Trade {
                 symbol: sym(),
-                trade: Trade::new(
-                    None,
-                    Decimal::new(25000, 0),
-                    Decimal::ONE,
-                    Side::Bid,
-                ),
+                trade: Trade::new(None, Decimal::new(25000, 0), Decimal::ONE, Side::Bid),
             },
             RecordedEvent::BookTicker {
                 symbol: sym(),
@@ -318,12 +309,7 @@ mod tests {
             },
             RecordedEvent::Trade {
                 symbol: sym(),
-                trade: Trade::new(
-                    None,
-                    Decimal::new(25000, 0),
-                    Decimal::ONE,
-                    Side::Bid,
-                ),
+                trade: Trade::new(None, Decimal::new(25000, 0), Decimal::ONE, Side::Bid),
             },
         ];
         assert!(validate(&events).is_err());

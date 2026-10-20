@@ -62,7 +62,12 @@ impl<S: StreamingSink> Connection<S> {
                 exchange_ts,
                 received_ts: crate::now_nanos(),
                 connection_id: 1,
-                delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
+                delivery: DeliveryStamp::with_connection_id(
+                    self.run_id,
+                    1,
+                    1,
+                    self.delivery_ordinal,
+                ),
                 source_sequence: header.sequence_num,
             };
 
@@ -72,12 +77,20 @@ impl<S: StreamingSink> Connection<S> {
                         return;
                     }
                     for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                        if self
+                            .sink
+                            .level(Side::Bid, level.price, level.volume)
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                        if self
+                            .sink
+                            .level(Side::Ask, level.price, level.volume)
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -90,12 +103,20 @@ impl<S: StreamingSink> Connection<S> {
                         return;
                     }
                     for level in &self.scratch.bids[ev.bids_start..ev.bids_end] {
-                        if self.sink.level(Side::Bid, level.price, level.volume).is_err() {
+                        if self
+                            .sink
+                            .level(Side::Bid, level.price, level.volume)
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     for level in &self.scratch.asks[ev.asks_start..ev.asks_end] {
-                        if self.sink.level(Side::Ask, level.price, level.volume).is_err() {
+                        if self
+                            .sink
+                            .level(Side::Ask, level.price, level.volume)
+                            .is_err()
+                        {
                             return;
                         }
                     }

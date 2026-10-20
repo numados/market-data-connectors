@@ -69,7 +69,12 @@ impl<S: StreamingSink> Connection<S> {
                     exchange_ts: norm.exchange_ts,
                     received_ts: now,
                     connection_id: 1,
-                    delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
+                    delivery: DeliveryStamp::with_connection_id(
+                        self.run_id,
+                        1,
+                        1,
+                        self.delivery_ordinal,
+                    ),
                     source_sequence: None,
                 };
 

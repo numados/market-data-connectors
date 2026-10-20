@@ -350,7 +350,8 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff_progression_and_cap() {
-        let mut backoff = ExponentialBackoff::new(Duration::from_millis(500), Duration::from_secs(4));
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(500), Duration::from_secs(4));
         assert_eq!(backoff.next_delay(0), Duration::from_millis(500));
         assert_eq!(backoff.next_delay(1), Duration::from_millis(1000));
         assert_eq!(backoff.next_delay(2), Duration::from_millis(2000));

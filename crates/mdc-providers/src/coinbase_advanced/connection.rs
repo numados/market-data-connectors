@@ -46,7 +46,8 @@ pub async fn run_connection_task<S: StreamingSink>(
         .with_reset_threshold(config.reset_threshold);
     let mut scratch = CoinbaseAdvancedScratch::with_capacity(1_024);
     let mut reconnect_attempt = 0u32;
-    let mut backoff_policy = ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(30));
+    let mut backoff_policy =
+        ExponentialBackoff::new(Duration::from_millis(200), Duration::from_secs(30));
     let mut is_paused = false;
 
     // Collect product string slices for subscription messages

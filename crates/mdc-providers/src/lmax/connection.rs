@@ -143,15 +143,18 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Emit ResyncStarted for each symbol upon fresh connection
         for (sym, tag) in &symbols {
-            if sink.emit_alert(
-                VenueId::Lmax,
-                sym,
-                *tag,
-                None,
-                crate::now_nanos(),
-                None,
-                IntegrityAlert::ResyncStarted,
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Lmax,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
                 break 'reconnect_loop;
             }
             awaiting_first_snapshot.insert(sym.clone());

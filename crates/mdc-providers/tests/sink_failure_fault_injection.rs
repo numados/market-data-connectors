@@ -824,8 +824,7 @@ mod coinbase_advanced_faults {
 
     const SNAPSHOT_FIXTURE: &str =
         "crates/mdc-providers/tests/fixtures/coinbase_advanced/order_book_snapshot.json";
-    const TRADE_FIXTURE: &str =
-        "crates/mdc-providers/tests/fixtures/coinbase_advanced/trade.json";
+    const TRADE_FIXTURE: &str = "crates/mdc-providers/tests/fixtures/coinbase_advanced/trade.json";
 
     #[tokio::test]
     async fn test_sink_fault_on_begin_book() {
@@ -948,10 +947,7 @@ mod coinbase_advanced_faults {
     async fn test_sink_fault_on_trade() {
         let ws = MockWsServer::spawn().await.expect("spawn mock ws");
         let trade = load_fixture(TRADE_FIXTURE).expect("load fixture");
-        ws.push_script(vec![
-            WsAction::WaitClientMessage,
-            WsAction::SendText(trade),
-        ]);
+        ws.push_script(vec![WsAction::WaitClientMessage, WsAction::SendText(trade)]);
 
         let mut config = CoinbaseAdvancedConfig::default();
         config.ws_url = ws.ws_url().expect("ws url");

@@ -34,8 +34,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     cancel_token: CancellationToken,
     generation_allocator: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<(), crate::sink_util::SinkError> {
-    let sink = ConnectionSink::new(sink, run_id, 1)
-        .with_generation_allocator(generation_allocator);
+    let sink = ConnectionSink::new(sink, run_id, 1).with_generation_allocator(generation_allocator);
     ConnectionTask::new(config, client, sink)
         .run(cmd_rx, cancel_token)
         .await
@@ -75,7 +74,11 @@ impl<S: StreamingSink> ConnectionTask<S> {
         }
     }
 
-    async fn run(&mut self, mut cmd_rx: mpsc::Receiver<Command>, cancel_token: CancellationToken) -> Result<(), crate::sink_util::SinkError> {
+    async fn run(
+        &mut self,
+        mut cmd_rx: mpsc::Receiver<Command>,
+        cancel_token: CancellationToken,
+    ) -> Result<(), crate::sink_util::SinkError> {
         // Initial startup: emit ResyncStarted and execute first poll immediately
         self.emit_resync_started();
         self.execute_poll().await;
@@ -267,17 +270,21 @@ impl<S: StreamingSink> ConnectionTask<S> {
         // If recovering or initial delivery, emit ResyncCompleted for each delivered symbol
         if needs_resync_completed {
             for item in self.normalized_buf.iter() {
-                if self.sink.emit_alert(
-                    VenueId::FrankfurterEcb,
-                    &item.symbol,
-                    SymbolTag::default(),
-                    Some(item.exchange_ts),
-                    poll_resp.received_ts,
-                    None,
-                    IntegrityAlert::ResyncCompleted {
-                        last_update_id: None,
-                    },
-                ).is_err() {
+                if self
+                    .sink
+                    .emit_alert(
+                        VenueId::FrankfurterEcb,
+                        &item.symbol,
+                        SymbolTag::default(),
+                        Some(item.exchange_ts),
+                        poll_resp.received_ts,
+                        None,
+                        IntegrityAlert::ResyncCompleted {
+                            last_update_id: None,
+                        },
+                    )
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -289,15 +296,19 @@ impl<S: StreamingSink> ConnectionTask<S> {
         let now = crate::now_nanos();
         for quote in &self.active_quotes {
             if let Some(sym) = build_pair_symbol(&self.config.base_currency, quote) {
-                if self.sink.emit_alert(
-                    VenueId::FrankfurterEcb,
-                    &sym,
-                    SymbolTag::default(),
-                    None,
-                    now,
-                    None,
-                    IntegrityAlert::ResyncStarted,
-                ).is_err() {
+                if self
+                    .sink
+                    .emit_alert(
+                        VenueId::FrankfurterEcb,
+                        &sym,
+                        SymbolTag::default(),
+                        None,
+                        now,
+                        None,
+                        IntegrityAlert::ResyncStarted,
+                    )
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -308,15 +319,19 @@ impl<S: StreamingSink> ConnectionTask<S> {
         let now = crate::now_nanos();
         for quote in &self.active_quotes {
             if let Some(sym) = build_pair_symbol(&self.config.base_currency, quote) {
-                if self.sink.emit_alert(
-                    VenueId::FrankfurterEcb,
-                    &sym,
-                    SymbolTag::default(),
-                    None,
-                    now,
-                    None,
-                    IntegrityAlert::SourceError { kind },
-                ).is_err() {
+                if self
+                    .sink
+                    .emit_alert(
+                        VenueId::FrankfurterEcb,
+                        &sym,
+                        SymbolTag::default(),
+                        None,
+                        now,
+                        None,
+                        IntegrityAlert::SourceError { kind },
+                    )
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -337,15 +352,19 @@ impl<S: StreamingSink> ConnectionTask<S> {
                         None,
                         IntegrityAlert::ConnectionLost { reason },
                     );
-                } else if self.sink.emit_alert(
-                    VenueId::FrankfurterEcb,
-                    &sym,
-                    SymbolTag::default(),
-                    None,
-                    now,
-                    None,
-                    IntegrityAlert::ConnectionLost { reason },
-                ).is_err() {
+                } else if self
+                    .sink
+                    .emit_alert(
+                        VenueId::FrankfurterEcb,
+                        &sym,
+                        SymbolTag::default(),
+                        None,
+                        now,
+                        None,
+                        IntegrityAlert::ConnectionLost { reason },
+                    )
+                    .is_err()
+                {
                     return;
                 }
             }

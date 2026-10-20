@@ -439,7 +439,8 @@ mod tests {
                 let mut buf = [0u8; 1024];
                 let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
                 // Send 500 status with Content-Length: 100, then abruptly close socket without body
-                let resp = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\n\r\nincomplete";
+                let resp =
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\n\r\nincomplete";
                 let _ = socket.write_all(resp).await;
                 drop(socket);
             }

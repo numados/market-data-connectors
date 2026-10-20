@@ -115,11 +115,21 @@ async fn test_ws_snapshot_and_delta_ordered_delivery() {
 
     // Send snapshot
     let _ = ws.broadcast_text(&snap_json);
-    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send update
     let _ = ws.broadcast_text(&upd_json);
-    sink.wait_for_event_matching(|e| matches!(e, RecordedEvent::BeginBook { kind: BookKind::Delta, .. })).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Delta,
+                ..
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let mut has_resync_started = false;
@@ -198,7 +208,8 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     // Send snapshot for ETH-USD
     let eth_snap = snap_json.replace("BTC-USD", "ETH-USD");
     let _ = ws.broadcast_text(&eth_snap);
-    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send initial heartbeats for both symbols
     let hb_init_btc = serde_json::json!({
@@ -232,7 +243,8 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     }
 
     // Wait until ETH-USD triggers resubscribe after silence timeout
-    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("ETH-USD")).await;
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("ETH-USD"))
+        .await;
 
     let received = ws.received_messages();
     // Verify an unsubscribe and subscribe was sent for ETH-USD
@@ -305,7 +317,8 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
 
     // Send snapshot
     let _ = ws.broadcast_text(&snap_json);
-    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send normal heartbeat from fixture (seq 90)
     let hb_json = load_fixture(HEARTBEAT_FIXTURE).expect("load heartbeat fixture");
@@ -320,7 +333,8 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
         "time": "2014-11-07T08:19:29.464459Z"
     });
     let _ = ws.broadcast_text(hb2.to_string());
-    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD")).await;
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD"))
+        .await;
 
     let received = ws.received_messages();
     let mut has_unsub = false;

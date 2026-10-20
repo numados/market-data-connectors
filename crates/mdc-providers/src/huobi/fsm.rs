@@ -214,12 +214,8 @@ mod tests {
         let config = HuobiConfig::default();
         let sym = Symbol::from("btcusdt");
         let custom_policy = CooldownPolicy::new(std::time::Duration::from_secs(42));
-        let mut fsm = SymbolFsm::with_policy(
-            sym,
-            SymbolTag::default(),
-            &config,
-            Box::new(custom_policy),
-        );
+        let mut fsm =
+            SymbolFsm::with_policy(sym, SymbolTag::default(), &config, Box::new(custom_policy));
         assert!(fsm.can_request_snapshot(Instant::now()));
     }
 }

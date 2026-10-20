@@ -60,7 +60,12 @@ impl<S: StreamingSink> Connection<S> {
                 exchange_ts: ts.map(UnixNanos::from_millis),
                 received_ts: crate::now_nanos(),
                 connection_id: 1,
-                delivery: DeliveryStamp::with_connection_id(self.run_id, 1, 1, self.delivery_ordinal),
+                delivery: DeliveryStamp::with_connection_id(
+                    self.run_id,
+                    1,
+                    1,
+                    self.delivery_ordinal,
+                ),
                 source_sequence: None,
             };
 
@@ -75,7 +80,11 @@ impl<S: StreamingSink> Connection<S> {
                             price: level.price_str(),
                             volume: level.amount_str(),
                         };
-                        if self.sink.level_raw(side, pl.price, pl.volume, raw_text).is_err() {
+                        if self
+                            .sink
+                            .level_raw(side, pl.price, pl.volume, raw_text)
+                            .is_err()
+                        {
                             return;
                         }
                         if self.sink.end_book(&ctx, None).is_err() {
@@ -106,7 +115,11 @@ impl<S: StreamingSink> Connection<S> {
                             price: l.price_raw.as_str(),
                             volume: l.amount_raw.as_str(),
                         };
-                        if self.sink.level_raw(side, l.price, l.amount.abs(), raw_text).is_err() {
+                        if self
+                            .sink
+                            .level_raw(side, l.price, l.amount.abs(), raw_text)
+                            .is_err()
+                        {
                             return;
                         }
                     }

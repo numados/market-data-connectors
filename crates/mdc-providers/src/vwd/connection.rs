@@ -48,8 +48,8 @@ pub async fn run_connection_task<S: StreamingSink>(
         }
     };
 
-    let mut sink = ConnectionSink::new(sink, run_id, 1)
-        .with_generation_allocator(generation_allocator);
+    let mut sink =
+        ConnectionSink::new(sink, run_id, 1).with_generation_allocator(generation_allocator);
     let mut paused = false;
     let mut scratch = VwdScratch::with_capacity(32);
     let mut stale_map: HashMap<Symbol, bool> = HashMap::new();
@@ -172,15 +172,18 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Err(err_kind) => {
             // Transport or HTTP status failure affects ALL symbols
             for sym in &config.symbols {
-                if sink.emit_alert(
-                    VenueId::Vwd,
-                    &sym.symbol,
-                    SymbolTag::default(),
-                    None,
-                    crate::now_nanos(),
-                    None,
-                    IntegrityAlert::SourceError { kind: err_kind },
-                ).is_err() {
+                if sink
+                    .emit_alert(
+                        VenueId::Vwd,
+                        &sym.symbol,
+                        SymbolTag::default(),
+                        None,
+                        crate::now_nanos(),
+                        None,
+                        IntegrityAlert::SourceError { kind: err_kind },
+                    )
+                    .is_err()
+                {
                     return;
                 }
                 stale_map.insert(sym.symbol.clone(), true);
@@ -193,17 +196,20 @@ async fn execute_poll_cycle<S: StreamingSink>(
         Ok(s) => s,
         Err(_) => {
             for sym in &config.symbols {
-                if sink.emit_alert(
-                    VenueId::Vwd,
-                    &sym.symbol,
-                    SymbolTag::default(),
-                    None,
-                    poll_resp.received_ts,
-                    None,
-                    IntegrityAlert::SourceError {
-                        kind: SourceErrorKind::Parse,
-                    },
-                ).is_err() {
+                if sink
+                    .emit_alert(
+                        VenueId::Vwd,
+                        &sym.symbol,
+                        SymbolTag::default(),
+                        None,
+                        poll_resp.received_ts,
+                        None,
+                        IntegrityAlert::SourceError {
+                            kind: SourceErrorKind::Parse,
+                        },
+                    )
+                    .is_err()
+                {
                     return;
                 }
                 stale_map.insert(sym.symbol.clone(), true);
@@ -218,17 +224,20 @@ async fn execute_poll_cycle<S: StreamingSink>(
         .is_err()
     {
         for sym in &config.symbols {
-            if sink.emit_alert(
-                VenueId::Vwd,
-                &sym.symbol,
-                SymbolTag::default(),
-                None,
-                poll_resp.received_ts,
-                None,
-                IntegrityAlert::SourceError {
-                    kind: SourceErrorKind::Parse,
-                },
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    None,
+                    poll_resp.received_ts,
+                    None,
+                    IntegrityAlert::SourceError {
+                        kind: SourceErrorKind::Parse,
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
             stale_map.insert(sym.symbol.clone(), true);
@@ -238,17 +247,20 @@ async fn execute_poll_cycle<S: StreamingSink>(
 
     if scratch.quotes.is_empty() {
         for sym in &config.symbols {
-            if sink.emit_alert(
-                VenueId::Vwd,
-                &sym.symbol,
-                SymbolTag::default(),
-                None,
-                poll_resp.received_ts,
-                None,
-                IntegrityAlert::SourceError {
-                    kind: SourceErrorKind::MissingQuote,
-                },
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Vwd,
+                    &sym.symbol,
+                    SymbolTag::default(),
+                    None,
+                    poll_resp.received_ts,
+                    None,
+                    IntegrityAlert::SourceError {
+                        kind: SourceErrorKind::MissingQuote,
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
             stale_map.insert(sym.symbol.clone(), true);
@@ -273,10 +285,16 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 if sink.begin_book(&ctx, BookKind::Snapshot).is_err() {
                     return;
                 }
-                if sink.level(Side::Bid, norm.bid, config.indicative_size).is_err() {
+                if sink
+                    .level(Side::Bid, norm.bid, config.indicative_size)
+                    .is_err()
+                {
                     return;
                 }
-                if sink.level(Side::Ask, norm.ask, config.indicative_size).is_err() {
+                if sink
+                    .level(Side::Ask, norm.ask, config.indicative_size)
+                    .is_err()
+                {
                     return;
                 }
                 if sink.end_book(&ctx, None).is_err() {
@@ -297,32 +315,38 @@ async fn execute_poll_cycle<S: StreamingSink>(
                 // If symbol was stale, emit ResyncCompleted alert
                 let was_stale = stale_map.get(&sym.symbol).copied().unwrap_or(true);
                 if was_stale {
-                    if sink.emit_alert(
-                        VenueId::Vwd,
-                        &sym.symbol,
-                        SymbolTag::default(),
-                        norm.exchange_ts,
-                        poll_resp.received_ts,
-                        None,
-                        IntegrityAlert::ResyncCompleted {
-                            last_update_id: None,
-                        },
-                    ).is_err() {
+                    if sink
+                        .emit_alert(
+                            VenueId::Vwd,
+                            &sym.symbol,
+                            SymbolTag::default(),
+                            norm.exchange_ts,
+                            poll_resp.received_ts,
+                            None,
+                            IntegrityAlert::ResyncCompleted {
+                                last_update_id: None,
+                            },
+                        )
+                        .is_err()
+                    {
                         return;
                     }
                     stale_map.insert(sym.symbol.clone(), false);
                 }
             }
             Err(err_kind) => {
-                if sink.emit_alert(
-                    VenueId::Vwd,
-                    &sym.symbol,
-                    SymbolTag::default(),
-                    None,
-                    poll_resp.received_ts,
-                    None,
-                    IntegrityAlert::SourceError { kind: err_kind },
-                ).is_err() {
+                if sink
+                    .emit_alert(
+                        VenueId::Vwd,
+                        &sym.symbol,
+                        SymbolTag::default(),
+                        None,
+                        poll_resp.received_ts,
+                        None,
+                        IntegrityAlert::SourceError { kind: err_kind },
+                    )
+                    .is_err()
+                {
                     return;
                 }
                 stale_map.insert(sym.symbol.clone(), true);

@@ -180,15 +180,18 @@ pub async fn run_connection_task<S: StreamingSink>(
                 fsm.trigger_resync(Instant::now());
             }
 
-            if sink.emit_alert(
-                VenueId::Bitstamp,
-                sym,
-                *tag,
-                None,
-                crate::now_nanos(),
-                None,
-                IntegrityAlert::ResyncStarted,
-            ).is_err() {
+            if sink
+                .emit_alert(
+                    VenueId::Bitstamp,
+                    sym,
+                    *tag,
+                    None,
+                    crate::now_nanos(),
+                    None,
+                    IntegrityAlert::ResyncStarted,
+                )
+                .is_err()
+            {
                 break 'reconnect_loop;
             }
 

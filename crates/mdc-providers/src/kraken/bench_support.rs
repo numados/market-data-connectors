@@ -76,28 +76,36 @@ impl<S: StreamingSink> Connection<S> {
             return;
         }
         for raw in &self.scratch.bids {
-            if self.sink.level_raw(
-                Side::Bid,
-                raw.price,
-                raw.volume,
-                RawLevelText {
-                    price: raw.price_raw.as_str(),
-                    volume: raw.volume_raw.as_str(),
-                },
-            ).is_err() {
+            if self
+                .sink
+                .level_raw(
+                    Side::Bid,
+                    raw.price,
+                    raw.volume,
+                    RawLevelText {
+                        price: raw.price_raw.as_str(),
+                        volume: raw.volume_raw.as_str(),
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
         }
         for raw in &self.scratch.asks {
-            if self.sink.level_raw(
-                Side::Ask,
-                raw.price,
-                raw.volume,
-                RawLevelText {
-                    price: raw.price_raw.as_str(),
-                    volume: raw.volume_raw.as_str(),
-                },
-            ).is_err() {
+            if self
+                .sink
+                .level_raw(
+                    Side::Ask,
+                    raw.price,
+                    raw.volume,
+                    RawLevelText {
+                        price: raw.price_raw.as_str(),
+                        volume: raw.volume_raw.as_str(),
+                    },
+                )
+                .is_err()
+            {
                 return;
             }
         }
