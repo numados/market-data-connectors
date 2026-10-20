@@ -441,11 +441,11 @@ async fn test_ws_heartbeat_silence_watchdog() {
         "Heartbeats must reset silence watchdog and prevent pings"
     );
 
-    // Stop sending heartbeats and wait > ping_after + timer interval
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Stop sending heartbeats and wait for watchdog ping
+    let ping_count = ws.wait_for_pings(1).await;
 
     assert!(
-        ws.ping_count() >= 1,
+        ping_count >= 1,
         "Watchdog must send ping when heartbeat ceases"
     );
 

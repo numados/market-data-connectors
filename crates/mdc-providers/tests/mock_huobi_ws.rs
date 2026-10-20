@@ -54,7 +54,7 @@ async fn test_ws_handshake_and_subscriptions() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(3).await;
 
     let received = ws.received_messages();
     assert!(!received.is_empty(), "Expected subscription frames");
@@ -119,14 +119,15 @@ async fn test_ws_server_ping_answered_with_pong() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(2).await;
 
     // Send binary gzip ping
     let ping_json = load_fixture(PING_FIXTURE).expect("load ping fixture");
     let ping_gz = gzip_compress(ping_json.as_bytes());
     let _ = ws.broadcast_binary(ping_gz);
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"pong\":"))
+        .await;
 
     let received = ws.received_messages();
     assert!(
@@ -164,7 +165,8 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     // Find the snapshot request ID sent by client
     let req_id = ws
@@ -191,7 +193,8 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send contiguous incremental delta (prevSeqNum: 100, seqNum: 101)
     let delta_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
@@ -200,7 +203,16 @@ async fn test_ws_snapshot_and_delta_lifecycle() {
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_event_matching(|ev| {
+        matches!(
+            ev,
+            RecordedEvent::EndBook {
+                seq: Some(s),
+                ..
+            } if s.first == 101
+        )
+    })
+    .await;
 
     let events = sink.events();
 
@@ -301,7 +313,8 @@ async fn test_ws_delta_buffering_before_snapshot() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     let req_id = ws
         .received_messages()
@@ -323,7 +336,7 @@ async fn test_ws_delta_buffering_before_snapshot() {
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // At this point, no books should have been emitted
     let events_before_snap = sink.events();
@@ -341,7 +354,8 @@ async fn test_ws_delta_buffering_before_snapshot() {
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Both snapshot and buffered delta should have been applied
     let events = sink.events();
@@ -394,7 +408,8 @@ async fn test_ws_gap_detected_triggers_resync() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     let req_id = ws
         .received_messages()
@@ -416,7 +431,8 @@ async fn test_ws_gap_detected_triggers_resync() {
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     let msg_count_before_gap = ws.received_messages().len();
 
@@ -427,7 +443,16 @@ async fn test_ws_gap_detected_triggers_resync() {
     delta_val["tick"]["seqNum"] = serde_json::json!(106);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::GapDetected {
+                expected: 101,
+                received: 106,
+            }
+        )
+    })
+    .await;
 
     // Check sink received GapDetected alert
     let events = sink.events();
@@ -445,7 +470,8 @@ async fn test_ws_gap_detected_triggers_resync() {
         "Expected GapDetected alert"
     );
 
-    // Check new snapshot request was queued / sent by client
+    // Wait for and check new snapshot request was queued / sent by client
+    ws.wait_for_client_messages(msg_count_before_gap + 1).await;
     let new_msgs = &ws.received_messages()[msg_count_before_gap..];
     assert!(
         new_msgs.iter().any(|msg| {
@@ -482,7 +508,8 @@ async fn test_ws_stale_snapshot_handling() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     let req_id = ws
         .received_messages()
@@ -504,7 +531,7 @@ async fn test_ws_stale_snapshot_handling() {
     delta_val["tick"]["seqNum"] = serde_json::json!(101);
     let _ = ws.broadcast_binary(gzip_compress(delta_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // Snapshot arrives with seqNum 90 (older than buffered delta's first sequence 101) -> stale
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
@@ -513,7 +540,7 @@ async fn test_ws_stale_snapshot_handling() {
     snap_val["data"]["seqNum"] = serde_json::json!(90);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let events = sink.events();
     // Stale snapshot must not emit ResyncCompleted
@@ -552,7 +579,8 @@ async fn test_ws_multi_symbol_snapshot_serialization() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     // Check that at most ONE snapshot request is in flight initially
     let initial_reqs: Vec<_> = ws
@@ -586,7 +614,7 @@ async fn test_ws_multi_symbol_snapshot_serialization() {
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(4).await;
 
     // Now the second snapshot request should have been dispatched
     let all_reqs: Vec<_> = ws
@@ -636,13 +664,13 @@ async fn test_ws_trades_stream() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Broadcast trade binary frame
     let trade_json = load_fixture(TRADE_FIXTURE).expect("load trade");
     let _ = ws.broadcast_binary(gzip_compress(trade_json.as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_trades(1).await;
 
     let events = sink.events();
     let trade_opt = events.iter().find_map(|ev| {
@@ -683,7 +711,8 @@ async fn test_ws_manual_resync_command() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("\"req\":"))
+        .await;
 
     let req_id = ws
         .received_messages()
@@ -705,7 +734,8 @@ async fn test_ws_manual_resync_command() {
     snap_val["data"]["seqNum"] = serde_json::json!(100);
     let _ = ws.broadcast_binary(gzip_compress(snap_val.to_string().as_bytes()));
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     let msg_count = ws.received_messages().len();
 
@@ -715,7 +745,7 @@ async fn test_ws_manual_resync_command() {
         .await
         .expect("command resync");
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(msg_count + 1).await;
 
     // Check sink received ResyncStarted
     let events = sink.events();
@@ -773,7 +803,7 @@ async fn test_ws_cancellation_emits_connection_lost() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Cancel token
     cancel.cancel();

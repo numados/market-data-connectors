@@ -40,8 +40,14 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
     let mut report = ConformanceReport::default();
     let mut in_book: HashMap<Symbol, BookKind> = HashMap::new();
     let mut stale_symbols: HashSet<Symbol> = HashSet::new();
+    let mut sink_failed = false;
 
     for (idx, event) in events.iter().enumerate() {
+        if sink_failed {
+            return Err(format!(
+                "Event {idx}: Event received after terminal SinkFailure alert"
+            ));
+        }
         report.total_events += 1;
         match event {
             RecordedEvent::BeginBook { symbol, kind } => {
@@ -68,11 +74,21 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                 }
             }
 
-            RecordedEvent::Level { .. } => {
+            RecordedEvent::Level { price, volume, .. } => {
                 // Must be inside begin_book/end_book
                 if in_book.is_empty() {
                     return Err(format!(
                         "Event {idx}: Level received outside of BeginBook/EndBook"
+                    ));
+                }
+                if *price <= rust_decimal::Decimal::ZERO {
+                    return Err(format!(
+                        "Event {idx}: Non-positive price level {price}"
+                    ));
+                }
+                if *volume < rust_decimal::Decimal::ZERO {
+                    return Err(format!(
+                        "Event {idx}: Negative volume {volume}"
                     ));
                 }
             }
@@ -113,16 +129,20 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                     IntegrityAlert::ResyncCompleted { .. } => {
                         stale_symbols.remove(symbol);
                     }
+                    IntegrityAlert::SinkFailure => {
+                        sink_failed = true;
+                        stale_symbols.insert(symbol.clone());
+                    }
                     IntegrityAlert::ResyncStarted
                     | IntegrityAlert::GapDetected { .. }
                     | IntegrityAlert::ChecksumMismatch { .. }
                     | IntegrityAlert::SilenceTimeout { .. }
+                    | IntegrityAlert::HeartbeatTimeout { .. }
                     | IntegrityAlert::ConnectionLost { .. }
                     | IntegrityAlert::SourceError { .. }
                     | IntegrityAlert::Quarantined { .. } => {
                         stale_symbols.insert(symbol.clone());
                     }
-                    _ => {}
                 }
             }
         }
@@ -140,4 +160,275 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
 /// Runs conformance assertions against recorded streaming sink events, panicking on violation.
 pub fn run(events: &[RecordedEvent]) -> ConformanceReport {
     validate(events).unwrap_or_else(|err| panic!("Conformance violation: {err}"))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use mdc_core::{BookTicker, DisconnectKind, ReferenceRate, Side, Trade};
+    use rust_decimal::Decimal;
+
+    fn sym() -> Symbol {
+        Symbol::from("BTCUSDT")
+    }
+
+    #[test]
+    fn test_conformance_valid_snapshot_delta_trade_stream() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::ResyncStarted,
+            },
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price: Decimal::new(25000, 0),
+                volume: Decimal::ONE,
+            },
+            RecordedEvent::Level {
+                side: Side::Ask,
+                price: Decimal::new(25001, 0),
+                volume: Decimal::ONE,
+            },
+            RecordedEvent::EndBook {
+                symbol: sym(),
+                seq: None,
+            },
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::ResyncCompleted {
+                    last_update_id: Some(100),
+                },
+            },
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Delta,
+            },
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price: Decimal::new(25000, 0),
+                volume: Decimal::new(2, 0),
+            },
+            RecordedEvent::EndBook {
+                symbol: sym(),
+                seq: None,
+            },
+            RecordedEvent::Trade {
+                symbol: sym(),
+                trade: Trade::new(
+                    None,
+                    Decimal::new(25000, 0),
+                    Decimal::ONE,
+                    Side::Bid,
+                ),
+            },
+            RecordedEvent::BookTicker {
+                symbol: sym(),
+                ticker: BookTicker::new(
+                    mdc_core::PriceLevel::new(Decimal::new(25000, 0), Decimal::new(2, 0)),
+                    mdc_core::PriceLevel::new(Decimal::new(25001, 0), Decimal::ONE),
+                    None,
+                ),
+            },
+            RecordedEvent::ReferenceRate {
+                symbol: sym(),
+                rate: ReferenceRate::new(Decimal::new(25000, 0)),
+            },
+        ];
+
+        let report = run(&events);
+        assert_eq!(report.total_events, 12);
+        assert_eq!(report.snapshots_verified, 1);
+        assert_eq!(report.deltas_verified, 1);
+        assert_eq!(report.trades_verified, 1);
+        assert_eq!(report.tickers_verified, 1);
+        assert_eq!(report.reference_rates_verified, 1);
+        assert_eq!(report.alerts_verified, 2);
+    }
+
+    #[test]
+    fn test_conformance_level_outside_book_fails_closed() {
+        let events = vec![RecordedEvent::Level {
+            side: Side::Bid,
+            price: Decimal::new(25000, 0),
+            volume: Decimal::ONE,
+        }];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_nested_begin_book_fails_closed() {
+        let events = vec![
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_unclosed_book_fails_closed() {
+        let events = vec![
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price: Decimal::new(25000, 0),
+                volume: Decimal::ONE,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_delta_while_stale_fails_closed() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::GapDetected {
+                    expected: 2,
+                    received: 5,
+                },
+            },
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Delta,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_trade_while_stale_fails_closed() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::SilenceTimeout { elapsed_ms: 1000 },
+            },
+            RecordedEvent::Trade {
+                symbol: sym(),
+                trade: Trade::new(
+                    None,
+                    Decimal::new(25000, 0),
+                    Decimal::ONE,
+                    Side::Bid,
+                ),
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_ticker_while_stale_fails_closed() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::HeartbeatTimeout { elapsed_ms: 5000 },
+            },
+            RecordedEvent::BookTicker {
+                symbol: sym(),
+                ticker: BookTicker::new(
+                    mdc_core::PriceLevel::new(Decimal::new(25000, 0), Decimal::ONE),
+                    mdc_core::PriceLevel::new(Decimal::new(25001, 0), Decimal::ONE),
+                    None,
+                ),
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_connection_lost_marks_stale() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::ConnectionLost {
+                    reason: DisconnectKind::Closed,
+                },
+            },
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Delta,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_sink_failure_terminal_fails_closed() {
+        let events = vec![
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::SinkFailure,
+            },
+            RecordedEvent::Alert {
+                symbol: sym(),
+                alert: IntegrityAlert::ResyncStarted,
+            },
+        ];
+        let err = validate(&events).unwrap_err();
+        assert!(err.contains("SinkFailure"));
+    }
+
+    #[test]
+    fn test_conformance_non_positive_price_fails_closed() {
+        let events = vec![
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price: Decimal::ZERO,
+                volume: Decimal::ONE,
+            },
+            RecordedEvent::EndBook {
+                symbol: sym(),
+                seq: None,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    fn test_conformance_negative_volume_fails_closed() {
+        let events = vec![
+            RecordedEvent::BeginBook {
+                symbol: sym(),
+                kind: BookKind::Snapshot,
+            },
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price: Decimal::new(25000, 0),
+                volume: Decimal::new(-1, 0),
+            },
+            RecordedEvent::EndBook {
+                symbol: sym(),
+                seq: None,
+            },
+        ];
+        assert!(validate(&events).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "Conformance violation")]
+    fn test_conformance_run_panics_on_violation() {
+        let events = vec![RecordedEvent::Level {
+            side: Side::Bid,
+            price: Decimal::new(25000, 0),
+            volume: Decimal::ONE,
+        }];
+        run(&events);
+    }
 }

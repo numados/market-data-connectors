@@ -39,9 +39,7 @@ async fn test_ws_handshake_and_stream_subscription() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let paths = ws.handshake_paths();
+    let paths = ws.wait_for_handshakes(1).await;
     assert_eq!(paths.len(), 1);
     assert_eq!(
         paths[0],
@@ -79,14 +77,14 @@ async fn test_ws_silence_watchdog_ping() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Wait past ping_after (30ms)
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Wait for watchdog ping
+    let ping_count = ws.wait_for_pings(1).await;
 
     // The watchdog should have sent at least one ping
     assert!(
-        ws.ping_count() >= 1,
+        ping_count >= 1,
         "expected at least 1 ping, got {}",
-        ws.ping_count()
+        ping_count
     );
 
     cancel.cancel();
@@ -121,8 +119,9 @@ async fn test_ws_silence_watchdog_forces_reconnect() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    // Wait past reconnect_after (50ms) + backoff (20ms) + connect (30ms)
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Wait for reconnection and alerts
+    ws.wait_for_connections(2).await;
+    sink.wait_for_alerts(2).await;
 
     assert!(
         ws.connection_count() >= 2,

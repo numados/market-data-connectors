@@ -60,7 +60,8 @@ async fn test_rest_snapshot_success() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -150,7 +151,15 @@ async fn test_rest_auth_failure_401() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::HttpStatus(401),
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -217,8 +226,8 @@ async fn test_rest_fail_closed_recovery_flow() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    // Allow multiple cycles to run
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Allow multiple cycles to run: 1. ResyncCompleted, 2. SourceError(500), 3. ResyncCompleted
+    sink.wait_for_alerts(3).await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -279,7 +288,8 @@ async fn test_rest_inverse_quote_handling() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -325,7 +335,15 @@ async fn test_rest_symbol_specific_errors() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::InvalidQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -373,7 +391,15 @@ async fn test_rest_empty_array_error() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::MissingQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -422,13 +448,22 @@ async fn test_rest_control_pause_resume() {
     let (handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
     // Let 1 poll execute
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     let count_before = sink.events().len();
     assert!(count_before > 0, "Initial poll must have executed");
 
     // Pause polling
     handle.pause().await.expect("pause");
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused,
+            }
+        )
+    })
+    .await;
     let count_during_pause = sink.events().len();
     assert_eq!(
         count_during_pause,
@@ -453,7 +488,7 @@ async fn test_rest_control_pause_resume() {
 
     // Resume polling
     handle.resume().await.expect("resume");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_events(count_during_pause + 1).await;
     let count_after_resume = sink.events().len();
     assert!(
         count_after_resume > count_during_pause,

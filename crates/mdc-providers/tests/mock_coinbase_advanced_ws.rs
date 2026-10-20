@@ -48,7 +48,7 @@ async fn test_ws_handshake_and_subscriptions() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(3).await;
 
     let received = ws.received_messages();
     assert!(!received.is_empty(), "Expected subscription frames");
@@ -119,7 +119,9 @@ async fn test_snapshot_and_delta_lifecycle() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for initial ResyncStarted alert
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncStarted))
+        .await;
 
     // Check initial ResyncStarted alert
     let alerts_before = sink.alerts_for("BTC-USD");
@@ -134,7 +136,8 @@ async fn test_snapshot_and_delta_lifecycle() {
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
     let _ = ws.broadcast_text(snap_raw);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     let events = sink.events();
     let has_begin_snapshot = events.iter().any(|e| {
@@ -160,7 +163,16 @@ async fn test_snapshot_and_delta_lifecycle() {
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
     let _ = ws.broadcast_text(upd_raw);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                symbol,
+                kind: BookKind::Delta
+            } if symbol.as_str() == "BTC-USD"
+        )
+    })
+    .await;
 
     let events_after_upd = sink.events();
     let has_begin_delta = events_after_upd.iter().any(|e| {
@@ -199,7 +211,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alerts(2).await;
 
     // Send snapshot for BTC-USD (seq 1)
     let snap_btc = serde_json::json!({
@@ -237,7 +249,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
     });
     let _ = ws.broadcast_text(snap_eth.to_string());
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alerts(4).await;
 
     // Verify both are synchronized
     assert!(
@@ -269,7 +281,20 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
     });
     let _ = ws.broadcast_text(gap_frame.to_string());
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::GapDetected {
+                expected: 3,
+                received: 5
+            }
+        )
+    })
+    .await;
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe"))
+        .await;
+    ws.wait_for_client_message_matching(|m| m.contains("subscribe"))
+        .await;
 
     // Both BTC-USD and ETH-USD must have GapDetected and ResyncStarted alerts
     let btc_alerts = sink.alerts_for("BTC-USD");
@@ -337,7 +362,7 @@ async fn test_gap_injection_invalidates_all_products_and_resubscribes() {
         }]
     });
     let _ = ws.broadcast_text(delta_frame.to_string());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // No new BeginBook event should have been added
     let delta_added = sink.events()[pre_snap_events_count..].iter().any(|e| {
@@ -375,13 +400,15 @@ async fn test_stale_and_duplicate_sequence_dropped() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncStarted))
+        .await;
 
     // Send snapshot (seq 1)
     let snap_raw = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot");
     let _ = ws.broadcast_text(snap_raw);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     let count_after_snap = sink.events().len();
 
@@ -421,7 +448,7 @@ async fn test_stale_and_duplicate_sequence_dropped() {
     });
     let _ = ws.broadcast_text(old_frame.to_string());
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // No new events should have been processed
     assert_eq!(
@@ -434,7 +461,16 @@ async fn test_stale_and_duplicate_sequence_dropped() {
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
     let _ = ws.broadcast_text(upd_raw);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Delta,
+                ..
+            }
+        )
+    })
+    .await;
     assert!(
         sink.events().len() > count_after_snap,
         "Valid next sequence must be processed"
@@ -465,7 +501,7 @@ async fn test_heartbeat_keeps_watchdog_alive() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send heartbeats every 150ms for 750ms total (> 600ms silence timeout)
     for i in 1..=5 {
@@ -510,13 +546,13 @@ async fn test_market_trades_channel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Broadcast trade fixture
     let trade_raw = load_fixture(TRADE_FIXTURE).expect("load trade");
     let _ = ws.broadcast_text(trade_raw);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_trades(1).await;
 
     let events = sink.events();
     let trade_opt = events.iter().find_map(|e| match e {
@@ -557,14 +593,14 @@ async fn test_operator_commands_resync_and_pause() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alerts(2).await;
 
     // Operator: request_resync for BTC-USD
     handle
         .request_resync(Symbol::from("BTC-USD"))
         .await
         .expect("resync single");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alerts(3).await;
 
     let btc_alerts = sink.alerts_for("BTC-USD");
     assert!(
@@ -578,7 +614,7 @@ async fn test_operator_commands_resync_and_pause() {
 
     // Operator: request_resync_all
     handle.request_resync_all().await.expect("resync all");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alerts(5).await;
 
     let eth_alerts = sink.alerts_for("ETH-USD");
     assert!(
@@ -592,12 +628,20 @@ async fn test_operator_commands_resync_and_pause() {
 
     // Operator: pause and resume
     handle.pause().await.expect("pause");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     let pre_pause_count = sink.events().len();
     let upd_raw = load_fixture(UPDATE_FIXTURE).expect("load update");
     let _ = ws.broadcast_text(upd_raw.clone());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     assert_eq!(
         sink.events().len(),
@@ -606,7 +650,7 @@ async fn test_operator_commands_resync_and_pause() {
     );
 
     handle.resume().await.expect("resume");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_connections(2).await;
 
     // Send update with sequence 10
     let upd_seq10 = serde_json::json!({
@@ -625,7 +669,16 @@ async fn test_operator_commands_resync_and_pause() {
         }]
     });
     let _ = ws.broadcast_text(upd_seq10.to_string());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Snapshot,
+                ..
+            }
+        )
+    })
+    .await;
 
     assert!(
         sink.events().len() > pre_pause_count,
@@ -656,7 +709,8 @@ async fn test_cancellation_emits_shutdown_alert() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_connections(1).await;
+    ws.wait_for_client_messages(1).await;
 
     // Trigger cancellation
     cancel.cancel();
@@ -716,11 +770,20 @@ async fn test_ws_sequenceless_l2_data_fails_closed() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send valid snapshot -> InSync
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Snapshot,
+                ..
+            }
+        )
+    })
+    .await;
 
     let books_after_snap: Vec<_> = sink
         .events()
@@ -735,7 +798,7 @@ async fn test_ws_sequenceless_l2_data_fails_closed() {
 
     // Send sequence-less l2_data frame -> must fail closed
     let _ = ws.broadcast_text(&bad_upd_str);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alerts(3).await;
 
     // Verify: no book delta was emitted
     let books_after_update: Vec<_> = sink
@@ -786,7 +849,7 @@ async fn test_multi_event_envelope_dispatches_per_event() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send an envelope containing two snapshots: BTC-USD and ETH-USD
     let multi_event_payload = serde_json::json!({
@@ -835,7 +898,13 @@ async fn test_multi_event_envelope_dispatches_per_event() {
     });
 
     let _ = ws.broadcast_text(multi_event_payload.to_string());
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::EndBook { symbol, .. } if symbol.as_str() == "ETH-USD"
+        )
+    })
+    .await;
 
     // Verify: separate books emitted for BTC and ETH
     let events = sink.events();
@@ -927,7 +996,7 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_client_messages(1).await;
 
     // Send initial snapshot with sequence 100
     let initial_snap = r#"{
@@ -951,7 +1020,8 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         ]
     }"#;
     let _ = ws.broadcast_text(initial_snap.to_string());
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     assert!(
         sink.alerts_for("BTC-USD")
@@ -982,7 +1052,6 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         ]
     }"#;
     let _ = ws.broadcast_text(reset_frame_1.to_string());
-    tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Reset frame 2 at sequence 11: reaches threshold 2! Triggers SequenceReset and forces reconnect
     let reset_frame_2 = r#"{
@@ -1006,8 +1075,10 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         ]
     }"#;
     let _ = ws.broadcast_text(reset_frame_2.to_string());
-    // Wait for frame_loop exit and reconnect backoff (400ms)
-    tokio::time::sleep(Duration::from_millis(450)).await;
+
+    // Wait for frame_loop exit, reconnect backoff and second connection handshake
+    ws.wait_for_connections(2).await;
+    ws.wait_for_client_messages(4).await;
 
     // Connection reconnects. Send fresh snapshot on the new epoch (sequence 12)
     let recovery_snap = r#"{
@@ -1031,7 +1102,7 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         ]
     }"#;
     let _ = ws.broadcast_text(recovery_snap.to_string());
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alerts(7).await;
 
     let alerts = sink.alerts_for("BTC-USD");
     let gap_alerts: Vec<_> = alerts

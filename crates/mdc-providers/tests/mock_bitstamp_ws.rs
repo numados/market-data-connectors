@@ -45,7 +45,7 @@ async fn test_ws_subscribe_diff_order_book_channel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(2).await;
 
     let received = ws.received_messages();
     assert!(
@@ -94,7 +94,7 @@ async fn test_ws_subscribe_with_trades_stream() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(2).await;
 
     let received = ws.received_messages();
     assert!(received.len() >= 2);
@@ -146,7 +146,8 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Wait for snapshot reconciliation to complete
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     let events = sink.events();
     // Verify ResyncStarted, BeginBook(Snapshot), Level, EndBook, ResyncCompleted
@@ -188,7 +189,7 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
     .to_string();
 
     let _ = ws.broadcast_text(stale_diff);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     assert!(
         sink.events().is_empty(),
@@ -197,7 +198,16 @@ async fn test_ws_snapshot_and_time_gated_deltas() {
 
     // 2. Send a newer diff (microtimestamp 1700000000123456 > snapshot 1700000000100000)
     let _ = ws.broadcast_text(upd_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Delta,
+                ..
+            }
+        )
+    })
+    .await;
 
     let new_events = sink.events();
     let has_delta = new_events.iter().any(|e| {
@@ -247,11 +257,20 @@ async fn test_ws_request_reconnect_triggers_reconnect() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send bts:request_reconnect
     let _ = ws.broadcast_text(reconnect_json);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::VenueRequested,
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let has_conn_lost = events.iter().any(|e| {
@@ -307,13 +326,14 @@ async fn test_ws_trade_normalization() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     sink.clear();
 
     // Send trade frame
     let _ = ws.broadcast_text(trade_json);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_trades(1).await;
 
     let events = sink.events();
     let trade_event = events.iter().find_map(|e| match e {
@@ -363,11 +383,20 @@ async fn test_connector_handle_control_pause_resume() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Send Pause command
     handle.pause().await.expect("send pause");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused,
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let has_paused = events.iter().any(|e| {
@@ -385,7 +414,7 @@ async fn test_connector_handle_control_pause_resume() {
 
     // Send Resume command
     handle.resume().await.expect("send resume");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     cancel.cancel();
     let _ = runner.await;
@@ -419,7 +448,8 @@ async fn test_connector_handle_request_resync() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     sink.clear();
 
@@ -429,7 +459,16 @@ async fn test_connector_handle_request_resync() {
         .await
         .expect("request resync");
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Snapshot,
+                ..
+            }
+        )
+    })
+    .await;
 
     let events = sink.events();
     let has_resync_started = events.iter().any(|e| {

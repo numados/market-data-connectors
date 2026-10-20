@@ -131,12 +131,13 @@ impl MrsConsumerHarness {
                 | IntegrityAlert::GapDetected { .. }
                 | IntegrityAlert::ChecksumMismatch { .. }
                 | IntegrityAlert::SilenceTimeout { .. }
+                | IntegrityAlert::HeartbeatTimeout { .. }
                 | IntegrityAlert::ConnectionLost { .. }
                 | IntegrityAlert::SourceError { .. }
-                | IntegrityAlert::Quarantined { .. } => {
+                | IntegrityAlert::Quarantined { .. }
+                | IntegrityAlert::SinkFailure => {
                     self.stale_symbols.insert(event.symbol.clone());
                 }
-                _ => {}
             }
         }
 

@@ -808,3 +808,217 @@ mod vwd_faults {
         cancel.cancel();
     }
 }
+
+#[cfg(feature = "coinbase-advanced")]
+mod coinbase_advanced_faults {
+    use std::time::Duration;
+
+    use mdc_core::{IntegrityAlert, Symbol};
+    use mdc_providers::coinbase_advanced::{
+        CoinbaseAdvancedConfig, CoinbaseAdvancedConnectorBuilder, CoinbaseAdvancedStreams,
+    };
+    use mdc_testkit::{
+        FaultInjectingSink, FaultInjectionPoint, MockWsServer, WsAction, load_fixture,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    const SNAPSHOT_FIXTURE: &str =
+        "crates/mdc-providers/tests/fixtures/coinbase_advanced/order_book_snapshot.json";
+    const TRADE_FIXTURE: &str =
+        "crates/mdc-providers/tests/fixtures/coinbase_advanced/trade.json";
+
+    #[tokio::test]
+    async fn test_sink_fault_on_begin_book() {
+        let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+        let snapshot = load_fixture(SNAPSHOT_FIXTURE).expect("load fixture");
+        ws.push_script(vec![
+            WsAction::WaitClientMessage,
+            WsAction::SendText(snapshot),
+        ]);
+
+        let mut config = CoinbaseAdvancedConfig::default();
+        config.ws_url = ws.ws_url().expect("ws url");
+
+        let sink = FaultInjectingSink::new(FaultInjectionPoint::BeginBook);
+        let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+            .symbols(vec![Symbol::from("BTC-USD")])
+            .streaming_sink(sink.clone())
+            .build()
+            .expect("build connector");
+
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.child_token();
+        let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
+        assert!(
+            res.is_ok(),
+            "connector task should terminate after sink error"
+        );
+        assert!(sink.is_tripped(), "fault point should be tripped");
+        let alerts = sink.alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+            "expected SinkFailure alert, got: {alerts:?}"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_sink_fault_on_level() {
+        let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+        let snapshot = load_fixture(SNAPSHOT_FIXTURE).expect("load fixture");
+        ws.push_script(vec![
+            WsAction::WaitClientMessage,
+            WsAction::SendText(snapshot),
+        ]);
+
+        let mut config = CoinbaseAdvancedConfig::default();
+        config.ws_url = ws.ws_url().expect("ws url");
+
+        let sink = FaultInjectingSink::new(FaultInjectionPoint::Level(1));
+        let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+            .symbols(vec![Symbol::from("BTC-USD")])
+            .streaming_sink(sink.clone())
+            .build()
+            .expect("build connector");
+
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.child_token();
+        let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
+        assert!(
+            res.is_ok(),
+            "connector task should terminate after sink error"
+        );
+        assert!(sink.is_tripped(), "fault point should be tripped");
+        let alerts = sink.alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+            "expected SinkFailure alert, got: {alerts:?}"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_sink_fault_on_end_book() {
+        let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+        let snapshot = load_fixture(SNAPSHOT_FIXTURE).expect("load fixture");
+        ws.push_script(vec![
+            WsAction::WaitClientMessage,
+            WsAction::SendText(snapshot),
+        ]);
+
+        let mut config = CoinbaseAdvancedConfig::default();
+        config.ws_url = ws.ws_url().expect("ws url");
+
+        let sink = FaultInjectingSink::new(FaultInjectionPoint::EndBook);
+        let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+            .symbols(vec![Symbol::from("BTC-USD")])
+            .streaming_sink(sink.clone())
+            .build()
+            .expect("build connector");
+
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.child_token();
+        let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
+        assert!(
+            res.is_ok(),
+            "connector task should terminate after sink error"
+        );
+        assert!(sink.is_tripped(), "fault point should be tripped");
+        let alerts = sink.alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+            "expected SinkFailure alert, got: {alerts:?}"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_sink_fault_on_trade() {
+        let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+        let trade = load_fixture(TRADE_FIXTURE).expect("load fixture");
+        ws.push_script(vec![
+            WsAction::WaitClientMessage,
+            WsAction::SendText(trade),
+        ]);
+
+        let mut config = CoinbaseAdvancedConfig::default();
+        config.ws_url = ws.ws_url().expect("ws url");
+        config.streams = CoinbaseAdvancedStreams {
+            level2: true,
+            heartbeats: true,
+            market_trades: true,
+        };
+
+        let sink = FaultInjectingSink::new(FaultInjectionPoint::Trade);
+        let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+            .symbols(vec![Symbol::from("BTC-USD")])
+            .streaming_sink(sink.clone())
+            .build()
+            .expect("build connector");
+
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.child_token();
+        let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
+        assert!(
+            res.is_ok(),
+            "connector task should terminate after sink error"
+        );
+        assert!(sink.is_tripped(), "fault point should be tripped");
+        let alerts = sink.alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+            "expected SinkFailure alert, got: {alerts:?}"
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_sink_fault_on_alert() {
+        let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+        let mut config = CoinbaseAdvancedConfig::default();
+        config.ws_url = ws.ws_url().expect("ws url");
+
+        let sink = FaultInjectingSink::new(FaultInjectionPoint::Alert);
+        let (connector, _handle) = CoinbaseAdvancedConnectorBuilder::new(config)
+            .symbols(vec![Symbol::from("BTC-USD")])
+            .streaming_sink(sink.clone())
+            .build()
+            .expect("build connector");
+
+        let cancel = CancellationToken::new();
+        let cancel_child = cancel.child_token();
+        let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+        let res = tokio::time::timeout(Duration::from_millis(1500), runner).await;
+        assert!(
+            res.is_ok(),
+            "connector task should terminate after sink error"
+        );
+        assert!(sink.is_tripped(), "fault point should be tripped");
+        let alerts = sink.alerts();
+        assert!(
+            alerts
+                .iter()
+                .any(|a| matches!(a, IntegrityAlert::SinkFailure)),
+            "expected SinkFailure alert, got: {alerts:?}"
+        );
+        cancel.cancel();
+    }
+}

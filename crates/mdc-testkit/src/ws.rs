@@ -45,6 +45,7 @@ pub struct MockWsServer {
     conn_notify: Arc<tokio::sync::Notify>,
     handshake_notify: Arc<tokio::sync::Notify>,
     message_notify: Arc<tokio::sync::Notify>,
+    ping_notify: Arc<tokio::sync::Notify>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     server_task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -77,6 +78,7 @@ impl MockWsServer {
         let conn_notify = Arc::new(tokio::sync::Notify::new());
         let handshake_notify = Arc::new(tokio::sync::Notify::new());
         let message_notify = Arc::new(tokio::sync::Notify::new());
+        let ping_notify = Arc::new(tokio::sync::Notify::new());
 
         let server_paths = Arc::clone(&handshake_paths);
         let server_received = Arc::clone(&received_messages);
@@ -88,6 +90,7 @@ impl MockWsServer {
         let s_conn_notify = Arc::clone(&conn_notify);
         let s_handshake_notify = Arc::clone(&handshake_notify);
         let s_message_notify = Arc::clone(&message_notify);
+        let s_ping_notify = Arc::clone(&ping_notify);
 
         let server_task = tokio::spawn(async move {
             let mut connection_tasks = tokio::task::JoinSet::new();
@@ -114,6 +117,7 @@ impl MockWsServer {
                         let mut broadcast_rx = server_broadcast.subscribe();
                         let hs_notify = Arc::clone(&s_handshake_notify);
                         let msg_notify = Arc::clone(&s_message_notify);
+                        let ping_notify = Arc::clone(&s_ping_notify);
 
                         connection_tasks.spawn(async move {
                             let mut path_capture = String::new();
@@ -205,6 +209,7 @@ impl MockWsServer {
                                             }
                                             Some(Ok(Message::Ping(_))) => {
                                                 pings.fetch_add(1, Ordering::SeqCst);
+                                                ping_notify.notify_waiters();
                                             }
                                             Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                                             _ => {}
@@ -243,6 +248,7 @@ impl MockWsServer {
             conn_notify,
             handshake_notify,
             message_notify,
+            ping_notify,
             shutdown_tx: Some(shutdown_tx),
             server_task: Some(server_task),
         })
@@ -261,33 +267,36 @@ impl MockWsServer {
     /// Waits until at least `target_count` TCP connections have been accepted.
     pub async fn wait_for_connections(&self, target_count: usize) -> usize {
         loop {
+            let notified = self.conn_notify.notified();
             let count = self.connection_count();
             if count >= target_count {
                 return count;
             }
-            self.conn_notify.notified().await;
+            notified.await;
         }
     }
 
     /// Waits until at least `target_count` WebSocket handshakes have been established.
     pub async fn wait_for_handshakes(&self, target_count: usize) -> Vec<String> {
         loop {
+            let notified = self.handshake_notify.notified();
             let paths = self.handshake_paths();
             if paths.len() >= target_count {
                 return paths;
             }
-            self.handshake_notify.notified().await;
+            notified.await;
         }
     }
 
     /// Waits until at least `target_count` text messages have been received from connected clients.
     pub async fn wait_for_client_messages(&self, target_count: usize) -> Vec<String> {
         loop {
+            let notified = self.message_notify.notified();
             let msgs = self.received_messages();
             if msgs.len() >= target_count {
                 return msgs;
             }
-            self.message_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -297,11 +306,24 @@ impl MockWsServer {
         F: Fn(&str) -> bool,
     {
         loop {
+            let notified = self.message_notify.notified();
             let msgs = self.received_messages();
             if let Some(found) = msgs.iter().find(|m| predicate(m)) {
                 return found.clone();
             }
-            self.message_notify.notified().await;
+            notified.await;
+        }
+    }
+
+    /// Waits until at least `target_count` ping frames have been received from connected clients.
+    pub async fn wait_for_pings(&self, target_count: usize) -> usize {
+        loop {
+            let notified = self.ping_notify.notified();
+            let count = self.ping_count();
+            if count >= target_count {
+                return count;
+            }
+            notified.await;
         }
     }
 

@@ -57,7 +57,8 @@ async fn test_rest_rates_success_and_ordering() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -131,7 +132,8 @@ async fn test_rest_identity_row_skipped() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -171,7 +173,15 @@ async fn test_rest_missing_pair_rejects_batch() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::MissingQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -222,7 +232,15 @@ async fn test_rest_invalid_rate_rejects_batch() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::InvalidQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -270,7 +288,15 @@ async fn test_rest_conflicting_pair_rejects_batch() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::InvalidQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -324,7 +350,15 @@ async fn test_rest_http_429_retry_after() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::HttpStatus(429)
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -366,7 +400,15 @@ async fn test_rest_http_500_server_error() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::HttpStatus(500)
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -416,8 +458,18 @@ async fn test_rest_fail_then_recover_resync_completed() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    // Wait enough time for fail then recovery retry
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    // Wait for fail (500) then recovery (ResyncCompleted)
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::HttpStatus(500)
+            }
+        )
+    })
+    .await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -463,7 +515,7 @@ async fn test_rest_control_pause_resume() {
     let config = FrankfurterConfig::builder()
         .base_url(mock.url().expect("valid mock url"))
         .base_currency("EUR")
-        .quote_currencies(vec!["USD".to_string()])
+        .quote_currencies(vec!["GBP".to_string(), "USD".to_string()])
         .poll_interval(Duration::from_millis(50))
         .build()
         .expect("build config");
@@ -477,13 +529,22 @@ async fn test_rest_control_pause_resume() {
     let (handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
     // Let 1 poll execute
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
     let count_before = sink.events().len();
     assert!(count_before > 0, "Initial poll must have executed");
 
     // Pause
     handle.pause().await.expect("pause");
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Paused
+            }
+        )
+    })
+    .await;
 
     // Verify ConnectionLost(Paused) was emitted
     let has_paused_alert = sink.events().iter().any(|e| match e {
@@ -501,7 +562,7 @@ async fn test_rest_control_pause_resume() {
 
     // Resume
     handle.resume().await.expect("resume");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_events(count_during_pause + 1).await;
 
     let count_after_resume = sink.events().len();
     assert!(
@@ -548,7 +609,8 @@ async fn test_rest_control_set_symbols() {
     let (handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
     // Wait for first poll with GBP,USD
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // Update symbols to USD only (removes GBP)
     handle
@@ -556,7 +618,15 @@ async fn test_rest_control_set_symbols() {
         .await
         .expect("set_symbols");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ConnectionLost {
+                reason: DisconnectKind::Closed
+            }
+        )
+    })
+    .await;
 
     // Check that EURGBP received ConnectionLost(Closed)
     let has_closed_gbp = sink.events().iter().any(|e| match e {
@@ -606,8 +676,19 @@ async fn test_rest_repeated_poll_does_not_repeat_resync_completed() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    // Allow multiple polls to execute
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Allow multiple polls to execute (at least 2 observations for EURGBP)
+    while sink
+        .events()
+        .iter()
+        .filter(|e| match e {
+            RecordedEvent::ReferenceRate { symbol, .. } => symbol.as_str() == "EURGBP",
+            _ => false,
+        })
+        .count()
+        < 2
+    {
+        sink.wait_for_events(sink.events().len() + 1).await;
+    }
     cancel.cancel();
     let _ = runner.await;
 
@@ -671,7 +752,15 @@ async fn test_rest_unrequested_pair_rejects_batch() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::InvalidQuote
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -726,7 +815,15 @@ async fn test_rest_oversized_body_rejected() {
 
     let (_handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Transport
+            }
+        )
+    })
+    .await;
     cancel.cancel();
     let _ = runner.await;
 
@@ -759,7 +856,7 @@ async fn test_rest_control_set_symbols_rejection() {
     let config = FrankfurterConfig::builder()
         .base_url(mock.url().expect("valid mock url"))
         .base_currency("EUR")
-        .quote_currencies(vec!["USD".to_string()])
+        .quote_currencies(vec!["GBP".to_string(), "USD".to_string()])
         .poll_interval(Duration::from_millis(50))
         .build()
         .expect("build config");
@@ -772,7 +869,8 @@ async fn test_rest_control_set_symbols_rejection() {
 
     let (handle, runner) = connector.run(sink.clone(), cancel.child_token());
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
 
     // 1. Empty list rejected
     let res = handle.set_symbols(vec![]).await;

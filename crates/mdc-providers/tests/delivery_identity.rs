@@ -67,7 +67,7 @@ async fn test_multi_bucket_delivery_stamp_uniqueness() {
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
     // Wait for frames to be processed
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    sink.wait_for_delivery_stamps(2).await;
     cancel.cancel();
 
     let _ = runner.await;
@@ -160,21 +160,17 @@ async fn test_huobi_mid_book_abort() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     // Find the snapshot request ID sent by client
-    let req_id = ws
-        .received_messages()
-        .iter()
-        .find_map(|msg| {
-            let v = serde_json::from_str::<serde_json::Value>(msg).ok()?;
-            if v["req"] == "market.btcusdt.mbp.400" {
-                v["id"].as_str().map(|s| s.to_string())
-            } else {
-                None
-            }
+    let req_msg = ws
+        .wait_for_client_message_matching(|msg| {
+            serde_json::from_str::<serde_json::Value>(msg)
+                .ok()
+                .map(|v| v["req"] == "market.btcusdt.mbp.400")
+                .unwrap_or(false)
         })
-        .expect("snapshot request id found");
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&req_msg).expect("valid json");
+    let req_id = v["id"].as_str().expect("snapshot request id").to_string();
 
     // Send sub ack
     let sub_ack_raw = load_fixture("crates/mdc-providers/tests/fixtures/huobi/sub_ack.json")

@@ -421,11 +421,12 @@ async fn test_ws_silence_watchdog_ping_and_reconnect() {
     let run_task = tokio::spawn(runner);
 
     // Initial connection
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    ws.wait_for_connections(1).await;
     assert_eq!(ws.connection_count(), 1);
 
     // Keep server silent past 60ms ping + 100ms grace period + timer intervals
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    ws.wait_for_connections(2).await;
+    sink.wait_for_alerts(2).await;
 
     // Silence watchdog should have triggered a reconnect
     assert!(

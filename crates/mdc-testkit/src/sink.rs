@@ -222,6 +222,67 @@ impl RecordingSink {
         }
     }
 
+    /// Asynchronously waits until an event matching `predicate` is recorded and returns it.
+    pub async fn wait_for_event_matching<F>(&self, predicate: F) -> RecordedEvent
+    where
+        F: Fn(&RecordedEvent) -> bool,
+    {
+        loop {
+            let notified = self.notify.notified();
+            let events = self.events();
+            if let Some(event) = events.into_iter().find(&predicate) {
+                return event;
+            }
+            notified.await;
+        }
+    }
+
+    /// Asynchronously waits until an alert matching `predicate` is recorded and returns it.
+    pub async fn wait_for_alert_matching<F>(&self, predicate: F) -> IntegrityAlert
+    where
+        F: Fn(&IntegrityAlert) -> bool,
+    {
+        loop {
+            let notified = self.notify.notified();
+            let alerts = self.alerts();
+            if let Some(alert) = alerts.into_iter().find(&predicate) {
+                return alert;
+            }
+            notified.await;
+        }
+    }
+
+    /// Asynchronously waits until at least `count` delivery stamps have been recorded.
+    pub async fn wait_for_delivery_stamps(&self, count: usize) -> Vec<mdc_core::DeliveryStamp> {
+        loop {
+            let notified = self.notify.notified();
+            let stamps = self.delivery_stamps();
+            if stamps.len() >= count {
+                return stamps;
+            }
+            notified.await;
+        }
+    }
+
+    /// Asynchronously waits until at least `count` trades have been recorded.
+    pub async fn wait_for_trades(&self, count: usize) -> Vec<mdc_core::Trade> {
+        loop {
+            let notified = self.notify.notified();
+            let trades: Vec<_> = self
+                .events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    RecordedEvent::Trade { trade, .. } => Some(trade),
+                    _ => None,
+                })
+                .collect();
+            if trades.len() >= count {
+                return trades;
+            }
+            notified.await;
+        }
+    }
+
     /// Clears all recorded events and delivery stamps.
     pub fn clear(&self) {
         let mut guard = self
@@ -792,6 +853,33 @@ mod tests {
 
         let alerts = sink.wait_for_alerts(1).await;
         assert_eq!(alerts, vec![IntegrityAlert::ResyncStarted]);
+
+        let alert = sink
+            .wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncStarted))
+            .await;
+        assert_eq!(alert, IntegrityAlert::ResyncStarted);
+
+        let event = sink
+            .wait_for_event_matching(|e| {
+                matches!(
+                    e,
+                    RecordedEvent::BeginBook {
+                        kind: BookKind::Snapshot,
+                        ..
+                    }
+                )
+            })
+            .await;
+        assert!(matches!(
+            event,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Snapshot,
+                ..
+            }
+        ));
+
+        let stamps = sink.wait_for_delivery_stamps(2).await;
+        assert_eq!(stamps.len(), 2);
 
         let events = sink.wait_for_events(3).await;
         assert_eq!(events.len(), 3);

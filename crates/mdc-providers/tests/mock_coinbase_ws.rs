@@ -41,9 +41,7 @@ async fn test_ws_subscribe_message_and_matches_flag() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let received = ws.received_messages();
+    let received = ws.wait_for_client_messages(1).await;
     assert!(!received.is_empty(), "Expected subscribe frame");
 
     let v: serde_json::Value = serde_json::from_str(&received[0]).expect("valid json subscribe");
@@ -77,9 +75,7 @@ async fn test_ws_subscribe_message_with_matches_enabled() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let received = ws.received_messages();
+    let received = ws.wait_for_client_messages(1).await;
     assert!(!received.is_empty());
 
     let v: serde_json::Value = serde_json::from_str(&received[0]).expect("valid json subscribe");
@@ -113,15 +109,17 @@ async fn test_ws_snapshot_and_delta_ordered_delivery() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Wait for connect / subscription
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(1).await;
 
     // Send snapshot
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
 
     // Send update
     let _ = ws.broadcast_text(&upd_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_event_matching(|e| matches!(e, RecordedEvent::BeginBook { kind: BookKind::Delta, .. })).await;
 
     let events = sink.events();
     let mut has_resync_started = false;
@@ -192,14 +190,15 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(2).await;
 
     // Send snapshot for BTC-USD
     let _ = ws.broadcast_text(&snap_json);
     // Send snapshot for ETH-USD
     let eth_snap = snap_json.replace("BTC-USD", "ETH-USD");
     let _ = ws.broadcast_text(&eth_snap);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
 
     // Send initial heartbeats for both symbols
     let hb_init_btc = serde_json::json!({
@@ -218,7 +217,6 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     });
     let _ = ws.broadcast_text(hb_init_btc.to_string());
     let _ = ws.broadcast_text(hb_init_eth.to_string());
-    tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Now continuously send heartbeats ONLY for BTC-USD, leaving ETH-USD silent
     for seq in 100..105 {
@@ -233,8 +231,8 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
 
-    // ETH-USD was silent for > 250ms!
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Wait until ETH-USD triggers resubscribe after silence timeout
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("ETH-USD")).await;
 
     let received = ws.received_messages();
     // Verify an unsubscribe and subscribe was sent for ETH-USD
@@ -302,16 +300,16 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(1).await;
 
     // Send snapshot
     let _ = ws.broadcast_text(&snap_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. })).await;
 
     // Send normal heartbeat from fixture (seq 90)
     let hb_json = load_fixture(HEARTBEAT_FIXTURE).expect("load heartbeat fixture");
     let _ = ws.broadcast_text(&hb_json);
-    tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Send heartbeat with sequence jump 4000 (jump = 3900 > 3000 threshold)
     let hb2 = serde_json::json!({
@@ -322,7 +320,7 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
         "time": "2014-11-07T08:19:29.464459Z"
     });
     let _ = ws.broadcast_text(hb2.to_string());
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD")).await;
 
     let received = ws.received_messages();
     let mut has_unsub = false;
@@ -366,11 +364,12 @@ async fn test_ws_drop_updates_while_awaiting_snapshot() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(1).await;
 
     // Send update BEFORE snapshot
     let _ = ws.broadcast_text(&upd_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    tokio::task::yield_now().await;
 
     let events = sink.events();
     let has_delta = events.iter().any(|ev| {
@@ -410,19 +409,11 @@ async fn test_ws_matches_trade_stream() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(1).await;
 
     let _ = ws.broadcast_text(&trade_json);
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let events = sink.events();
-    let trades: Vec<_> = events
-        .iter()
-        .filter_map(|ev| match ev {
-            RecordedEvent::Trade { trade, .. } => Some(trade.clone()),
-            _ => None,
-        })
-        .collect();
+    let trades = sink.wait_for_trades(1).await;
 
     assert_eq!(trades.len(), 1, "Must emit trade event");
     let t = &trades[0];
@@ -456,29 +447,31 @@ async fn test_ws_control_pause_resume_cancel() {
     let cancel_child = cancel.child_token();
     let runner = tokio::spawn(async move { connector.run(cancel_child).await });
 
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    ws.wait_for_client_messages(1).await;
+    sink.wait_for_alerts(1).await;
 
     // Pause connector
     handle.pause().await.expect("pause command");
-    tokio::time::sleep(Duration::from_millis(60)).await;
-
-    let events = sink.events();
-    let has_paused = events.iter().any(|ev| {
-        matches!(
-            ev,
-            RecordedEvent::Alert {
-                alert: IntegrityAlert::ConnectionLost {
+    let paused_alert = sink
+        .wait_for_alert_matching(|a| {
+            matches!(
+                a,
+                IntegrityAlert::ConnectionLost {
                     reason: DisconnectKind::Paused
-                },
-                ..
-            }
-        )
-    });
-    assert!(has_paused, "Must emit ConnectionLost with reason Paused");
+                }
+            )
+        })
+        .await;
+    assert_eq!(
+        paused_alert,
+        IntegrityAlert::ConnectionLost {
+            reason: DisconnectKind::Paused
+        }
+    );
 
     // Resume connector
     handle.resume().await.expect("resume command");
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    sink.wait_for_alerts(3).await;
 
     cancel.cancel();
     let _ = runner.await;
