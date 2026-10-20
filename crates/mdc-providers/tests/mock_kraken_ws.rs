@@ -7,11 +7,14 @@
 
 //! Level 4 Mock WebSocket integration tests for Kraken WebSocket v2 connector.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use mdc_core::{BookKind, IntegrityAlert, SourceErrorKind, Symbol};
-use mdc_providers::kraken::{KrakenConfig, KrakenConnectorBuilder};
+use mdc_core::{BookKind, IntegrityAlert, Side, SourceErrorKind, Symbol};
+use mdc_providers::kraken::raw::RawMessage;
+use mdc_providers::kraken::{KrakenChecksumBook, KrakenConfig, KrakenConnectorBuilder};
 use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, WsAction, load_fixture};
+use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
 const SNAPSHOT_FIXTURE: &str =
@@ -650,6 +653,224 @@ async fn test_resync_during_backoff_executes_after_reconnect() {
         .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
         .count();
     assert_eq!(started, 2, "connect-time and deferred resync");
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// Starts a connector against `ws` (one BTC/USD book subscription) and returns the sink and runner.
+async fn start_kraken(
+    ws: &MockWsServer,
+    configure: impl FnOnce(&mut KrakenConfig),
+) -> (
+    RecordingSink,
+    CancellationToken,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut config = KrakenConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url");
+    configure(&mut config);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = KrakenConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC/USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move {
+        let _ = connector.run(cancel_child).await;
+    });
+    ws.wait_for_client_messages(1).await;
+    (sink, cancel, runner)
+}
+
+fn book_begins(sink: &RecordingSink) -> Vec<BookKind> {
+    sink.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { kind, .. } => Some(kind),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A level whose price is not a number is rejected by the production dispatcher: no delta is
+/// emitted, a parse error and a resync are announced, and the book is resubscribed in place.
+#[tokio::test]
+async fn test_malformed_update_level_invalidates_book_and_resubscribes() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
+    let upd_json = load_fixture(UPDATE_FIXTURE).expect("load update fixture");
+
+    let mut bad: serde_json::Value = serde_json::from_str(&upd_json).expect("valid update json");
+    bad["data"][0]["bids"][0]["price"] = serde_json::json!("not-a-number");
+
+    let (sink, cancel, runner) = start_kraken(&ws, |_| {}).await;
+
+    let _ = ws.broadcast_text(&snap_json);
+    ws.sync_barrier().await;
+    assert_eq!(book_begins(&sink), vec![BookKind::Snapshot]);
+    let alerts_before = sink.alerts_for("BTC/USD").len();
+
+    let _ = ws.broadcast_text(&bad.to_string());
+    ws.sync_barrier().await;
+
+    assert_eq!(
+        book_begins(&sink),
+        vec![BookKind::Snapshot],
+        "malformed update must not reach the sink as a delta"
+    );
+    assert_eq!(
+        sink.alerts_for("BTC/USD")[alerts_before..],
+        [
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::ResyncStarted,
+        ]
+    );
+
+    // The in-place resubscribe: subscribe, unsubscribe, subscribe.
+    ws.wait_for_client_messages(3).await;
+    let methods: Vec<String> = ws
+        .received_messages()
+        .iter()
+        .map(|m| {
+            serde_json::from_str::<serde_json::Value>(m).expect("json")["method"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(methods, vec!["subscribe", "unsubscribe", "subscribe"]);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// A malformed level in a snapshot is never applied: nothing is emitted and a resync starts.
+#[tokio::test]
+async fn test_malformed_snapshot_level_is_not_published() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
+    let mut bad: serde_json::Value = serde_json::from_str(&snap_json).expect("valid snapshot json");
+    bad["data"][0]["asks"][3]["qty"] = serde_json::json!("oops");
+
+    let (sink, cancel, runner) = start_kraken(&ws, |_| {}).await;
+    let alerts_before = sink.alerts_for("BTC/USD").len();
+
+    let _ = ws.broadcast_text(&bad.to_string());
+    ws.sync_barrier().await;
+
+    assert!(
+        book_begins(&sink).is_empty(),
+        "malformed snapshot must not be published"
+    );
+    assert_eq!(
+        sink.alerts_for("BTC/USD")[alerts_before..],
+        [
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::ResyncStarted,
+        ]
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// Depth truncation: an update that pushes the worst level out of the subscribed depth must be
+/// expressed to downstream consumers as a zero-quantity level, so their book converges on the
+/// venue's (truncated) book instead of growing without bound.
+#[tokio::test]
+async fn test_depth_truncation_converges_downstream_book() {
+    const DEPTH: usize = 10;
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
+    let upd_json = load_fixture(UPDATE_FIXTURE).expect("load update fixture");
+
+    // New best bid and new best ask: each side now has 11 levels, so one must be evicted per side.
+    let mut update: serde_json::Value = serde_json::from_str(&upd_json).expect("valid update json");
+    update["data"][0]["bids"] = serde_json::json!([{"price": 45284.0, "qty": 1.0}]);
+    update["data"][0]["asks"] = serde_json::json!([{"price": 45285.0, "qty": 2.0}]);
+
+    // The venue's checksum is over its truncated book; derive it with the same shadow book.
+    let mut shadow = KrakenChecksumBook::new(DEPTH);
+    for text in [snap_json.as_str(), &update.to_string()] {
+        match RawMessage::parse(text).expect("parse") {
+            RawMessage::Book { data, .. } => {
+                shadow.apply(&data[0].asks, &data[0].bids).expect("apply");
+            }
+            other => panic!("expected book, got {other:?}"),
+        }
+    }
+    update["data"][0]["checksum"] = serde_json::json!(shadow.checksum());
+
+    let (sink, cancel, runner) = start_kraken(&ws, |c| c.depth = DEPTH).await;
+    let _ = ws.broadcast_text(&snap_json);
+    let _ = ws.broadcast_text(&update.to_string());
+    ws.sync_barrier().await;
+
+    assert_eq!(
+        book_begins(&sink),
+        vec![BookKind::Snapshot, BookKind::Delta],
+        "snapshot and in-sync update must both be published, alerts: {:?}",
+        sink.alerts_for("BTC/USD")
+    );
+
+    // Downstream consumer: replay every published level into a plain price map.
+    let mut bids: BTreeMap<Decimal, Decimal> = BTreeMap::new();
+    let mut asks: BTreeMap<Decimal, Decimal> = BTreeMap::new();
+    for event in sink.events() {
+        match event {
+            RecordedEvent::BeginBook {
+                kind: BookKind::Snapshot,
+                ..
+            } => {
+                bids.clear();
+                asks.clear();
+            }
+            RecordedEvent::Level {
+                side,
+                price,
+                volume,
+            } => {
+                let book = if side == Side::Bid {
+                    &mut bids
+                } else {
+                    &mut asks
+                };
+                if volume.is_zero() {
+                    book.remove(&price);
+                } else {
+                    book.insert(price, volume);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let venue_bids: Vec<_> = shadow
+        .top(Side::Bid, DEPTH)
+        .into_iter()
+        .map(|l| (l.price, l.volume))
+        .collect();
+    let venue_asks: Vec<_> = shadow
+        .top(Side::Ask, DEPTH)
+        .into_iter()
+        .map(|l| (l.price, l.volume))
+        .collect();
+    let down_bids: Vec<_> = bids.iter().rev().map(|(p, v)| (*p, *v)).collect();
+    let down_asks: Vec<_> = asks.iter().map(|(p, v)| (*p, *v)).collect();
+
+    assert_eq!(down_bids.len(), DEPTH, "downstream bids must be truncated");
+    assert_eq!(down_asks.len(), DEPTH, "downstream asks must be truncated");
+    assert_eq!(down_bids, venue_bids);
+    assert_eq!(down_asks, venue_asks);
 
     cancel.cancel();
     let _ = runner.await;

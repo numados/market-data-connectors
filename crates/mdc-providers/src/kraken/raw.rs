@@ -551,6 +551,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_dispatches_subscribe_error_ack() {
+        match RawMessage::parse(SUB_ERR_JSON).expect("parse error ack") {
+            RawMessage::MethodAck(ack) => {
+                assert_eq!(ack.method, "subscribe");
+                assert!(!ack.success);
+                assert_eq!(ack.symbol, Some("INVALID/USD"));
+                assert_eq!(ack.error, Some("Subscription rejected: symbol not found"));
+            }
+            other => panic!("expected RawMessage::MethodAck, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_raw_value_single_pass_borrows_substring() {
         // Assert RawValue.get() points to the exact slice within the JSON string
         let msg: RawMessage<'_> = serde_json::from_str(UPDATE_JSON).expect("deserialize");
