@@ -9,12 +9,17 @@
 
 use mdc_core::{MdcError, Symbol, SymbolTag};
 
-/// Validates that symbols list is non-empty.
-pub fn validate_symbols(symbols: &[(Symbol, SymbolTag)]) -> Result<(), MdcError> {
-    if symbols.is_empty() {
+/// Validates that a configured symbol count is non-zero.
+pub fn validate_symbol_count(count: usize) -> Result<(), MdcError> {
+    if count == 0 {
         return Err(MdcError::Config("symbols list cannot be empty".to_string()));
     }
     Ok(())
+}
+
+/// Validates that symbols list is non-empty.
+pub fn validate_symbols(symbols: &[(Symbol, SymbolTag)]) -> Result<(), MdcError> {
+    validate_symbol_count(symbols.len())
 }
 
 /// Validates that `symbols_per_connection` is strictly greater than zero.

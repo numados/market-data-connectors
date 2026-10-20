@@ -3,22 +3,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use mdc_core::MdcError;
 use mdc_core::model::{RunId, Symbol, SymbolTag};
-use thiserror::Error;
 
-/// Error returned when constructing or validating a `BitfinexConfig`.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum ConfigError {
-    /// No symbols provided to the connector.
-    #[error("at least one symbol must be configured for Bitfinex")]
-    EmptySymbols,
-    /// Invalid order book depth length requested.
-    #[error("invalid order book depth {depth}: Bitfinex allows 1, 25, 100, or 250")]
-    InvalidDepth {
-        /// The invalid depth requested.
-        depth: usize,
-    },
-}
+/// Order book depths accepted by Bitfinex (`len` parameter of the book channel).
+pub const BOOK_DEPTHS: [usize; 4] = [1, 25, 100, 250];
 
 /// Bitfinex stream subscription flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,16 +79,14 @@ impl Default for BitfinexConfig {
 }
 
 impl BitfinexConfig {
-    /// Validates configuration parameters.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.symbols.is_empty() {
-            return Err(ConfigError::EmptySymbols);
-        }
-        if !matches!(self.orderbook_depth, 1 | 25 | 100 | 250) {
-            return Err(ConfigError::InvalidDepth {
-                depth: self.orderbook_depth,
-            });
-        }
-        Ok(())
+    /// Validates configuration parameters through the shared validators.
+    pub fn validate(&self) -> Result<(), MdcError> {
+        crate::config::validate_symbol_count(self.symbols.len())?;
+        validate_book_depth(self.orderbook_depth)
     }
+}
+
+/// Validates a requested book depth against the Bitfinex allow-list.
+pub fn validate_book_depth(depth: usize) -> Result<(), MdcError> {
+    crate::config::validate_depth_in_set(depth, &BOOK_DEPTHS, "Bitfinex")
 }

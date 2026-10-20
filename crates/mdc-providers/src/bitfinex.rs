@@ -50,7 +50,7 @@ pub use catalog::{
     DEFAULT_BITFINEX_CATALOG_ENDPOINT, bitfinex_catalog_client, parse_bitfinex_catalog,
 };
 pub use checksum::{BitfinexChecksumBook, ChecksumVerdict};
-pub use config::{BitfinexConfig, BitfinexStreams, ConfigError};
+pub use config::{BOOK_DEPTHS, BitfinexConfig, BitfinexStreams, validate_book_depth};
 pub use connection::run_connection_loop;
 pub use connector::{BITFINEX_CAPABILITIES, BitfinexConnector, BitfinexConnectorBuilder};
 pub use control::{BitfinexHandle, Command};
