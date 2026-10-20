@@ -499,3 +499,98 @@ async fn test_connector_handle_request_resync() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+fn bitstamp_diff(microtimestamp: u64, bid: &str) -> String {
+    serde_json::json!({
+        "event": "data",
+        "channel": "diff_order_book_btcusd",
+        "data": {
+            "timestamp": "1700000000",
+            "microtimestamp": microtimestamp.to_string(),
+            "bids": [[bid, "1.00000000"]],
+            "asks": []
+        }
+    })
+    .to_string()
+}
+
+/// Buffer overflow while a REST snapshot is in flight must orphan that
+/// request: its late response is discarded and a fresh snapshot completes.
+#[tokio::test]
+async fn test_overflow_discards_in_flight_snapshot_and_requests_fresh_one() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
+
+    let stale = r#"{"timestamp":"1700000000","microtimestamp":"1700000000100000","bids":[["40000.00","1.0"]],"asks":[["40001.00","1.0"]]}"#;
+    let fresh = r#"{"timestamp":"1700000001","microtimestamp":"1700000000900000","bids":[["50000.00","1.0"]],"asks":[["50001.00","1.0"]]}"#;
+    Mock::given(method("GET"))
+        .and(path("/order_book/btcusd/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(stale, "application/json")
+                .set_delay(Duration::from_millis(300)),
+        )
+        .up_to_n_times(1)
+        .mount(rest.inner())
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/order_book/btcusd/"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(fresh, "application/json"))
+        .mount(rest.inner())
+        .await;
+
+    let mut config = BitstampConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.rest_url = rest.url().expect("valid rest url");
+    config.buffer_capacity = 1;
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = BitstampConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btcusd")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(1).await;
+    // First diff is buffered and triggers the (slow) snapshot request.
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_200_000, "1.00"));
+    rest.wait_for_requests(1).await;
+    // Second diff overflows capacity 1 while the request is in flight.
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_300_000, "2.00"));
+
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+
+    assert_eq!(rest.wait_for_requests(2).await, 2, "one fresh request");
+
+    let events = sink.events();
+    let snapshot_bids: Vec<Decimal> = events
+        .iter()
+        .filter_map(|e| match e {
+            RecordedEvent::Level {
+                side: Side::Bid,
+                price,
+                ..
+            } => Some(*price),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        snapshot_bids,
+        vec![Decimal::from_str("50000.00").unwrap()],
+        "only the fresh snapshot may be published"
+    );
+    let completed = sink
+        .alerts()
+        .into_iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .count();
+    assert_eq!(completed, 1);
+
+    cancel.cancel();
+    let _ = runner.await;
+}

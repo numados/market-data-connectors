@@ -31,6 +31,23 @@ impl MockRest {
         &self.server
     }
 
+    /// Waits until the server has received at least `count` requests and
+    /// returns the total received so far.
+    pub async fn wait_for_requests(&self, count: usize) -> usize {
+        loop {
+            let received = self
+                .server
+                .received_requests()
+                .await
+                .map_or(0, |requests| requests.len());
+            if received >= count {
+                return received;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     /// Mocks a Binance depth snapshot endpoint returning 200 OK with the given body.
     pub async fn mock_binance_depth_ok(&self, symbol: &str, body: &str) {
         Mock::given(method("GET"))

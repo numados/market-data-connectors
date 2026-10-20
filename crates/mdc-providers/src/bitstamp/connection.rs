@@ -367,7 +367,11 @@ pub async fn run_connection_task<S: StreamingSink>(
                                     break 'frame_loop;
                                 }
 
-                                if !snapshot_queue.contains(&sym) && !in_flight_snapshots.contains(&sym) {
+                                // Any request already in flight predates this
+                                // invalidation: orphan its id so the late response
+                                // is discarded, and queue a fresh snapshot.
+                                active_snapshot_ids.remove(&sym);
+                                if !snapshot_queue.contains(&sym) {
                                     snapshot_queue.push_back(sym);
                                 }
                             }
@@ -658,7 +662,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     if let Some(buf) = buffered_diffs.get_mut(sym) {
                                                         buf.clear();
                                                     }
-                                                    if !snapshot_queue.contains(sym) && !in_flight_snapshots.contains(sym) {
+                                                    active_snapshot_ids.remove(sym);
+                                                    if !snapshot_queue.contains(sym) {
                                                         snapshot_queue.push_back(sym.clone());
                                                     }
                                                 }
@@ -724,7 +729,8 @@ pub async fn run_connection_task<S: StreamingSink>(
                                                     ).is_err() {
                                                         break 'frame_loop;
                                                     }
-                                                    if !snapshot_queue.contains(sym) && !in_flight_snapshots.contains(sym) {
+                                                    active_snapshot_ids.remove(sym);
+                                                    if !snapshot_queue.contains(sym) {
                                                         snapshot_queue.push_back(sym.clone());
                                                     }
                                                 } else {
