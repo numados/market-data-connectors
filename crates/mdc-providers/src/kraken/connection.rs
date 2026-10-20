@@ -1,9 +1,10 @@
 //! Kraken WebSocket per-bucket connection worker task.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use mdc_core::resync::EscalatingRejectionPolicy;
 use mdc_core::{
     BackoffPolicy, BookKind, ChecksumPolicy, DisconnectKind, ExponentialBackoff, IntegrityAlert,
     PriceLevel, RawLevelText, RunId, Side, SilenceWatchdog, SourceErrorKind, StreamingSink, Symbol,
@@ -20,7 +21,9 @@ use crate::sink_util::ConnectionSink;
 use crate::kraken::checksum::{ChecksumVerdict, KrakenChecksumBook};
 use crate::kraken::config::KrakenConfig;
 use crate::kraken::control::Command;
-use crate::kraken::fsm::{PollOutcome, SnapshotOutcome, SymbolFsm, UpdateOutcome};
+use crate::kraken::fsm::{
+    PollOutcome, RejectionOutcome, SnapshotOutcome, SymbolFsm, UpdateOutcome,
+};
 use crate::kraken::normalize::{normalize_trade, parse_rfc3339_nanos};
 use crate::kraken::raw::{RawBookData, RawLevel, RawMessage};
 
@@ -107,6 +110,7 @@ pub async fn run_connection_task<S: StreamingSink>(
     let mut reconnect_attempt = 0u32;
     let mut backoff_policy = ExponentialBackoff::new(config.initial_backoff, config.max_backoff);
     let mut is_paused = false;
+    let mut deferred_commands: VecDeque<Command> = VecDeque::new();
 
     // Pre-allocated scratch levels to avoid heap allocation on updates
     let mut bids_scratch: Vec<PriceLevel> = Vec::with_capacity(config.depth);
@@ -145,17 +149,17 @@ pub async fn run_connection_task<S: StreamingSink>(
                 reconnect_attempt,
                 "Reconnecting Kraken WebSocket with backoff"
             );
-            tokio::select! {
-                _ = cancel.cancelled() => break 'reconnect_loop,
-                cmd = command_rx.recv() => {
-                    match cmd {
-                        Some(Command::Pause) => { is_paused = true; continue 'reconnect_loop; }
-                        Some(Command::Reconnect(_)) => { reconnect_attempt = 0; backoff_policy.reset(); }
-                        None => break 'reconnect_loop,
-                        _ => {}
-                    }
+            match wait_backoff(backoff, &mut command_rx, &mut deferred_commands, &cancel).await {
+                BackoffExit::Elapsed => {}
+                BackoffExit::Reconnect => {
+                    reconnect_attempt = 0;
+                    backoff_policy.reset();
                 }
-                _ = tokio::time::sleep(backoff) => {}
+                BackoffExit::Paused => {
+                    is_paused = true;
+                    continue 'reconnect_loop;
+                }
+                BackoffExit::Stopped => break 'reconnect_loop,
             }
         }
 
@@ -197,7 +201,19 @@ pub async fn run_connection_task<S: StreamingSink>(
         for sym in &symbol_list {
             fsms.insert(
                 sym.clone(),
-                SymbolFsm::new(now, config.resubscribe_timeout, config.quarantine_duration),
+                SymbolFsm::with_rejection_policy(
+                    now,
+                    config.resubscribe_timeout,
+                    config.quarantine_duration,
+                    match &config.rejection_policy {
+                        Some(factory) => factory(),
+                        None => Box::new(EscalatingRejectionPolicy::new(
+                            config.rejection_cooldown,
+                            config.quarantine_duration,
+                            config.rejection_escalate_after,
+                        )),
+                    },
+                ),
             );
             books.insert(
                 sym.clone(),
@@ -253,7 +269,7 @@ pub async fn run_connection_task<S: StreamingSink>(
                     let _ = ws_stream.close(None).await;
                     break 'reconnect_loop;
                 }
-                cmd = command_rx.recv() => {
+                cmd = next_command(&mut deferred_commands, &mut command_rx) => {
                     match cmd {
                         Some(Command::Pause) => {
                             info!(connection_id, "Pausing Kraken connector");
@@ -646,13 +662,12 @@ fn handle_frame_text<S: StreamingSink>(
                         connection_id,
                         symbol = s,
                         error = ?ack.error,
-                        "Kraken subscription rejected; quarantining symbol"
+                        "Kraken subscription rejected"
                     );
-                    let retry_in_ms = if let Some(fsm) = fsms.get_mut(&sym) {
-                        fsm.trigger_quarantine(Instant::now());
-                        fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64
-                    } else {
-                        30_000
+                    let now = Instant::now();
+                    let quarantine_retry_ms = match fsms.get_mut(&sym) {
+                        Some(fsm) => rejection_retry_ms(fsm.on_subscription_rejected(now), now),
+                        None => Some(30_000),
                     };
                     pending_resubscribe.remove(&sym);
                     let ctx =
@@ -668,23 +683,24 @@ fn handle_frame_text<S: StreamingSink>(
                     {
                         return;
                     }
-                    if sink
-                        .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
-                        .is_err()
-                    {
-                        return;
+                    if let Some(retry_in_ms) = quarantine_retry_ms {
+                        if sink
+                            .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 } else {
                     warn!(
                         connection_id,
                         error = ?ack.error,
-                        "Kraken general subscription rejected; quarantining all active symbols"
+                        "Kraken general subscription rejected; applying rejection policy to all active symbols"
                     );
                     let now = Instant::now();
                     for (sym, fsm) in fsms.iter_mut() {
-                        fsm.trigger_quarantine(now);
-                        let retry_in_ms =
-                            fsm.quarantine_duration().as_millis().min(u64::MAX as u128) as u64;
+                        let quarantine_retry_ms =
+                            rejection_retry_ms(fsm.on_subscription_rejected(now), now);
                         pending_resubscribe.remove(sym);
                         let tag = *tag_map.get(sym).unwrap_or(&0);
                         let ctx =
@@ -700,17 +716,106 @@ fn handle_frame_text<S: StreamingSink>(
                         {
                             return;
                         }
-                        if sink
-                            .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
-                            .is_err()
-                        {
-                            return;
+                        if let Some(retry_in_ms) = quarantine_retry_ms {
+                            if sink
+                                .alert(&ctx, IntegrityAlert::Quarantined { retry_in_ms })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 }
             }
         }
         RawMessage::Heartbeat | RawMessage::Status | RawMessage::Other => {}
+    }
+}
+
+/// Why a reconnect backoff wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackoffExit {
+    /// The full backoff elapsed.
+    Elapsed,
+    /// An operator reconnect cut the wait short.
+    Reconnect,
+    /// An operator pause parked the connection.
+    Paused,
+    /// Cancellation or a closed command channel ended the connection.
+    Stopped,
+}
+
+/// Waits out a reconnect backoff while honouring operator commands.
+///
+/// Rules: `Reconnect` is an operator override and cuts the wait short; `Pause`
+/// parks the connection; `Resync`/`ResyncAll` are deferred (coalesced) and
+/// executed once the next connection is up, without shortening the wait;
+/// `Resume` is a no-op because nothing is paused.
+async fn wait_backoff(
+    backoff: Duration,
+    command_rx: &mut mpsc::Receiver<Command>,
+    deferred: &mut VecDeque<Command>,
+    cancel: &CancellationToken,
+) -> BackoffExit {
+    let sleep = tokio::time::sleep(backoff);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return BackoffExit::Stopped,
+            _ = &mut sleep => return BackoffExit::Elapsed,
+            cmd = command_rx.recv() => match cmd {
+                Some(Command::Pause) => return BackoffExit::Paused,
+                Some(Command::Reconnect(_)) => return BackoffExit::Reconnect,
+                Some(cmd @ (Command::Resync(_) | Command::ResyncAll)) => defer_command(deferred, cmd),
+                Some(Command::Resume) => {}
+                None => return BackoffExit::Stopped,
+            }
+        }
+    }
+}
+
+/// Queues a command for execution after the next connect, coalescing
+/// duplicates (`ResyncAll` supersedes every per-symbol resync).
+fn defer_command(queue: &mut VecDeque<Command>, cmd: Command) {
+    let redundant = match &cmd {
+        Command::ResyncAll => {
+            queue.clear();
+            false
+        }
+        Command::Resync(sym) => queue.iter().any(|queued| match queued {
+            Command::ResyncAll => true,
+            Command::Resync(other) => other == sym,
+            _ => false,
+        }),
+        _ => false,
+    };
+    if !redundant {
+        queue.push_back(cmd);
+    }
+}
+
+/// Next command to execute: deferred ones first (in arrival order), then live.
+async fn next_command(
+    deferred: &mut VecDeque<Command>,
+    command_rx: &mut mpsc::Receiver<Command>,
+) -> Option<Command> {
+    match deferred.pop_front() {
+        Some(cmd) => Some(cmd),
+        None => command_rx.recv().await,
+    }
+}
+
+/// Returns the `Quarantined` alert delay for a rejection outcome. A cooldown
+/// is not an alert-worthy quarantine: the symbol simply resubscribes after it.
+fn rejection_retry_ms(outcome: RejectionOutcome, now: Instant) -> Option<u64> {
+    match outcome {
+        RejectionOutcome::CoolingDown { .. } => None,
+        RejectionOutcome::Quarantined { until } => Some(
+            until
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        ),
     }
 }
 
@@ -1022,5 +1127,115 @@ fn populate_scratch_levels(raws: &[RawLevel<'_>], out: &mut Vec<PriceLevel>) {
         ) {
             out.push(PriceLevel::new(p, v));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    struct Harness {
+        tx: mpsc::Sender<Command>,
+        task: tokio::task::JoinHandle<(BackoffExit, VecDeque<Command>)>,
+    }
+
+    fn spawn_backoff(backoff: Duration, cancel: CancellationToken) -> Harness {
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(async move {
+            let mut deferred = VecDeque::new();
+            let exit = wait_backoff(backoff, &mut rx, &mut deferred, &cancel).await;
+            (exit, deferred)
+        });
+        Harness { tx, task }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_runs_its_full_duration() {
+        let h = spawn_backoff(Duration::from_secs(4), CancellationToken::new());
+        tokio::time::advance(Duration::from_millis(3999)).await;
+        tokio::task::yield_now().await;
+        assert!(!h.task.is_finished(), "must still be waiting 1ms early");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let (exit, deferred) = h.task.await.unwrap();
+        assert_eq!(exit, BackoffExit::Elapsed);
+        assert!(deferred.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_commands_are_deferred_without_shortening_backoff() {
+        let h = spawn_backoff(Duration::from_secs(4), CancellationToken::new());
+        h.tx.send(Command::Resync(Symbol::from("BTC/USD")))
+            .await
+            .unwrap();
+        h.tx.send(Command::Resync(Symbol::from("BTC/USD")))
+            .await
+            .unwrap();
+        h.tx.send(Command::Resync(Symbol::from("ETH/USD")))
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(3999)).await;
+        tokio::task::yield_now().await;
+        assert!(!h.task.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let (exit, deferred) = h.task.await.unwrap();
+        assert_eq!(exit, BackoffExit::Elapsed);
+        assert_eq!(deferred.len(), 2, "duplicate per-symbol resync coalesced");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resync_all_supersedes_symbol_resyncs() {
+        let h = spawn_backoff(Duration::from_secs(1), CancellationToken::new());
+        h.tx.send(Command::Resync(Symbol::from("BTC/USD")))
+            .await
+            .unwrap();
+        h.tx.send(Command::ResyncAll).await.unwrap();
+        h.tx.send(Command::Resync(Symbol::from("ETH/USD")))
+            .await
+            .unwrap();
+        let (exit, deferred) = h.task.await.unwrap();
+        assert_eq!(exit, BackoffExit::Elapsed);
+        assert_eq!(deferred.len(), 1);
+        assert!(matches!(deferred[0], Command::ResyncAll));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_cuts_backoff_short_and_keeps_deferred_commands() {
+        let h = spawn_backoff(Duration::from_secs(60), CancellationToken::new());
+        h.tx.send(Command::ResyncAll).await.unwrap();
+        h.tx.send(Command::Reconnect("operator".into()))
+            .await
+            .unwrap();
+        let (exit, deferred) = h.task.await.unwrap();
+        assert_eq!(exit, BackoffExit::Reconnect);
+        assert_eq!(deferred.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_parks_and_cancel_stops() {
+        let h = spawn_backoff(Duration::from_secs(60), CancellationToken::new());
+        h.tx.send(Command::Pause).await.unwrap();
+        assert_eq!(h.task.await.unwrap().0, BackoffExit::Paused);
+
+        let cancel = CancellationToken::new();
+        let h = spawn_backoff(Duration::from_secs(60), cancel.clone());
+        cancel.cancel();
+        assert_eq!(h.task.await.unwrap().0, BackoffExit::Stopped);
+    }
+
+    #[tokio::test]
+    async fn deferred_commands_are_served_before_live_ones() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Command::ResyncAll).await.unwrap();
+        let mut deferred = VecDeque::new();
+        deferred.push_back(Command::Resync(Symbol::from("BTC/USD")));
+        assert!(matches!(
+            next_command(&mut deferred, &mut rx).await,
+            Some(Command::Resync(_))
+        ));
+        assert!(matches!(
+            next_command(&mut deferred, &mut rx).await,
+            Some(Command::ResyncAll)
+        ));
     }
 }

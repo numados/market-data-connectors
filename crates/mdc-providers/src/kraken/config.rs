@@ -60,7 +60,18 @@ pub struct KrakenConfig {
     pub checksum_strategy: Option<std::sync::Arc<dyn mdc_core::integrity::ChecksumStrategy>>,
     /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
     pub connection_timeout: Duration,
+    /// Hold applied after the first subscription rejection (default: 5 seconds).
+    pub rejection_cooldown: Duration,
+    /// Consecutive rejections after which a symbol is quarantined (default: 2).
+    pub rejection_escalate_after: u32,
+    /// Optional injected rejection policy, built once per symbol. When unset the
+    /// escalating cooldown-then-quarantine policy above is used.
+    pub rejection_policy: Option<RejectionPolicyFactory>,
 }
+
+/// Builds a fresh per-symbol rejection policy.
+pub type RejectionPolicyFactory =
+    std::sync::Arc<dyn Fn() -> Box<dyn mdc_core::resync::RejectionPolicy> + Send + Sync>;
 
 impl std::fmt::Debug for KrakenConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +85,9 @@ impl std::fmt::Debug for KrakenConfig {
             .field("streams", &self.streams)
             .field("watchdog_ping_after", &self.watchdog_ping_after)
             .field("connection_timeout", &self.connection_timeout)
+            .field("rejection_cooldown", &self.rejection_cooldown)
+            .field("rejection_escalate_after", &self.rejection_escalate_after)
+            .field("rejection_policy", &self.rejection_policy.is_some())
             .field("watchdog_reconnect_after", &self.watchdog_reconnect_after)
             .field("checksum_policy", &self.checksum_policy)
             .field("initial_backoff", &self.initial_backoff)
@@ -106,6 +120,9 @@ impl Default for KrakenConfig {
             run_id: None,
             checksum_strategy: None,
             connection_timeout: Duration::from_secs(10),
+            rejection_cooldown: Duration::from_secs(5),
+            rejection_escalate_after: 2,
+            rejection_policy: None,
         }
     }
 }

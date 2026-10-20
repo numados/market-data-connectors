@@ -9,9 +9,9 @@
 
 use std::time::Duration;
 
-use mdc_core::{BookKind, IntegrityAlert, Symbol};
+use mdc_core::{BookKind, IntegrityAlert, SourceErrorKind, Symbol};
 use mdc_providers::kraken::{KrakenConfig, KrakenConnectorBuilder};
-use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, load_fixture};
+use mdc_testkit::{MockWsServer, RecordedEvent, RecordingSink, WsAction, load_fixture};
 use tokio_util::sync::CancellationToken;
 
 const SNAPSHOT_FIXTURE: &str =
@@ -533,6 +533,132 @@ async fn test_ws_checksumless_update_fails_closed() {
         "Must emit ChecksumMismatch alert for absent checksum"
     );
     assert!(has_resync, "Must emit ResyncStarted alert to recover book");
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+const REJECT_BTC: &str =
+    r#"{"method":"subscribe","success":false,"error":"Subscription rejected","symbol":"BTC/USD"}"#;
+
+/// First rejection cools down and retries; a repeated rejection quarantines with an alert.
+#[tokio::test]
+async fn test_rejection_cools_down_then_repeated_rejection_quarantines() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    ws.push_script(vec![
+        WsAction::WaitClientMessage,
+        WsAction::SendText(REJECT_BTC.to_string()),
+        WsAction::WaitClientMessage,
+        WsAction::WaitClientMessage,
+        WsAction::SendText(REJECT_BTC.to_string()),
+    ]);
+
+    let mut config = KrakenConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url");
+    config.rejection_cooldown = Duration::from_millis(100);
+    config.quarantine_duration = Duration::from_secs(60);
+    config.resubscribe_timeout = Duration::from_secs(60);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = KrakenConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC/USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    let quarantined = sink
+        .wait_for_alert_matching(|a| matches!(a, IntegrityAlert::Quarantined { .. }))
+        .await;
+    assert_eq!(
+        quarantined,
+        IntegrityAlert::Quarantined {
+            retry_in_ms: 60_000
+        }
+    );
+
+    // Cooldown (no quarantine alert), retry via ResyncStarted, then quarantine.
+    assert_eq!(
+        sink.alerts_for("BTC/USD"),
+        vec![
+            IntegrityAlert::ResyncStarted,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::ResyncStarted,
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::Quarantined {
+                retry_in_ms: 60_000
+            },
+        ]
+    );
+
+    // subscribe, then the retry's unsubscribe + subscribe.
+    let methods: Vec<String> = ws
+        .received_messages()
+        .iter()
+        .map(|m| {
+            serde_json::from_str::<serde_json::Value>(m).expect("json")["method"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(methods, vec!["subscribe", "unsubscribe", "subscribe"]);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// A resync requested while the connection is in reconnect backoff is executed
+/// after the reconnect instead of being discarded; the backoff is not shortened.
+#[tokio::test]
+async fn test_resync_during_backoff_executes_after_reconnect() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    // The first connect attempt fails, which puts the connection into backoff.
+    ws.refuse_next_handshakes(1);
+
+    let mut config = KrakenConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url");
+    config.initial_backoff = Duration::from_millis(400);
+    config.max_backoff = Duration::from_millis(400);
+
+    let sink = RecordingSink::new();
+    let (connector, handle) = KrakenConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC/USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_connections(1).await;
+    let refused_at = std::time::Instant::now();
+    // Buffered until the connection reaches its backoff wait; deferred there.
+    handle.request_resync_all().await.expect("resync command");
+
+    ws.wait_for_handshakes(1).await;
+    assert!(
+        refused_at.elapsed() >= Duration::from_millis(350),
+        "operator resync must not shorten the backoff"
+    );
+    ws.wait_for_client_message_matching(|m| m.contains("\"unsubscribe\""))
+        .await;
+
+    // Connect-time ResyncStarted plus the deferred command's ResyncStarted.
+    let started = sink
+        .alerts_for("BTC/USD")
+        .iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
+        .count();
+    assert_eq!(started, 2, "connect-time and deferred resync");
 
     cancel.cancel();
     let _ = runner.await;

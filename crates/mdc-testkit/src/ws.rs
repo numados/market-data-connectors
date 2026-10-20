@@ -41,6 +41,7 @@ pub struct MockWsServer {
     connection_count: Arc<AtomicUsize>,
     ping_count: Arc<AtomicUsize>,
     disconnect_count: Arc<AtomicUsize>,
+    refuse_handshakes: Arc<AtomicUsize>,
     scripts: Arc<Mutex<VecDeque<Vec<WsAction>>>>,
     broadcast_tx: broadcast::Sender<Message>,
     conn_notify: Arc<tokio::sync::Notify>,
@@ -87,6 +88,7 @@ impl MockWsServer {
         let connection_count = Arc::new(AtomicUsize::new(0));
         let ping_count = Arc::new(AtomicUsize::new(0));
         let disconnect_count = Arc::new(AtomicUsize::new(0));
+        let refuse_handshakes = Arc::new(AtomicUsize::new(0));
         let scripts = Arc::new(Mutex::new(VecDeque::new()));
         let (broadcast_tx, _) = broadcast::channel(128);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -102,6 +104,7 @@ impl MockWsServer {
         let server_conns = Arc::clone(&connection_count);
         let server_pings = Arc::clone(&ping_count);
         let server_disconnects = Arc::clone(&disconnect_count);
+        let server_refuse = Arc::clone(&refuse_handshakes);
         let server_scripts = Arc::clone(&scripts);
         let server_broadcast = broadcast_tx.clone();
 
@@ -128,6 +131,15 @@ impl MockWsServer {
 
                         server_conns.fetch_add(1, Ordering::SeqCst);
                         s_conn_notify.notify_waiters();
+
+                        let refused = server_refuse
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok();
+                        if refused {
+                            // Close the socket before the upgrade so the client's connect fails.
+                            drop(stream);
+                            continue;
+                        }
 
                         let paths = Arc::clone(&server_paths);
                         let received = Arc::clone(&server_received);
@@ -271,6 +283,7 @@ impl MockWsServer {
             connection_count,
             ping_count,
             disconnect_count,
+            refuse_handshakes,
             scripts,
             broadcast_tx,
             conn_notify,
@@ -355,6 +368,12 @@ impl MockWsServer {
             }
             notified.await;
         }
+    }
+
+    /// Makes the next `count` accepted TCP connections close before the
+    /// WebSocket upgrade, so client connect attempts fail.
+    pub fn refuse_next_handshakes(&self, count: usize) {
+        self.refuse_handshakes.store(count, Ordering::SeqCst);
     }
 
     /// Returns how many established connections have ended.

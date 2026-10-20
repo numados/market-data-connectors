@@ -44,13 +44,15 @@ pub mod rest_quote;
 
 pub use catalog::{DEFAULT_KRAKEN_CATALOG_ENDPOINT, kraken_catalog_client, parse_kraken_catalog};
 pub use checksum::{ChecksumVerdict, KrakenChecksumBook, LevelParseError, RawLevelOwned};
-pub use config::{KrakenConfig, KrakenStreams};
+pub use config::{KrakenConfig, KrakenStreams, RejectionPolicyFactory};
 pub use connection::{
     build_subscribe_payload, build_unsubscribe_payload, chunk_symbols, run_connection_task,
 };
 pub use connector::{KRAKEN_CAPABILITIES, KrakenConnector, KrakenConnectorBuilder};
 pub use control::{Command, ConnectorHandle, ControlError};
-pub use fsm::{PollOutcome, SnapshotOutcome, SymbolFsm, SyncState, UpdateOutcome};
+pub use fsm::{
+    PollOutcome, RejectionOutcome, SnapshotOutcome, SymbolFsm, SyncState, UpdateOutcome,
+};
 pub use normalize::{normalize_delta, normalize_snapshot, normalize_trade, parse_rfc3339_nanos};
 pub use raw::{
     KrakenBookDataHeader, KrakenConnectionScratch, KrakenDepthSeed, KrakenLevelsSeed, RawAckResult,

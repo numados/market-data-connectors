@@ -2,6 +2,12 @@
 
 use std::time::{Duration, Instant};
 
+use mdc_core::Symbol;
+use mdc_core::resync::{
+    EscalatingRejectionPolicy, RejectionDecision, RejectionPolicy, ResyncDecision, ResyncPolicy,
+    TimeoutQuarantinePolicy,
+};
+
 /// Per-symbol order book synchronization lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
@@ -58,38 +64,107 @@ pub enum PollOutcome {
     QuarantineExpiredTriggerResubscribe,
 }
 
+/// Outcome of recording a subscription rejection for a symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectionOutcome {
+    /// First rejection: retry is allowed again once `until` passes.
+    CoolingDown {
+        /// Instant at which the symbol may be resubscribed.
+        until: Instant,
+    },
+    /// Repeated rejections: the symbol is held in quarantine until `until`.
+    Quarantined {
+        /// Instant until which the symbol remains in quarantine.
+        until: Instant,
+    },
+}
+
 /// Per-symbol synchronization controller.
-#[derive(Debug, Clone)]
+///
+/// The timeout-quarantine policy owns every wait and hold timestamp and the
+/// rejection policy owns escalation history; the controller only tracks
+/// whether the book is synchronized and maps policy decisions to outcomes.
 pub struct SymbolFsm {
-    state: SyncState,
-    timeout: Duration,
-    quarantine: Duration,
+    symbol: Symbol,
+    in_sync: bool,
+    policy: TimeoutQuarantinePolicy,
+    rejection: Box<dyn RejectionPolicy>,
+}
+
+impl std::fmt::Debug for SymbolFsm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SymbolFsm")
+            .field("in_sync", &self.in_sync)
+            .field("state", &self.state())
+            .finish()
+    }
 }
 
 impl SymbolFsm {
-    /// Creates a new `SymbolFsm` starting in `AwaitingSnapshot` with the given timeouts.
+    /// Creates a `SymbolFsm` starting in `AwaitingSnapshot` with the default
+    /// rejection policy (first rejection cools down for `timeout`, the second
+    /// quarantines for `quarantine`).
     pub fn new(started_at: Instant, timeout: Duration, quarantine: Duration) -> Self {
-        Self {
-            state: SyncState::AwaitingSnapshot { started_at },
+        Self::with_rejection_policy(
+            started_at,
             timeout,
             quarantine,
+            Box::new(EscalatingRejectionPolicy::new(timeout, quarantine, 2)),
+        )
+    }
+
+    /// Creates a `SymbolFsm` with an injected rejection policy.
+    pub fn with_rejection_policy(
+        started_at: Instant,
+        timeout: Duration,
+        quarantine: Duration,
+        rejection: Box<dyn RejectionPolicy>,
+    ) -> Self {
+        let symbol = Symbol::from("symbol");
+        let mut policy = TimeoutQuarantinePolicy::new(timeout, quarantine);
+        policy.on_started(&symbol, started_at);
+        Self {
+            symbol,
+            in_sync: false,
+            policy,
+            rejection,
         }
     }
 
-    /// Returns the current synchronization state.
+    fn begin_wait(&mut self, now: Instant) {
+        self.in_sync = false;
+        self.policy.on_started(&self.symbol, now);
+    }
+
+    /// Returns the current synchronization state, derived from the policy.
+    /// A rejection cooldown reports as `Quarantined` until it expires.
     pub fn state(&self) -> SyncState {
-        self.state
+        if self.in_sync {
+            SyncState::InSync
+        } else if let Some(until) = self.policy.quarantined_until(&self.symbol) {
+            SyncState::Quarantined { until }
+        } else if let Some(started_at) = self.policy.awaiting_since(&self.symbol) {
+            SyncState::AwaitingSnapshot { started_at }
+        } else {
+            // Unreachable by construction: every non-synced path records
+            // `on_started`. Fail safe as a fresh wait.
+            SyncState::AwaitingSnapshot {
+                started_at: Instant::now(),
+            }
+        }
     }
 
     /// Returns true if the symbol is in the `InSync` state.
     pub fn is_in_sync(&self) -> bool {
-        matches!(self.state, SyncState::InSync)
+        self.in_sync
     }
 
     /// Handles arrival of an order book snapshot.
     pub fn on_snapshot(&mut self, is_valid_checksum: bool) -> SnapshotOutcome {
         if is_valid_checksum {
-            self.state = SyncState::InSync;
+            self.in_sync = true;
+            self.policy.on_completed(&self.symbol, Instant::now());
+            self.rejection.on_accepted(&self.symbol);
             SnapshotOutcome::Accepted
         } else {
             SnapshotOutcome::RejectedBadChecksum
@@ -104,69 +179,62 @@ impl SymbolFsm {
         calculated: u32,
         now: Instant,
     ) -> UpdateOutcome {
-        match self.state {
-            SyncState::InSync => {
-                if is_valid_checksum {
-                    UpdateOutcome::Accepted
-                } else {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    UpdateOutcome::MismatchTriggerResync {
-                        expected,
-                        calculated,
-                    }
-                }
-            }
-            SyncState::AwaitingSnapshot { .. } | SyncState::Quarantined { .. } => {
-                UpdateOutcome::DroppedNotSynchronized
+        if !self.in_sync {
+            return UpdateOutcome::DroppedNotSynchronized;
+        }
+        if is_valid_checksum {
+            UpdateOutcome::Accepted
+        } else {
+            self.begin_wait(now);
+            UpdateOutcome::MismatchTriggerResync {
+                expected,
+                calculated,
             }
         }
     }
 
     /// Polls periodic timers (resync timeout and quarantine expiry).
     pub fn poll(&mut self, now: Instant) -> PollOutcome {
-        match self.state {
-            SyncState::AwaitingSnapshot { started_at } => {
-                let deadline = started_at.checked_add(self.timeout).unwrap_or(started_at);
-                if now >= deadline {
-                    let until = now.checked_add(self.quarantine).unwrap_or(now);
-                    self.state = SyncState::Quarantined { until };
-                    PollOutcome::TimeoutQuarantined { until }
-                } else {
-                    PollOutcome::None
-                }
-            }
-            SyncState::Quarantined { until } => {
-                if now >= until {
-                    self.state = SyncState::AwaitingSnapshot { started_at: now };
-                    PollOutcome::QuarantineExpiredTriggerResubscribe
-                } else {
-                    PollOutcome::None
-                }
-            }
+        match self.state() {
             SyncState::InSync => PollOutcome::None,
+            SyncState::AwaitingSnapshot { .. } => match self.policy.decide(&self.symbol, now) {
+                ResyncDecision::Quarantine(until) => PollOutcome::TimeoutQuarantined { until },
+                _ => PollOutcome::None,
+            },
+            SyncState::Quarantined { .. } => match self.policy.decide(&self.symbol, now) {
+                ResyncDecision::Proceed => {
+                    self.begin_wait(now);
+                    PollOutcome::QuarantineExpiredTriggerResubscribe
+                }
+                _ => PollOutcome::None,
+            },
         }
     }
 
     /// Requests an explicit resync, transitioning the symbol back to `AwaitingSnapshot`.
     pub fn request_resync(&mut self, now: Instant) {
-        self.state = SyncState::AwaitingSnapshot { started_at: now };
+        self.begin_wait(now);
     }
 
     /// Explicitly resets the symbol (e.g. upon socket reconnect).
     pub fn reset(&mut self, now: Instant) {
-        self.state = SyncState::AwaitingSnapshot { started_at: now };
+        self.begin_wait(now);
     }
 
-    /// Transitions the symbol into quarantine (e.g. upon subscription rejection).
-    pub fn trigger_quarantine(&mut self, now: Instant) -> Instant {
-        let until = now.checked_add(self.quarantine).unwrap_or(now);
-        self.state = SyncState::Quarantined { until };
-        until
-    }
-
-    /// Returns the quarantine duration configured for this symbol.
-    pub fn quarantine_duration(&self) -> Duration {
-        self.quarantine
+    /// Records a venue subscription rejection and holds the symbol as the
+    /// rejection policy decides; the poll loop resubscribes once the hold ends.
+    pub fn on_subscription_rejected(&mut self, now: Instant) -> RejectionOutcome {
+        self.in_sync = false;
+        match self.rejection.on_rejected(&self.symbol, now) {
+            RejectionDecision::Cooldown(until) => {
+                self.policy.hold_until(&self.symbol, until);
+                RejectionOutcome::CoolingDown { until }
+            }
+            RejectionDecision::Quarantine(until) => {
+                self.policy.hold_until(&self.symbol, until);
+                RejectionOutcome::Quarantined { until }
+            }
+        }
     }
 }
 
@@ -269,5 +337,80 @@ mod tests {
         // Snapshot arrives during quarantine -> InSync immediately!
         assert_eq!(fsm.on_snapshot(true), SnapshotOutcome::Accepted);
         assert!(fsm.is_in_sync());
+    }
+
+    #[test]
+    fn test_first_rejection_cools_down_then_retry_is_allowed() {
+        let t0 = Instant::now();
+        let mut fsm = SymbolFsm::with_rejection_policy(
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Box::new(EscalatingRejectionPolicy::new(
+                Duration::from_secs(2),
+                Duration::from_secs(30),
+                2,
+            )),
+        );
+        fsm.on_snapshot(true);
+
+        let until = t0 + Duration::from_secs(2);
+        assert_eq!(
+            fsm.on_subscription_rejected(t0),
+            RejectionOutcome::CoolingDown { until }
+        );
+        assert!(!fsm.is_in_sync());
+        assert_eq!(
+            fsm.on_update(true, 1, 1, t0),
+            UpdateOutcome::DroppedNotSynchronized
+        );
+
+        // Held during the cooldown, resubscribe triggered when it ends.
+        assert_eq!(fsm.poll(t0 + Duration::from_secs(1)), PollOutcome::None);
+        assert_eq!(
+            fsm.poll(until),
+            PollOutcome::QuarantineExpiredTriggerResubscribe
+        );
+        assert!(matches!(fsm.state(), SyncState::AwaitingSnapshot { .. }));
+    }
+
+    #[test]
+    fn test_repeated_rejection_escalates_to_quarantine() {
+        let t0 = Instant::now();
+        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+
+        assert!(matches!(
+            fsm.on_subscription_rejected(t0),
+            RejectionOutcome::CoolingDown { .. }
+        ));
+        let t1 = t0 + Duration::from_secs(6);
+        assert_eq!(
+            fsm.poll(t1),
+            PollOutcome::QuarantineExpiredTriggerResubscribe
+        );
+        assert_eq!(
+            fsm.on_subscription_rejected(t1),
+            RejectionOutcome::Quarantined {
+                until: t1 + Duration::from_secs(30)
+            }
+        );
+        assert_eq!(
+            fsm.state(),
+            SyncState::Quarantined {
+                until: t1 + Duration::from_secs(30)
+            }
+        );
+    }
+
+    #[test]
+    fn test_valid_snapshot_clears_rejection_history() {
+        let t0 = Instant::now();
+        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        fsm.on_subscription_rejected(t0);
+        assert_eq!(fsm.on_snapshot(true), SnapshotOutcome::Accepted);
+        assert!(matches!(
+            fsm.on_subscription_rejected(t0),
+            RejectionOutcome::CoolingDown { .. }
+        ));
     }
 }
