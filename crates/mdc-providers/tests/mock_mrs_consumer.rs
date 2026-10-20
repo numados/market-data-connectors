@@ -147,6 +147,19 @@ async fn test_mrs_consumer_end_to_end_conformance_with_binance() {
     assert!(harness.stats().delivered_events >= 1);
     assert!(harness.stats().available_quotes >= 1);
 
+    // Depth is off: the connector must never touch the snapshot endpoint. The barrier proves
+    // everything broadcast so far was processed before the request log is read.
+    ws.sync_barrier().await;
+    let http_calls = rest
+        .inner()
+        .received_requests()
+        .await
+        .expect("request recording enabled");
+    assert!(
+        http_calls.is_empty(),
+        "depth-off connector must make zero HTTP calls, got {http_calls:?}"
+    );
+
     cancel.cancel();
     let _ = runner.await;
 }

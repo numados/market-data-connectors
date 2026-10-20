@@ -84,6 +84,57 @@ async fn test_rest_rate_limit_429_sets_embargo() {
 }
 
 #[tokio::test]
+async fn test_rest_delayed_429_embargo_runs_from_response_receipt() {
+    const RETRY_AFTER: Duration = Duration::from_secs(2);
+    const SERVER_DELAY: Duration = Duration::from_millis(400);
+
+    let mock = MockRest::start().await;
+    mock.mock_binance_depth_status_delayed(
+        "BTCUSDT",
+        429,
+        Some(RETRY_AFTER.as_secs()),
+        SERVER_DELAY,
+    )
+    .await;
+
+    let embargo = Arc::new(Mutex::new(EmbargoTracker::new()));
+    let client = BinanceRestClient::new(
+        mock.url().expect("valid mock url"),
+        Arc::clone(&embargo),
+        Duration::from_secs(5),
+    )
+    .expect("create client");
+
+    let t0 = Instant::now();
+    let err = client.fetch_depth("BTCUSDT", t0).await.unwrap_err();
+    let returned = Instant::now();
+    assert!(matches!(err, RestError::RateLimited(429)));
+
+    let until = embargo
+        .lock()
+        .expect("embargo lock")
+        .embargo_until()
+        .expect("429 must set an embargo");
+    // The window starts when the 429 is received, not when the request was issued.
+    assert!(
+        until >= t0 + SERVER_DELAY + RETRY_AFTER,
+        "embargo must outlast server delay plus Retry-After, got {:?} from request start",
+        until - t0
+    );
+    assert!(
+        until <= returned + RETRY_AFTER,
+        "embargo must not exceed Retry-After from receipt"
+    );
+
+    // Still embargoed just before the deadline, allowed at it.
+    let err2 = client
+        .fetch_depth("BTCUSDT", until - Duration::from_millis(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err2, RestError::Embargoed(u) if u == until));
+}
+
+#[tokio::test]
 async fn test_rest_rate_limit_418_ip_ban() {
     let mock = MockRest::start().await;
     mock.mock_binance_depth_status("ETHUSDT", 418, Some(60))

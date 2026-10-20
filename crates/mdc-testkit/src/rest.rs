@@ -1,5 +1,7 @@
 //! Mock REST server wrapping WireMock for exchange REST endpoint testing.
 
+use std::time::Duration;
+
 use url::Url;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -69,9 +71,23 @@ impl MockRest {
         status: u16,
         retry_after: Option<u64>,
     ) {
+        self.mock_binance_depth_status_delayed(symbol, status, retry_after, Duration::ZERO)
+            .await;
+    }
+
+    /// Like [`Self::mock_binance_depth_status`], but the server holds the response for `delay`,
+    /// so the client observes the rate limit only after that much wall-clock time.
+    pub async fn mock_binance_depth_status_delayed(
+        &self,
+        symbol: &str,
+        status: u16,
+        retry_after: Option<u64>,
+        delay: Duration,
+    ) {
         let mut response = ResponseTemplate::new(status)
             .set_body_string(r#"{"code":-1003,"msg":"Too much request rate."}"#)
-            .insert_header("x-mbx-used-weight-1m", "6000");
+            .insert_header("x-mbx-used-weight-1m", "6000")
+            .set_delay(delay);
 
         if let Some(ra) = retry_after {
             response = response.insert_header("retry-after", ra.to_string());
