@@ -534,3 +534,86 @@ async fn test_ws_control_pause_resume_cancel() {
     cancel.cancel();
     let _ = runner.await;
 }
+
+fn lost_reasons(sink: &RecordingSink, symbol: &str) -> Vec<DisconnectKind> {
+    sink.alerts_for(symbol)
+        .into_iter()
+        .filter_map(|a| match a {
+            IntegrityAlert::ConnectionLost { reason } => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An operator-requested reconnect must alert once per symbol.
+#[tokio::test]
+async fn test_operator_reconnect_emits_one_connection_lost_per_symbol() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = GateioConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+
+    let sink = RecordingSink::new();
+    let (connector, handle) = GateioConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC_USDT"), Symbol::from("ETH_USDT")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_handshakes(1).await;
+    ws.wait_for_client_messages(1).await;
+    handle.reconnect().await.expect("reconnect command");
+    ws.wait_for_handshakes(2).await;
+
+    for sym in ["BTC_USDT", "ETH_USDT"] {
+        assert_eq!(
+            lost_reasons(&sink, sym),
+            vec![DisconnectKind::VenueRequested],
+            "exactly one alert for {sym}"
+        );
+    }
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// A silence episode still alerts exactly once per symbol (no double emit
+/// from the reconnect tail).
+#[tokio::test]
+async fn test_silence_episode_emits_exactly_one_connection_lost() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = GateioConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+
+    config.watchdog_ping_after = Duration::from_millis(150);
+    config.watchdog_reconnect_after = Duration::from_millis(400);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = GateioConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC_USDT")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_handshakes(1).await;
+    ws.wait_for_client_messages(1).await;
+    // No inbound frames: the watchdog must end the episode.
+    ws.wait_for_handshakes(2).await;
+
+    assert_eq!(
+        lost_reasons(&sink, "BTC_USDT"),
+        vec![DisconnectKind::SilenceTimeout]
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
+}

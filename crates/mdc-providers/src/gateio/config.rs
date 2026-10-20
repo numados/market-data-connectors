@@ -18,6 +18,10 @@ pub struct GateioConfig {
     pub resync_buffer_capacity: usize,
     /// Timeout before triggering a resubscribe retry on resync failure (default: 5s).
     pub resync_timeout: Duration,
+    /// Silence duration after which the connector sends a Ping frame (default: 30s).
+    pub watchdog_ping_after: Duration,
+    /// Silence duration after which the connector forces a reconnect (default: 45s).
+    pub watchdog_reconnect_after: Duration,
     /// WebSocket connect (TCP, TLS, and upgrade handshake) timeout. Default: 10 seconds.
     pub connection_timeout: Duration,
 }
@@ -33,6 +37,8 @@ impl Default for GateioConfig {
             streams: GateioStreams::default(),
             resync_buffer_capacity: 1000,
             resync_timeout: Duration::from_secs(5),
+            watchdog_ping_after: Duration::from_secs(30),
+            watchdog_reconnect_after: Duration::from_secs(45),
             connection_timeout: Duration::from_secs(10),
         }
     }

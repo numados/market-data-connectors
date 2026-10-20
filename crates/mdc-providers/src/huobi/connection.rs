@@ -252,6 +252,23 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Some(Command::Reconnect) => {
                             info!(connection_id, "Operator requested reconnect");
+                            // Alert before arming the episode guard so the
+                            // reconnect window is never silent for consumers.
+                            for (sym, tag) in &symbols {
+                                if sink.emit_alert(
+                                    VenueId::Huobi,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::VenueRequested,
+                                    },
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
+                            }
                             disconnect_emitted = true;
                             break 'frame_loop;
                         }

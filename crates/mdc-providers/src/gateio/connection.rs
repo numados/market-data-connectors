@@ -228,9 +228,15 @@ pub async fn run_connection_task<S: StreamingSink>(
 
         // Gate.io server sends ping every ~30s; timeout if no data frames within 45s
         let now_inst = Instant::now();
-        let mut watchdog =
-            SilenceWatchdog::new(Duration::from_secs(30), Duration::from_secs(45), now_inst);
-        let mut watchdog_ticker = tokio::time::interval(Duration::from_secs(1));
+        let mut watchdog = SilenceWatchdog::new(
+            config.watchdog_ping_after,
+            config.watchdog_reconnect_after,
+            now_inst,
+        );
+        let mut watchdog_ticker = tokio::time::interval(
+            (config.watchdog_ping_after / 2)
+                .clamp(Duration::from_millis(10), Duration::from_secs(1)),
+        );
         watchdog_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut disconnect_emitted = false;
 
@@ -329,6 +335,23 @@ pub async fn run_connection_task<S: StreamingSink>(
                         }
                         Some(Command::Reconnect) => {
                             info!(connection_id, "Operator requested reconnect");
+                            // Alert before arming the episode guard so the
+                            // reconnect window is never silent for consumers.
+                            for (sym, tag) in &symbols {
+                                if sink.emit_alert(
+                                    VenueId::Gateio,
+                                    sym,
+                                    *tag,
+                                    None,
+                                    crate::now_nanos(),
+                                    None,
+                                    IntegrityAlert::ConnectionLost {
+                                        reason: DisconnectKind::VenueRequested,
+                                    },
+                                ).is_err() {
+                                    break 'frame_loop;
+                                }
+                            }
                             disconnect_emitted = true;
                             break 'frame_loop;
                         }
