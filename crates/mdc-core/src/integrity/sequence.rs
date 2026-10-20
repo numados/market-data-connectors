@@ -5,6 +5,132 @@ use crate::model::SequenceRange;
 /// Default number of consecutive frames in lower epoch required to classify a sequence reset.
 pub const DEFAULT_RESET_THRESHOLD: u32 = 2;
 
+/// Default retransmission window, in sequence units behind the accepted tail.
+///
+/// Frames at most this far behind the tail are treated as re-deliveries of
+/// already-accepted data and are never evidence of a counter reset.
+pub const DEFAULT_RETRANSMIT_WINDOW: u64 = 1024;
+
+/// Reset-candidate bookkeeping shared by [`SequenceTracker`] and
+/// [`GlobalSequenceTracker`].
+///
+/// # Reset rule
+///
+/// A frame at or behind the accepted tail is either a re-delivery of data that
+/// was already accepted or the first sign of a venue counter reset. Only the
+/// second may advance a reset candidate. A stale frame is *eligible* (may be
+/// a reset candidate) when it is:
+///
+/// - below the epoch floor (the anchor or first value accepted in this epoch), or
+/// - more than `window` units behind the tail.
+///
+/// Anything else lies inside the span that was already accepted and is ignored
+/// without touching candidate state, so retransmission runs of any length (for
+/// example frames 99 then 100 when 101 is expected) can never reach the reset
+/// threshold on their own.
+///
+/// Eligible frames count as progress when strictly increasing; an exact
+/// duplicate of the previous candidate is ignored; a decrease restarts the
+/// count at one. Once a candidate run is active, a frame equal to the tail
+/// (the *equality edge*: the new epoch climbing to the accepted tail) counts as
+/// further progress. With no active candidate a tail frame is a plain
+/// duplicate. Ambiguity is inherent when the tail is within `window` of the
+/// floor; there only values below the floor can start a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResetDetector {
+    threshold: u32,
+    window: u64,
+    floor: Option<u64>,
+    count: u32,
+    last_candidate: Option<u64>,
+    latched: bool,
+}
+
+impl ResetDetector {
+    const fn new() -> Self {
+        Self {
+            threshold: DEFAULT_RESET_THRESHOLD,
+            window: DEFAULT_RETRANSMIT_WINDOW,
+            floor: None,
+            count: 0,
+            last_candidate: None,
+            latched: false,
+        }
+    }
+
+    const fn with_threshold(mut self, threshold: u32) -> Self {
+        self.threshold = if threshold == 0 { 1 } else { threshold };
+        self
+    }
+
+    const fn with_window(mut self, window: u64) -> Self {
+        self.window = window;
+        self
+    }
+
+    /// Drops candidate state and the reset latch, keeping the epoch floor.
+    fn clear_candidates(&mut self) {
+        self.count = 0;
+        self.last_candidate = None;
+    }
+
+    /// Starts a new epoch whose already-accepted span begins at `floor`.
+    fn anchor(&mut self, floor: u64) {
+        self.floor = Some(floor);
+        self.clear_candidates();
+        self.latched = false;
+    }
+
+    /// Returns to the uninitialized state.
+    fn clear(&mut self) {
+        self.floor = None;
+        self.clear_candidates();
+        self.latched = false;
+    }
+
+    /// Records the first accepted value of an epoch if no floor is set yet.
+    fn anchor_if_unset(&mut self, floor: u64) {
+        if self.floor.is_none() {
+            self.floor = Some(floor);
+        }
+    }
+
+    fn is_eligible(&self, value: u64, tail: u64) -> bool {
+        self.floor.is_some_and(|floor| value < floor) || value.saturating_add(self.window) < tail
+    }
+
+    fn progress(&mut self, value: u64) -> bool {
+        self.count = self.count.saturating_add(1);
+        self.last_candidate = Some(value);
+        if self.count >= self.threshold {
+            self.latched = true;
+        }
+        self.latched
+    }
+
+    /// Observes a frame whose end `value` is at or behind `tail`. Returns
+    /// `true` when the reset threshold has just been reached.
+    fn observe_stale(&mut self, value: u64, tail: u64) -> bool {
+        if value == tail {
+            return match self.last_candidate {
+                Some(prev) if value > prev => self.progress(value),
+                _ => false,
+            };
+        }
+        if !self.is_eligible(value, tail) {
+            return false;
+        }
+        match self.last_candidate {
+            Some(prev) if value == prev => false,
+            Some(prev) if value < prev => {
+                self.count = 0;
+                self.progress(value)
+            }
+            _ => self.progress(value),
+        }
+    }
+}
+
 /// Outcome of checking an incoming sequence range against the current tracker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceCheck {
@@ -39,10 +165,7 @@ pub enum SequenceCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceTracker {
     last: Option<u64>,
-    reset_threshold: u32,
-    reset_count: u32,
-    last_candidate: Option<u64>,
-    is_reset: bool,
+    detector: ResetDetector,
 }
 
 impl Default for SequenceTracker {
@@ -56,38 +179,37 @@ impl SequenceTracker {
     pub const fn new() -> Self {
         Self {
             last: None,
-            reset_threshold: DEFAULT_RESET_THRESHOLD,
-            reset_count: 0,
-            last_candidate: None,
-            is_reset: false,
+            detector: ResetDetector::new(),
         }
     }
 
     /// Configures the consecutive monotonic frame threshold required to classify a sequence reset.
     pub const fn with_reset_threshold(mut self, threshold: u32) -> Self {
-        self.reset_threshold = if threshold == 0 { 1 } else { threshold };
+        self.detector = self.detector.with_threshold(threshold);
+        self
+    }
+
+    /// Configures how far behind the tail a frame may be and still count as a re-delivery.
+    pub const fn with_retransmit_window(mut self, window: u64) -> Self {
+        self.detector = self.detector.with_window(window);
         self
     }
 
     /// Returns `true` if a sequence reset was detected and the tracker is awaiting resynchronization.
     pub const fn is_reset(&self) -> bool {
-        self.is_reset
+        self.detector.latched
     }
 
     /// Anchors the tracker to an authoritative snapshot update ID.
     pub fn reset_to(&mut self, snapshot_last_update_id: u64) {
         self.last = Some(snapshot_last_update_id);
-        self.reset_count = 0;
-        self.last_candidate = None;
-        self.is_reset = false;
+        self.detector.anchor(snapshot_last_update_id);
     }
 
     /// Clears the tracker state, returning to uninitialized (`NotSynchronized`).
     pub fn clear(&mut self) {
         self.last = None;
-        self.reset_count = 0;
-        self.last_candidate = None;
-        self.is_reset = false;
+        self.detector.clear();
     }
 
     /// Returns the current last applied sequence ID, if initialized.
@@ -106,18 +228,15 @@ impl SequenceTracker {
     /// 1. `current == None` -> [`SequenceCheck::NotSynchronized`]
     /// 2. `is_reset == true` -> [`SequenceCheck::OldDataIgnored`] (reset latch active until `reset_to`)
     /// 3. `current == u64::MAX` -> [`SequenceCheck::SequenceExhausted`]
-    /// 4. `range.last < current`:
-    ///    - If strictly monotonic progression in lower numbers reaches threshold -> [`SequenceCheck::SequenceReset`]
-    ///    - If duplicate of candidate (`range.last == candidate.last`) -> [`SequenceCheck::OldDataIgnored`] without advancing candidate count
-    ///    - If non-monotonic progression -> reset count restarted at 1 (or reset if threshold == 1)
-    ///    - Otherwise -> [`SequenceCheck::OldDataIgnored`]
-    /// 5. `range.last == current`:
-    ///    - If lower-epoch candidate active and `range.last > candidate.last` -> equality edge counts as candidate progression (may trigger [`SequenceCheck::SequenceReset`])
-    ///    - Otherwise -> [`SequenceCheck::OldDataIgnored`]
-    /// 6. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
-    /// 7. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last`.
+    /// 4. `range.last <= current` (stale or duplicate data): classified by the shared reset rule
+    ///    (see `ResetDetector`). Re-delivery of already-accepted data never advances a reset
+    ///    candidate; a genuine lower-epoch run reaching the threshold -> [`SequenceCheck::SequenceReset`].
+    ///    The frame itself is never applied: otherwise -> [`SequenceCheck::OldDataIgnored`].
+    /// 5. `range.first > current + 1` -> [`SequenceCheck::GapDetected`]
+    /// 6. Otherwise -> [`SequenceCheck::Valid`], advancing `current` to `range.last` and clearing
+    ///    any reset candidate.
     ///
-    /// Rule 7 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
+    /// Rule 6 deliberately accepts overlapping ranges (`first <= current + 1 <= last`),
     /// which is required by exchange snapshot-reconciliation contracts (e.g. Binance)
     /// where the first delta after snapshot application overlaps with the snapshot's `last_update_id`.
     pub fn check(&mut self, range: SequenceRange) -> SequenceCheck {
@@ -125,7 +244,7 @@ impl SequenceTracker {
             return SequenceCheck::NotSynchronized;
         };
 
-        if self.is_reset {
+        if self.detector.latched {
             return SequenceCheck::OldDataIgnored;
         }
 
@@ -133,62 +252,17 @@ impl SequenceTracker {
             return SequenceCheck::SequenceExhausted;
         }
 
-        if range.last < current {
-            let is_strictly_monotonic = match self.last_candidate {
-                Some(prev) => range.last > prev,
-                None => true,
-            };
-
-            if is_strictly_monotonic {
-                self.reset_count = self.reset_count.saturating_add(1);
-                self.last_candidate = Some(range.last);
-
-                if self.reset_count >= self.reset_threshold {
-                    self.is_reset = true;
-                    return SequenceCheck::SequenceReset {
-                        current,
-                        reset_to: range.first,
-                    };
-                }
-            } else if self.last_candidate == Some(range.last) {
-                return SequenceCheck::OldDataIgnored;
-            } else {
-                self.reset_count = 1;
-                self.last_candidate = Some(range.last);
-                if self.reset_count >= self.reset_threshold {
-                    self.is_reset = true;
-                    return SequenceCheck::SequenceReset {
-                        current,
-                        reset_to: range.first,
-                    };
-                }
-            }
-
-            return SequenceCheck::OldDataIgnored;
-        }
-
-        if range.last == current {
-            if let Some(prev) = self.last_candidate {
-                if range.last > prev {
-                    self.reset_count = self.reset_count.saturating_add(1);
-                    self.last_candidate = Some(range.last);
-
-                    if self.reset_count >= self.reset_threshold {
-                        self.is_reset = true;
-                        return SequenceCheck::SequenceReset {
-                            current,
-                            reset_to: range.first,
-                        };
-                    }
-                } else if prev == range.last {
-                    return SequenceCheck::OldDataIgnored;
-                }
+        if range.last <= current {
+            if self.detector.observe_stale(range.last, current) {
+                return SequenceCheck::SequenceReset {
+                    current,
+                    reset_to: range.first,
+                };
             }
             return SequenceCheck::OldDataIgnored;
         }
 
-        self.reset_count = 0;
-        self.last_candidate = None;
+        self.detector.clear_candidates();
 
         let expected = current.saturating_add(1);
         if range.first > expected {
@@ -237,10 +311,7 @@ pub enum GlobalSequenceCheck {
 pub struct GlobalSequenceTracker {
     next: Option<u64>,
     exhausted: bool,
-    reset_threshold: u32,
-    reset_count: u32,
-    last_candidate: Option<u64>,
-    is_reset: bool,
+    detector: ResetDetector,
 }
 
 impl Default for GlobalSequenceTracker {
@@ -255,31 +326,32 @@ impl GlobalSequenceTracker {
         Self {
             next: None,
             exhausted: false,
-            reset_threshold: DEFAULT_RESET_THRESHOLD,
-            reset_count: 0,
-            last_candidate: None,
-            is_reset: false,
+            detector: ResetDetector::new(),
         }
     }
 
     /// Configures the consecutive monotonic frame threshold required to classify a sequence reset.
     pub const fn with_reset_threshold(mut self, threshold: u32) -> Self {
-        self.reset_threshold = if threshold == 0 { 1 } else { threshold };
+        self.detector = self.detector.with_threshold(threshold);
+        self
+    }
+
+    /// Configures how far behind the tail a frame may be and still count as a re-delivery.
+    pub const fn with_retransmit_window(mut self, window: u64) -> Self {
+        self.detector = self.detector.with_window(window);
         self
     }
 
     /// Returns `true` if a sequence reset was detected and the tracker is awaiting resynchronization.
     pub const fn is_reset(&self) -> bool {
-        self.is_reset
+        self.detector.latched
     }
 
     /// Resets the tracker to an uninitialized state.
     pub fn reset(&mut self) {
         self.next = None;
         self.exhausted = false;
-        self.reset_count = 0;
-        self.last_candidate = None;
-        self.is_reset = false;
+        self.detector.clear();
     }
 
     /// Resets the tracker to an authoritative sequence number, clearing any reset latch
@@ -292,9 +364,7 @@ impl GlobalSequenceTracker {
             self.exhausted = false;
             self.next = Some(seq + 1);
         }
-        self.reset_count = 0;
-        self.last_candidate = None;
-        self.is_reset = false;
+        self.detector.anchor(seq);
     }
 
     /// Returns the expected next sequence number, if initialized and not exhausted.
@@ -307,100 +377,71 @@ impl GlobalSequenceTracker {
         self.exhausted
     }
 
+    fn advance_to(&mut self, n: u64) {
+        if n == u64::MAX {
+            self.exhausted = true;
+            self.next = None;
+        } else {
+            self.next = Some(n + 1);
+        }
+    }
+
     /// Checks an incoming sequence number and advances the tracker accordingly.
     ///
     /// # Progression Rules:
     /// 1. Exhausted (`exhausted == true`) -> [`GlobalSequenceCheck::SequenceExhausted`].
     /// 2. Reset (`is_reset == true`) -> [`GlobalSequenceCheck::OldDataIgnored`] (latched until `reset` or `reset_to`).
-    /// 3. Uninitialized (`next == None`) -> [`GlobalSequenceCheck::First`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
-    /// 4. `n == next`:
-    ///    - If lower-epoch candidate is active and `n > candidate`: counts as candidate progression (may trigger [`GlobalSequenceCheck::SequenceReset`]).
-    ///    - Otherwise: resets candidate tracking and returns [`GlobalSequenceCheck::Valid`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
-    /// 5. `n < next`:
-    ///    - If strictly monotonic progression in lower numbers reaches threshold -> [`GlobalSequenceCheck::SequenceReset`].
-    ///    - If duplicate of previous candidate (`n == candidate`) -> [`GlobalSequenceCheck::OldDataIgnored`] without advancing count.
-    ///    - If non-monotonic progression -> candidate count restarted at 1 (or reset if threshold == 1).
-    ///    - Otherwise -> [`GlobalSequenceCheck::OldDataIgnored`].
-    /// 6. `n > next`: resets candidate tracking and returns [`GlobalSequenceCheck::GapDetected`]. If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
+    /// 3. Uninitialized (`next == None`) -> [`GlobalSequenceCheck::First`]. Anchors the epoch floor at `n`.
+    ///    If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
+    /// 4. `n == next` -> [`GlobalSequenceCheck::Valid`]: the in-order frame ends any lower-epoch
+    ///    candidate run (a stray stale frame followed by live data is not a reset).
+    /// 5. `n < next` (stale or duplicate): classified by the shared reset rule (see `ResetDetector`).
+    ///    Re-delivery of already-accepted data never advances a reset candidate; a genuine
+    ///    lower-epoch run reaching the threshold -> [`GlobalSequenceCheck::SequenceReset`].
+    ///    The equality edge is `n == next - 1` (the accepted tail): with an active candidate run it
+    ///    counts as progress, otherwise it is a duplicate. Otherwise -> [`GlobalSequenceCheck::OldDataIgnored`].
+    /// 6. `n > next`: clears candidate state and returns [`GlobalSequenceCheck::GapDetected`].
+    ///    If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     pub fn check(&mut self, n: u64) -> GlobalSequenceCheck {
         if self.exhausted {
             return GlobalSequenceCheck::SequenceExhausted;
         }
 
-        if self.is_reset {
+        if self.detector.latched {
             return GlobalSequenceCheck::OldDataIgnored;
         }
 
-        match self.next {
-            None => {
-                if n == u64::MAX {
-                    self.exhausted = true;
-                    self.next = None;
-                } else {
-                    self.next = Some(n + 1);
-                }
-                GlobalSequenceCheck::First
+        let Some(expected) = self.next else {
+            self.detector.anchor_if_unset(n);
+            self.advance_to(n);
+            return GlobalSequenceCheck::First;
+        };
+
+        match n.cmp(&expected) {
+            std::cmp::Ordering::Equal => {
+                self.detector.clear_candidates();
+                self.advance_to(n);
+                GlobalSequenceCheck::Valid
             }
-            Some(expected) => match n.cmp(&expected) {
-                std::cmp::Ordering::Equal => {
-                    self.reset_count = 0;
-                    self.last_candidate = None;
-                    if expected == u64::MAX {
-                        self.exhausted = true;
-                        self.next = None;
-                    } else {
-                        self.next = Some(expected + 1);
+            std::cmp::Ordering::Less => {
+                // `expected >= 1`, so the tail never underflows.
+                if self.detector.observe_stale(n, expected - 1) {
+                    GlobalSequenceCheck::SequenceReset {
+                        expected,
+                        reset_to: n,
                     }
-                    GlobalSequenceCheck::Valid
-                }
-                std::cmp::Ordering::Less => {
-                    let is_strictly_monotonic = match self.last_candidate {
-                        Some(prev) => n > prev,
-                        None => true,
-                    };
-
-                    if is_strictly_monotonic {
-                        self.reset_count = self.reset_count.saturating_add(1);
-                        self.last_candidate = Some(n);
-
-                        if self.reset_count >= self.reset_threshold {
-                            self.is_reset = true;
-                            return GlobalSequenceCheck::SequenceReset {
-                                expected,
-                                reset_to: n,
-                            };
-                        }
-                    } else if self.last_candidate == Some(n) {
-                        return GlobalSequenceCheck::OldDataIgnored;
-                    } else {
-                        self.reset_count = 1;
-                        self.last_candidate = Some(n);
-                        if self.reset_count >= self.reset_threshold {
-                            self.is_reset = true;
-                            return GlobalSequenceCheck::SequenceReset {
-                                expected,
-                                reset_to: n,
-                            };
-                        }
-                    }
-
+                } else {
                     GlobalSequenceCheck::OldDataIgnored
                 }
-                std::cmp::Ordering::Greater => {
-                    self.reset_count = 0;
-                    self.last_candidate = None;
-                    if n == u64::MAX {
-                        self.exhausted = true;
-                        self.next = None;
-                    } else {
-                        self.next = Some(n + 1);
-                    }
-                    GlobalSequenceCheck::GapDetected {
-                        expected,
-                        received: n,
-                    }
+            }
+            std::cmp::Ordering::Greater => {
+                self.detector.clear_candidates();
+                self.advance_to(n);
+                GlobalSequenceCheck::GapDetected {
+                    expected,
+                    received: n,
                 }
-            },
+            }
         }
     }
 }
@@ -883,5 +924,106 @@ mod tests {
         assert!(!tracker.is_reset());
         assert_eq!(tracker.next(), Some(100));
         assert_eq!(tracker.check(100), GlobalSequenceCheck::Valid);
+    }
+
+    #[test]
+    fn global_multi_frame_retransmission_never_resets() {
+        let mut tracker = GlobalSequenceTracker::new();
+        assert_eq!(tracker.check(50), GlobalSequenceCheck::First);
+        for n in 51..=100 {
+            assert_eq!(tracker.check(n), GlobalSequenceCheck::Valid);
+        }
+        assert_eq!(tracker.next(), Some(101));
+
+        // Retransmitted run 99, 100 is strictly increasing but already accepted.
+        assert_eq!(tracker.check(99), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(tracker.check(100), GlobalSequenceCheck::OldDataIgnored);
+        assert!(!tracker.is_reset());
+        assert_eq!(tracker.check(101), GlobalSequenceCheck::Valid);
+    }
+
+    #[test]
+    fn symbol_stale_then_tail_duplicate_is_not_progression() {
+        let mut tracker = SequenceTracker::new();
+        tracker.reset_to(50);
+        assert_eq!(
+            tracker.check(SequenceRange::new(51, 100)),
+            SequenceCheck::Valid
+        );
+
+        assert_eq!(
+            tracker.check(SequenceRange::new(99, 99)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert_eq!(
+            tracker.check(SequenceRange::new(100, 100)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert!(!tracker.is_reset());
+    }
+
+    #[test]
+    fn deep_lower_epoch_run_resets_beyond_window_even_above_floor() {
+        // Epoch floor is 0, so only distance from the tail separates replay from reset.
+        let mut tracker = GlobalSequenceTracker::new().with_retransmit_window(10);
+        assert_eq!(tracker.check(0), GlobalSequenceCheck::First);
+        for n in 1..=100 {
+            assert_eq!(tracker.check(n), GlobalSequenceCheck::Valid);
+        }
+        // Within the window: replay.
+        assert_eq!(tracker.check(95), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(tracker.check(96), GlobalSequenceCheck::OldDataIgnored);
+        assert!(!tracker.is_reset());
+        // Beyond the window: counter restart.
+        assert_eq!(tracker.check(3), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(
+            tracker.check(4),
+            GlobalSequenceCheck::SequenceReset {
+                expected: 101,
+                reset_to: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn in_order_frame_ends_a_stray_stale_candidate() {
+        let mut tracker = GlobalSequenceTracker::new();
+        assert_eq!(tracker.check(10_000), GlobalSequenceCheck::First);
+        assert_eq!(tracker.check(5), GlobalSequenceCheck::OldDataIgnored);
+        // The next live frame proves the stale one was stray, not an epoch change.
+        assert_eq!(tracker.check(10_001), GlobalSequenceCheck::Valid);
+        assert_eq!(tracker.check(6), GlobalSequenceCheck::OldDataIgnored);
+        assert!(!tracker.is_reset());
+    }
+
+    #[test]
+    fn trackers_agree_on_equality_edge() {
+        // Per-symbol: tail is `current`; global: tail is `next - 1`.
+        let mut symbol = SequenceTracker::new();
+        symbol.reset_to(100);
+        let mut global = GlobalSequenceTracker::new();
+        assert_eq!(global.check(100), GlobalSequenceCheck::First);
+
+        // Tail frame without an active candidate is a duplicate in both.
+        assert_eq!(
+            symbol.check(SequenceRange::new(100, 100)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert_eq!(global.check(100), GlobalSequenceCheck::OldDataIgnored);
+
+        // With an active lower-epoch candidate it counts as progress in both.
+        assert_eq!(
+            symbol.check(SequenceRange::new(1, 50)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert_eq!(global.check(50), GlobalSequenceCheck::OldDataIgnored);
+        assert!(matches!(
+            symbol.check(SequenceRange::new(51, 100)),
+            SequenceCheck::SequenceReset { .. }
+        ));
+        assert!(matches!(
+            global.check(100),
+            GlobalSequenceCheck::SequenceReset { .. }
+        ));
     }
 }

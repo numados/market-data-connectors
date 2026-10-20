@@ -17,10 +17,11 @@ pub use error::{ArcError, MdcError};
 pub use integrity::clean_token;
 pub use integrity::{
     BitfinexChecksum, ChecksumPolicy, ChecksumStrategy, DEFAULT_RESET_THRESHOLD,
-    EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP, EmbargoTracker,
-    GlobalSequenceCheck, GlobalSequenceTracker, KrakenChecksum, NoChecksum, RawLevelRef,
-    SequenceCheck, SequencePolicy, SequenceRule, SequenceTracker, SilenceWatchdog, SnapshotPermit,
-    WatchdogAction, for_each_cleaned_byte, parse_retry_after, remove_decimal_and_leading_zeros,
+    DEFAULT_RETRANSMIT_WINDOW, EMBARGO_FALLBACK_418, EMBARGO_FALLBACK_429, EMBARGO_SAFETY_CAP,
+    EmbargoTracker, GlobalSequenceCheck, GlobalSequenceTracker, KrakenChecksum, NoChecksum,
+    RawLevelRef, SequenceCheck, SequencePolicy, SequenceRule, SequenceTracker, SilenceWatchdog,
+    SnapshotPermit, WatchdogAction, for_each_cleaned_byte, parse_retry_after,
+    remove_decimal_and_leading_zeros,
 };
 pub use model::*;
 pub use rest_quote::*;

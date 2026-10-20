@@ -324,4 +324,85 @@ proptest! {
             }
         }
     }
+    #[test]
+    fn property_global_retransmit_storm_never_resets(
+        start in 2_000u64..100_000,
+        accepted in 20u64..200,
+        threshold in 2u32..5,
+        picks in proptest::collection::vec(0u64..20, 2..30),
+    ) {
+        use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+
+        let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(threshold);
+        prop_assert_eq!(tracker.check(start), GlobalSequenceCheck::First);
+        for n in start + 1..start + accepted {
+            prop_assert_eq!(tracker.check(n), GlobalSequenceCheck::Valid);
+        }
+        let tail = start + accepted - 1;
+
+        // Any run of re-delivered, already-accepted frames, in any order and
+        // including strictly increasing climbs to the tail.
+        let mut run: Vec<u64> = picks.iter().map(|p| tail - p.min(&(accepted - 1))).collect();
+        run.sort_unstable();
+        for n in run {
+            prop_assert_eq!(tracker.check(n), GlobalSequenceCheck::OldDataIgnored);
+            prop_assert!(!tracker.is_reset(), "retransmission caused a false reset");
+        }
+        prop_assert_eq!(tracker.check(tail + 1), GlobalSequenceCheck::Valid);
+    }
+
+    #[test]
+    fn property_symbol_retransmit_storm_never_resets(
+        anchor in 2_000u64..100_000,
+        accepted in 20u64..200,
+        threshold in 2u32..5,
+        picks in proptest::collection::vec(0u64..20, 2..30),
+    ) {
+        let mut tracker = SequenceTracker::new().with_reset_threshold(threshold);
+        tracker.reset_to(anchor);
+        let tail = anchor + accepted;
+        prop_assert_eq!(
+            tracker.check(SequenceRange::new(anchor + 1, tail)),
+            SequenceCheck::Valid
+        );
+
+        let mut run: Vec<u64> = picks.iter().map(|p| tail - p.min(&(accepted - 1))).collect();
+        run.sort_unstable();
+        for n in run {
+            prop_assert_eq!(
+                tracker.check(SequenceRange::new(n, n)),
+                SequenceCheck::OldDataIgnored
+            );
+            prop_assert!(!tracker.is_reset(), "retransmission caused a false reset");
+        }
+    }
+
+    #[test]
+    fn property_trackers_agree_on_reset_epoch_classification(
+        anchor in 10_000u64..1_000_000,
+        threshold in 1u32..5,
+        start_lower in 1u64..1000,
+        steps in proptest::collection::vec(1u32..20, 5..10),
+    ) {
+        use mdc_core::integrity::{GlobalSequenceCheck, GlobalSequenceTracker};
+
+        let mut symbol = SequenceTracker::new().with_reset_threshold(threshold);
+        symbol.reset_to(anchor);
+        let mut global = GlobalSequenceTracker::new().with_reset_threshold(threshold);
+        prop_assert_eq!(global.check(anchor), GlobalSequenceCheck::First);
+
+        let mut curr = start_lower;
+        for step in steps {
+            let n = curr + step as u64;
+            let s = symbol.check(SequenceRange::new(n, n));
+            let g = global.check(n);
+            prop_assert_eq!(
+                matches!(s, SequenceCheck::SequenceReset { .. }),
+                matches!(g, GlobalSequenceCheck::SequenceReset { .. })
+            );
+            prop_assert_eq!(symbol.is_reset(), global.is_reset());
+            curr = n;
+        }
+    }
+
 }

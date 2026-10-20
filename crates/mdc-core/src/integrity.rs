@@ -16,7 +16,7 @@ pub use embargo::{
     parse_retry_after,
 };
 pub use sequence::{
-    DEFAULT_RESET_THRESHOLD, GlobalSequenceCheck, GlobalSequenceTracker, SequenceCheck,
-    SequencePolicy, SequenceRule, SequenceTracker,
+    DEFAULT_RESET_THRESHOLD, DEFAULT_RETRANSMIT_WINDOW, GlobalSequenceCheck, GlobalSequenceTracker,
+    SequenceCheck, SequencePolicy, SequenceRule, SequenceTracker,
 };
 pub use watchdog::{SilenceWatchdog, WatchdogAction};
