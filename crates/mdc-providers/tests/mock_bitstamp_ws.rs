@@ -10,7 +10,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, Side, Symbol};
+use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, Side, SourceErrorKind, Symbol};
 use mdc_providers::bitstamp::{BitstampConfig, BitstampConnectorBuilder, BitstampStreams};
 use mdc_testkit::{MockRest, MockWsServer, RecordedEvent, RecordingSink, load_fixture};
 use rust_decimal::Decimal;
@@ -590,6 +590,205 @@ async fn test_overflow_discards_in_flight_snapshot_and_requests_fresh_one() {
         .filter(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
         .count();
     assert_eq!(completed, 1);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// Counts the snapshot (REST) requests received so far.
+async fn snapshot_requests(rest: &MockRest) -> usize {
+    rest.inner()
+        .received_requests()
+        .await
+        .expect("request recording enabled")
+        .len()
+}
+
+fn event_summary(events: &[RecordedEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { kind, .. } => Some(format!("{kind:?}")),
+            RecordedEvent::Level { price, .. } => Some(format!("level {price}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Diffs that arrive while the snapshot request is slow are buffered, not published. When the
+/// snapshot lands the stale diff is dropped and the newer ones replay in order after it; one REST
+/// request serves the whole interleaving and nothing already published is superseded.
+#[tokio::test]
+async fn test_delayed_snapshot_interleaving_replays_buffered_diffs_in_order() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
+
+    let snapshot = r#"{"timestamp":"1700000000","microtimestamp":"1700000000100000","bids":[["40000.00","1.0"]],"asks":[["40001.00","1.0"]]}"#;
+    Mock::given(method("GET"))
+        .and(path("/order_book/btcusd/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(snapshot, "application/json")
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(rest.inner())
+        .await;
+
+    let mut config = BitstampConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.rest_url = rest.url().expect("valid rest url");
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = BitstampConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btcusd")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(1).await;
+    rest.wait_for_requests(1).await;
+
+    // While the request is in flight: one diff older than the snapshot, then two newer ones.
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_050_000, "1.00"));
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_200_000, "2.00"));
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_300_000, "3.00"));
+    ws.sync_barrier().await;
+    assert!(
+        sink.events()
+            .iter()
+            .all(|e| !matches!(e, RecordedEvent::BeginBook { .. })),
+        "nothing may be published before the snapshot lands"
+    );
+
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+
+    // A live diff after synchronisation continues the same stream.
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_000_400_000, "4.00"));
+    sink.wait_for_events(sink.len() + 1).await;
+    ws.sync_barrier().await;
+
+    assert_eq!(
+        event_summary(&sink.events()),
+        vec![
+            "Snapshot",
+            "level 40000.00",
+            "level 40001.00",
+            "Delta",
+            "level 2.00",
+            "Delta",
+            "level 3.00",
+            "Delta",
+            "level 4.00",
+        ],
+        "snapshot first, stale diff dropped, buffered diffs replayed in order, then live"
+    );
+    assert_eq!(
+        snapshot_requests(&rest).await,
+        1,
+        "exactly one snapshot request"
+    );
+    let started = sink
+        .alerts()
+        .into_iter()
+        .filter(|a| matches!(a, IntegrityAlert::ResyncStarted))
+        .count();
+    assert_eq!(started, 1, "no second resync episode");
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// An undecodable diff on a synchronised book invalidates it: nothing is published for the bad
+/// frame, a parse error and a resync are announced, and a fresh snapshot restores the stream.
+#[tokio::test]
+async fn test_malformed_diff_invalidates_book_and_resyncs() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let rest = MockRest::start().await;
+
+    let first = r#"{"timestamp":"1700000000","microtimestamp":"1700000000100000","bids":[["40000.00","1.0"]],"asks":[["40001.00","1.0"]]}"#;
+    let second = r#"{"timestamp":"1700000001","microtimestamp":"1700000000900000","bids":[["50000.00","1.0"]],"asks":[["50001.00","1.0"]]}"#;
+    for (body, once) in [(first, true), (second, false)] {
+        let mock = Mock::given(method("GET"))
+            .and(path("/order_book/btcusd/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"));
+        if once {
+            mock.up_to_n_times(1).mount(rest.inner()).await;
+        } else {
+            mock.mount(rest.inner()).await;
+        }
+    }
+
+    let mut config = BitstampConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.rest_url = rest.url().expect("valid rest url");
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = BitstampConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("btcusd")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+    sink.clear();
+
+    let malformed = serde_json::json!({
+        "event": "data",
+        "channel": "diff_order_book_btcusd",
+        "data": {
+            "timestamp": "1700000000",
+            "microtimestamp": "1700000000200000",
+            "bids": [["not-a-price", "1.0"]],
+            "asks": []
+        }
+    })
+    .to_string();
+    let _ = ws.broadcast_text(malformed);
+
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::ResyncCompleted { .. }))
+        .await;
+
+    assert_eq!(
+        sink.alerts(),
+        vec![
+            IntegrityAlert::SourceError {
+                kind: SourceErrorKind::Parse
+            },
+            IntegrityAlert::ResyncStarted,
+            IntegrityAlert::ResyncCompleted {
+                last_update_id: None
+            },
+        ]
+    );
+    assert_eq!(
+        event_summary(&sink.events()),
+        vec!["Snapshot", "level 50000.00", "level 50001.00"],
+        "the malformed diff publishes nothing; recovery comes from the fresh snapshot"
+    );
+    assert_eq!(snapshot_requests(&rest).await, 2, "one re-snapshot");
+
+    // The stream continues from the fresh snapshot.
+    let _ = ws.broadcast_text(bitstamp_diff(1_700_000_001_000_000, "51000.00"));
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Delta,
+                ..
+            }
+        )
+    })
+    .await;
 
     cancel.cancel();
     let _ = runner.await;

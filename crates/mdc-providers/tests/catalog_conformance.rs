@@ -11,19 +11,23 @@
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use mdc_core::catalog::{
     CatalogError, CatalogLimits, CatalogRequest, CatalogScope, DiscoveryCapability,
     InstrumentCatalog, ListingState, MarketFamily, ProviderKind,
 };
 use mdc_providers::binance::{BINANCE_CAPABILITIES, binance_catalog_client};
 use mdc_providers::bitfinex::{BITFINEX_CAPABILITIES, bitfinex_catalog_client};
-use mdc_providers::bitstamp::{BITSTAMP_CAPABILITIES, bitstamp_catalog_client};
+use mdc_providers::bitstamp::{
+    BITSTAMP_CAPABILITIES, BitstampConfig, BitstampConnectorBuilder, bitstamp_catalog_client,
+};
 use mdc_providers::coinbase::{COINBASE_CAPABILITIES, coinbase_catalog_client};
 use mdc_providers::gateio::{GATEIO_CAPABILITIES, gateio_catalog_client};
 use mdc_providers::huobi::{HUOBI_CAPABILITIES, huobi_catalog_client};
 use mdc_providers::kraken::{KRAKEN_CAPABILITIES, kraken_catalog_client};
-use mdc_testkit::MockCatalogServer;
 use mdc_testkit::fixture::load_fixture;
+use mdc_testkit::{MockCatalogServer, MockWsServer, RecordingSink};
 
 const FIXTURES_DIR: &str = "crates/mdc-providers/tests/fixtures/catalog";
 
@@ -349,6 +353,66 @@ async fn test_conformance_bitstamp_catalog() {
 
     assert_eq!(catalog.instruments[1].native_id.as_str(), "ethusd");
     assert_eq!(catalog.instruments[2].native_id.as_str(), "solusd");
+}
+
+/// Symbols taken from the Bitstamp catalog drive the real connector: each catalog subscription
+/// symbol becomes exactly one `diff_order_book_<symbol>` subscribe frame on the wire.
+#[tokio::test]
+async fn test_bitstamp_catalog_symbols_round_trip_into_subscriptions() {
+    let mock = MockCatalogServer::start().await;
+    let body = load_fixture(format!("{FIXTURES_DIR}/bitstamp/complete.json")).unwrap();
+    mock.mock_catalog_ok(ProviderKind::Bitstamp, &body).await;
+    let client = bitstamp_catalog_client()
+        .unwrap()
+        .with_endpoint(&mock.endpoint_for(ProviderKind::Bitstamp))
+        .unwrap();
+    let catalog = client
+        .fetch(&CatalogRequest::spot(ProviderKind::Bitstamp, 47))
+        .await
+        .unwrap();
+
+    let symbols: Vec<mdc_core::Symbol> = catalog
+        .instruments
+        .iter()
+        .map(|i| mdc_core::Symbol::from(i.subscription_symbol.as_ref().unwrap().as_str()))
+        .collect();
+    assert_eq!(symbols.len(), 3);
+
+    let ws = MockWsServer::spawn().await.unwrap();
+    let mut config = BitstampConfig::default();
+    config.ws_url = ws.ws_url().unwrap();
+    let (connector, _handle) = BitstampConnectorBuilder::new(config)
+        .symbols(symbols)
+        .streaming_sink(RecordingSink::new())
+        .build()
+        .unwrap();
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(3).await;
+    let mut channels: Vec<String> = ws
+        .received_messages()
+        .iter()
+        .map(|m| {
+            let v: serde_json::Value = serde_json::from_str(m).unwrap();
+            assert_eq!(v["event"], "bts:subscribe");
+            v["data"]["channel"].as_str().unwrap().to_string()
+        })
+        .collect();
+    channels.sort();
+    assert_eq!(
+        channels,
+        vec![
+            "diff_order_book_btcusd",
+            "diff_order_book_ethusd",
+            "diff_order_book_solusd"
+        ]
+    );
+
+    cancel.cancel();
+    let _ = runner.await;
 }
 
 #[tokio::test]
