@@ -293,6 +293,56 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
     let _ = runner.await;
 }
 
+/// A product that never delivers its first heartbeat is declared silent: the monitor is armed
+/// at subscribe time, so startup silence times out without any heartbeat ever being seen.
+#[tokio::test]
+async fn test_ws_startup_silence_without_any_heartbeat_resubscribes() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    let snap_json = load_fixture(SNAPSHOT_FIXTURE).expect("load snapshot fixture");
+
+    let mut config = CoinbaseConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url").to_string();
+    config.heartbeat_timeout = Duration::from_millis(250);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = CoinbaseConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC-USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(1).await;
+    // Venue order: subscription ack first, then the snapshot.
+    let _ = ws.broadcast_text(r#"{"type":"subscriptions","channels":[]}"#);
+    let _ = ws.broadcast_text(&snap_json);
+
+    // No heartbeat of any kind is ever sent.
+    // Far below the 10s transport watchdog, so only the heartbeat monitor can satisfy it.
+    let timeout = mdc_testkit::within(
+        Duration::from_secs(5),
+        "startup heartbeat silence must be detected",
+        sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::HeartbeatTimeout { .. })),
+    )
+    .await;
+    assert!(matches!(timeout, IntegrityAlert::HeartbeatTimeout { .. }));
+
+    ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD"))
+        .await;
+    let resubscribed = ws.received_messages().iter().any(|m| {
+        serde_json::from_str::<serde_json::Value>(m).is_ok_and(|v| {
+            v["type"] == "subscribe" && v["product_ids"] == serde_json::json!(["BTC-USD"])
+        })
+    });
+    assert!(resubscribed, "silent product must be resubscribed");
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
 #[tokio::test]
 async fn test_ws_heartbeat_sequence_jump_resubscribes() {
     let ws = MockWsServer::spawn().await.expect("spawn mock ws");

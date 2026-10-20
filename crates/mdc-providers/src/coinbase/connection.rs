@@ -510,6 +510,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                                         if let Some(fsm) = fsms.get_mut(sym) {
                                             fsm.on_snapshot();
                                             heartbeat_monitor.reset(sym);
+                                            if config.streams.heartbeat {
+                                                heartbeat_monitor.arm(sym.clone(), now);
+                                            }
 
                                             let tag = *tag_map.get(sym).unwrap_or(&0);
                                             let ctx = sink.next_context(
