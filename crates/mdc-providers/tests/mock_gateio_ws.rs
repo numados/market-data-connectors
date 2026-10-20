@@ -343,6 +343,120 @@ async fn test_ws_gap_injection_triggers_resubscribe() {
     let _ = runner.await;
 }
 
+fn obu_frame(first: Option<u64>, last: u64, bid: &str, full: bool) -> String {
+    let mut result = serde_json::json!({
+        "t": 1700000000000_i64 + last as i64,
+        "s": "ob.BTC_USDT.400",
+        "u": last,
+        "b": [[bid, "0.1"]],
+        "a": []
+    });
+    if let Some(first) = first {
+        result["U"] = serde_json::json!(first);
+    }
+    if full {
+        result["full"] = serde_json::json!(true);
+        result["a"] = serde_json::json!([["50001", "0.1"]]);
+    }
+    serde_json::json!({
+        "time": 1700000000,
+        "channel": "spot.obu",
+        "event": "update",
+        "result": result
+    })
+    .to_string()
+}
+
+/// Overflowing the resync buffer while waiting for a snapshot restarts the resync in place:
+/// buffered deltas are discarded, the book is resubscribed, and the fresh snapshot recovers the
+/// stream without any stale buffered delta leaking into it.
+#[tokio::test]
+async fn test_buffer_overflow_resubscribes_and_recovers() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+
+    let mut config = GateioConfig::default();
+    config.ws_url = ws.ws_url().expect("ws url");
+    config.resync_buffer_capacity = 1;
+    config.resync_timeout = Duration::from_millis(50);
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = GateioConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC_USDT")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    ws.wait_for_client_messages(1).await;
+    let subscribed = ws.received_messages().len();
+
+    // Capacity 1: the first delta is buffered, the second overflows it.
+    let _ = ws.broadcast_text(obu_frame(Some(101), 102, "49000", false));
+    let _ = ws.broadcast_text(obu_frame(Some(103), 104, "49001", false));
+
+    // Connect-time ResyncStarted plus the overflow-triggered one.
+    sink.wait_for_alerts_for("BTC_USDT", 2).await;
+    assert_eq!(
+        sink.alerts_for("BTC_USDT"),
+        vec![IntegrityAlert::ResyncStarted, IntegrityAlert::ResyncStarted]
+    );
+    ws.wait_for_client_messages(subscribed + 2).await;
+    let resubscribe: Vec<String> = ws.received_messages()[subscribed..]
+        .iter()
+        .map(|m| {
+            let v: serde_json::Value = serde_json::from_str(m).expect("json");
+            assert_eq!(v["channel"], "spot.obu");
+            v["event"].as_str().unwrap_or_default().to_string()
+        })
+        .collect();
+    assert_eq!(resubscribe, vec!["unsubscribe", "subscribe"]);
+    assert!(
+        sink.events()
+            .iter()
+            .all(|e| !matches!(e, RecordedEvent::BeginBook { .. })),
+        "buffered deltas must not be published"
+    );
+
+    // Fresh snapshot recovers; the stream then continues contiguously.
+    let _ = ws.broadcast_text(obu_frame(None, 300, "50000", true));
+    sink.wait_for_alert_matching(|a| {
+        matches!(
+            a,
+            IntegrityAlert::ResyncCompleted {
+                last_update_id: Some(300)
+            }
+        )
+    })
+    .await;
+    let _ = ws.broadcast_text(obu_frame(Some(301), 302, "50002", false));
+    sink.wait_for_event_matching(|e| {
+        matches!(
+            e,
+            RecordedEvent::BeginBook {
+                kind: BookKind::Delta,
+                ..
+            }
+        )
+    })
+    .await;
+
+    let kinds: Vec<BookKind> = sink
+        .events()
+        .into_iter()
+        .filter_map(|e| match e {
+            RecordedEvent::BeginBook { kind, .. } => Some(kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, vec![BookKind::Snapshot, BookKind::Delta]);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
 #[tokio::test]
 async fn test_ws_one_sided_updates() {
     let ws = MockWsServer::spawn().await.expect("spawn mock ws");
