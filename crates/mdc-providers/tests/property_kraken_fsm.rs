@@ -9,6 +9,7 @@
 
 use std::time::{Duration, Instant};
 
+use mdc_core::Symbol;
 use mdc_providers::kraken::fsm::{
     PollOutcome, SnapshotOutcome, SymbolFsm, SyncState, UpdateOutcome,
 };
@@ -144,6 +145,7 @@ impl StateMachineTest for FsmStateMachineTest {
     ) -> Self::SystemUnderTest {
         let base_instant = Instant::now();
         let fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
             base_instant,
             Duration::from_millis(RESYNC_TIMEOUT_MS),
             Duration::from_millis(QUARANTINE_MS),

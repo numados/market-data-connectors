@@ -101,11 +101,17 @@ impl std::fmt::Debug for SymbolFsm {
 }
 
 impl SymbolFsm {
-    /// Creates a `SymbolFsm` starting in `AwaitingSnapshot` with the default
-    /// rejection policy (first rejection cools down for `timeout`, the second
-    /// quarantines for `quarantine`).
-    pub fn new(started_at: Instant, timeout: Duration, quarantine: Duration) -> Self {
+    /// Creates a `SymbolFsm` for `symbol` starting in `AwaitingSnapshot` with the
+    /// default rejection policy (first rejection cools down for `timeout`, the
+    /// second quarantines for `quarantine`).
+    pub fn new(
+        symbol: Symbol,
+        started_at: Instant,
+        timeout: Duration,
+        quarantine: Duration,
+    ) -> Self {
         Self::with_rejection_policy(
+            symbol,
             started_at,
             timeout,
             quarantine,
@@ -113,14 +119,15 @@ impl SymbolFsm {
         )
     }
 
-    /// Creates a `SymbolFsm` with an injected rejection policy.
+    /// Creates a `SymbolFsm` for `symbol` with an injected rejection policy.
+    /// The policy observes `symbol` in every callback.
     pub fn with_rejection_policy(
+        symbol: Symbol,
         started_at: Instant,
         timeout: Duration,
         quarantine: Duration,
         rejection: Box<dyn RejectionPolicy>,
     ) -> Self {
-        let symbol = Symbol::from("symbol");
         let mut policy = TimeoutQuarantinePolicy::new(timeout, quarantine);
         policy.on_started(&symbol, started_at);
         Self {
@@ -246,7 +253,12 @@ mod tests {
     #[test]
     fn test_fsm_happy_path() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
         assert!(matches!(fsm.state(), SyncState::AwaitingSnapshot { .. }));
 
         // Updates while awaiting snapshot are dropped
@@ -273,7 +285,12 @@ mod tests {
     #[test]
     fn test_fsm_checksum_mismatch_triggers_resync() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
         fsm.on_snapshot(true);
         assert!(fsm.is_in_sync());
 
@@ -295,7 +312,12 @@ mod tests {
     #[test]
     fn test_fsm_timeout_and_quarantine_lifecycle() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
 
         // Poll at t0 + 2s -> None
         assert_eq!(fsm.poll(t0 + Duration::from_secs(2)), PollOutcome::None);
@@ -328,7 +350,12 @@ mod tests {
     #[test]
     fn test_fsm_valid_snapshot_lifts_quarantine_early() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
 
         // Timeout into quarantine
         fsm.poll(t0 + Duration::from_secs(5));
@@ -343,6 +370,7 @@ mod tests {
     fn test_first_rejection_cools_down_then_retry_is_allowed() {
         let t0 = Instant::now();
         let mut fsm = SymbolFsm::with_rejection_policy(
+            Symbol::from("BTC/USD"),
             t0,
             Duration::from_secs(5),
             Duration::from_secs(30),
@@ -377,7 +405,12 @@ mod tests {
     #[test]
     fn test_repeated_rejection_escalates_to_quarantine() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
 
         assert!(matches!(
             fsm.on_subscription_rejected(t0),
@@ -405,7 +438,12 @@ mod tests {
     #[test]
     fn test_valid_snapshot_clears_rejection_history() {
         let t0 = Instant::now();
-        let mut fsm = SymbolFsm::new(t0, Duration::from_secs(5), Duration::from_secs(30));
+        let mut fsm = SymbolFsm::new(
+            Symbol::from("BTC/USD"),
+            t0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
         fsm.on_subscription_rejected(t0);
         assert_eq!(fsm.on_snapshot(true), SnapshotOutcome::Accepted);
         assert!(matches!(

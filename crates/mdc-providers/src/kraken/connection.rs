@@ -202,6 +202,7 @@ pub async fn run_connection_task<S: StreamingSink>(
             fsms.insert(
                 sym.clone(),
                 SymbolFsm::with_rejection_policy(
+                    sym.clone(),
                     now,
                     config.resubscribe_timeout,
                     config.quarantine_duration,

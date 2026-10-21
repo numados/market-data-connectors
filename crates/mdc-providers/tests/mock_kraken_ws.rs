@@ -8,8 +8,10 @@
 //! Level 4 Mock WebSocket integration tests for Kraken WebSocket v2 connector.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use mdc_core::resync::{EscalatingRejectionPolicy, RejectionDecision, RejectionPolicy};
 use mdc_core::{BookKind, IntegrityAlert, Side, SourceErrorKind, Symbol};
 use mdc_providers::kraken::raw::RawMessage;
 use mdc_providers::kraken::{KrakenChecksumBook, KrakenConfig, KrakenConnectorBuilder};
@@ -604,6 +606,82 @@ async fn test_rejection_cools_down_then_repeated_rejection_quarantines() {
         })
         .collect();
     assert_eq!(methods, vec!["subscribe", "unsubscribe", "subscribe"]);
+
+    cancel.cancel();
+    let _ = runner.await;
+}
+
+/// Delegates to the escalating policy and records which symbol each callback observed.
+struct RecordingRejectionPolicy {
+    inner: EscalatingRejectionPolicy,
+    seen: Arc<Mutex<Vec<(&'static str, Symbol)>>>,
+}
+
+impl RejectionPolicy for RecordingRejectionPolicy {
+    fn on_rejected(&mut self, symbol: &Symbol, now: Instant) -> RejectionDecision {
+        self.seen.lock().unwrap().push(("rejected", symbol.clone()));
+        self.inner.on_rejected(symbol, now)
+    }
+
+    fn on_accepted(&mut self, symbol: &Symbol) {
+        self.seen.lock().unwrap().push(("accepted", symbol.clone()));
+        self.inner.on_accepted(symbol);
+    }
+}
+
+/// An injected, symbol-aware rejection policy must see the real subscribed symbol for the
+/// cooldown and the quarantine decision, not a placeholder.
+#[tokio::test]
+async fn test_injected_rejection_policy_observes_the_subscribed_symbol() {
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    ws.push_script(vec![
+        WsAction::WaitClientMessage,
+        WsAction::SendText(REJECT_BTC.to_string()),
+        WsAction::WaitClientMessage,
+        WsAction::WaitClientMessage,
+        WsAction::SendText(REJECT_BTC.to_string()),
+    ]);
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut config = KrakenConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url");
+    config.quarantine_duration = Duration::from_secs(60);
+    config.resubscribe_timeout = Duration::from_secs(60);
+    let factory_seen = Arc::clone(&seen);
+    config.rejection_policy = Some(Arc::new(move || {
+        Box::new(RecordingRejectionPolicy {
+            inner: EscalatingRejectionPolicy::new(
+                Duration::from_millis(100),
+                Duration::from_secs(60),
+                2,
+            ),
+            seen: Arc::clone(&factory_seen),
+        })
+    }));
+
+    let sink = RecordingSink::new();
+    let (connector, _handle) = KrakenConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTC/USD")])
+        .streaming_sink(sink.clone())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    sink.wait_for_alert_matching(|a| matches!(a, IntegrityAlert::Quarantined { .. }))
+        .await;
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("rejected", Symbol::from("BTC/USD")),
+            ("rejected", Symbol::from("BTC/USD")),
+        ],
+        "cooldown and quarantine decisions must observe the real symbol"
+    );
 
     cancel.cancel();
     let _ = runner.await;
