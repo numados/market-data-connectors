@@ -4,7 +4,7 @@
 //! The runner is venue-agnostic. Everything wire-specific lives in a [`VenueScript`]: the
 //! frames that synchronize a book, one live data frame, and the optional fault frames. The
 //! runner replays them through [`MockWsServer`] and judges the connector only by the events its
-//! sink recorded (see [`validate`](super::validate)).
+//! sink recorded (see [`validate`]).
 
 use std::cell::Cell;
 use std::future::Future;
