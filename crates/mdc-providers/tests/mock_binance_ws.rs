@@ -7,11 +7,13 @@
 
 //! Level 4 Mock WebSocket integration tests for Binance connector.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mdc_core::{BookKind, DisconnectKind, IntegrityAlert, Symbol};
 use mdc_providers::binance::{BinanceConfig, BinanceConnectorBuilder};
-use mdc_testkit::{MockRest, MockWsServer, RecordedEvent, RecordingSink, WsAction, load_fixture};
+use mdc_testkit::{
+    MockRest, MockWsServer, RecordedEvent, RecordingSink, WsAction, load_fixture, within,
+};
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -395,4 +397,60 @@ async fn test_handle_command_reaches_every_bucket() {
 
     cancel.cancel();
     let _ = runner.await;
+}
+
+/// Protects the call-site conversion from the 1-based reconnect counter to the 0-based attempt
+/// index: with a handshake that always fails and `initial != max`, the first retry waits
+/// exactly `initial` and the second `2 * initial` (a call site passing the raw counter would
+/// wait `2 * initial` and `4 * initial`).
+#[tokio::test]
+async fn test_failed_handshake_retries_wait_initial_then_double() {
+    const INITIAL: Duration = Duration::from_millis(300);
+
+    let ws = MockWsServer::spawn().await.expect("spawn mock ws");
+    ws.refuse_next_handshakes(usize::MAX);
+
+    let mut config = BinanceConfig::default();
+    config.ws_base_url = ws.ws_url().expect("ws url");
+    config.initial_backoff = INITIAL;
+    config.max_backoff = Duration::from_secs(10);
+
+    let (connector, _handle) = BinanceConnectorBuilder::new(config)
+        .symbols(vec![Symbol::from("BTCUSDT")])
+        .streaming_sink(RecordingSink::new())
+        .build()
+        .expect("build connector");
+
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.child_token();
+    let runner = tokio::spawn(async move { connector.run(cancel_child).await });
+
+    // Observe when each connection attempt reaches the server.
+    let mut attempts = Vec::new();
+    for target in 1..=3 {
+        within(Duration::from_secs(10), "connection attempt", async {
+            while ws.connection_count() < target {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        attempts.push(Instant::now());
+    }
+    cancel.cancel();
+    let _ = runner.await;
+
+    let first = attempts[1] - attempts[0];
+    let second = attempts[2] - attempts[1];
+    // Bounds tolerate poll-timestamp jitter but sit well inside the gap to the delay a wrong
+    // index would produce.
+    const JITTER: Duration = Duration::from_millis(30);
+    assert!(
+        first + JITTER >= INITIAL && first < INITIAL * 2 - Duration::from_millis(50),
+        "first retry must wait initial ({INITIAL:?}), waited {first:?}"
+    );
+    assert!(
+        second + JITTER >= INITIAL * 2 && second < INITIAL * 4 - Duration::from_millis(100),
+        "second retry must wait 2x initial ({:?}), waited {second:?}",
+        INITIAL * 2
+    );
 }
