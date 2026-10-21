@@ -1,10 +1,13 @@
 //! Mock REST server wrapping WireMock for exchange REST endpoint testing.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use url::Url;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+use crate::barrier::BARRIER_TIMEOUT;
 
 /// Mock REST server for exchange snapshot and metadata testing.
 pub struct MockRest {
@@ -35,18 +38,36 @@ impl MockRest {
 
     /// Waits until the server has received at least `count` requests and
     /// returns the total received so far.
+    ///
+    /// Panics after [`BARRIER_TIMEOUT`] (reporting how many requests did arrive)
+    /// instead of hanging the suite.
     pub async fn wait_for_requests(&self, count: usize) -> usize {
-        loop {
-            let received = self
-                .server
-                .received_requests()
-                .await
-                .map_or(0, |requests| requests.len());
-            if received >= count {
-                return received;
+        self.wait_for_requests_within(count, BARRIER_TIMEOUT).await
+    }
+
+    /// [`Self::wait_for_requests`] with an explicit bound.
+    pub async fn wait_for_requests_within(&self, count: usize, bound: Duration) -> usize {
+        let received = AtomicUsize::new(0);
+        let wait = async {
+            loop {
+                let seen = self
+                    .server
+                    .received_requests()
+                    .await
+                    .map_or(0, |requests| requests.len());
+                received.store(seen, Ordering::Relaxed);
+                if seen >= count {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        };
+        match tokio::time::timeout(bound, wait).await {
+            Ok(seen) => seen,
+            Err(_) => panic!(
+                "timed out after {bound:?} waiting for {count} REST request(s); received {}",
+                received.load(Ordering::Relaxed)
+            ),
         }
     }
 
@@ -98,6 +119,19 @@ impl MockRest {
             .and(query_param("symbol", symbol))
             .respond_with(response)
             .mount(&self.server)
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[should_panic(expected = "received 0")]
+    async fn wait_for_requests_fails_instead_of_hanging() {
+        let rest = MockRest::start().await;
+        rest.wait_for_requests_within(1, Duration::from_millis(50))
             .await;
     }
 }
