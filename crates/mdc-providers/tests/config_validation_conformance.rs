@@ -215,10 +215,41 @@ fn bitfinex_delegates_shared_rules() {
         expected_empty_symbols()
     );
 
-    // Depth: both the builder setter and `build` use the shared set validator.
+    // Depth: the exported validator uses the shared set validator; the legacy setter maps
+    // that rejection back to `ConfigError` (see `bitfinex_public_config_error_api_is_stable`).
     let expected_depth = message(config::validate_depth_in_set(50, &BOOK_DEPTHS, "Bitfinex"));
     assert_eq!(
-        err(BitfinexConnector::builder().orderbook_depth(50)),
+        message(mdc_providers::bitfinex::validate_book_depth(50)),
         expected_depth
+    );
+}
+
+/// Compile-time and behavioural guard for the legacy public Bitfinex API: the exported
+/// `ConfigError`, `orderbook_depth -> Result<Self, ConfigError>` and
+/// `BitfinexConfig::validate -> Result<(), ConfigError>`.
+#[cfg(feature = "bitfinex")]
+#[test]
+fn bitfinex_public_config_error_api_is_stable() {
+    use mdc_providers::bitfinex::{
+        BitfinexConfig, BitfinexConnector, BitfinexConnectorBuilder, ConfigError,
+    };
+
+    let rejected: Result<BitfinexConnectorBuilder, ConfigError> =
+        BitfinexConnector::builder().orderbook_depth(50);
+    match rejected {
+        Err(ConfigError::InvalidDepth { depth }) => assert_eq!(depth, 50),
+        other => panic!("expected InvalidDepth, got {:?}", other.map(|_| ())),
+    }
+    assert!(BitfinexConnector::builder().orderbook_depth(250).is_ok());
+
+    let validated: Result<(), ConfigError> = BitfinexConfig::default().validate();
+    assert_eq!(validated, Err(ConfigError::EmptySymbols));
+
+    let mut config = BitfinexConfig::default();
+    config.symbols.push(Symbol::from("tBTCUSD"));
+    config.orderbook_depth = 7;
+    assert_eq!(
+        config.validate(),
+        Err(ConfigError::InvalidDepth { depth: 7 })
     );
 }

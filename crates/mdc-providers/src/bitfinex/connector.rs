@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::bitfinex::catalog::DEFAULT_BITFINEX_CATALOG_ENDPOINT;
-use crate::bitfinex::config::{BitfinexConfig, validate_book_depth};
+use crate::bitfinex::config::{BitfinexConfig, ConfigError, validate_book_depth};
 use crate::bitfinex::connection::run_connection_loop;
 use crate::bitfinex::control::BitfinexHandle;
 
@@ -109,8 +109,8 @@ impl BitfinexConnectorBuilder {
     }
 
     /// Sets the requested order book depth: 1, 25, 100, or 250.
-    pub fn orderbook_depth(mut self, depth: usize) -> Result<Self, MdcError> {
-        validate_book_depth(depth)?;
+    pub fn orderbook_depth(mut self, depth: usize) -> Result<Self, ConfigError> {
+        validate_book_depth(depth).map_err(|_| ConfigError::InvalidDepth { depth })?;
         self.config.orderbook_depth = depth;
         Ok(self)
     }
@@ -153,7 +153,7 @@ impl BitfinexConnectorBuilder {
 
     /// Validates configuration and returns a configured [`BitfinexConnector`].
     pub fn build(self) -> Result<BitfinexConnector, MdcError> {
-        self.config.validate()?;
+        self.config.validate_shared()?;
         Ok(BitfinexConnector {
             config: self.config,
         })

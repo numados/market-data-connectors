@@ -5,6 +5,25 @@ use std::time::Duration;
 
 use mdc_core::MdcError;
 use mdc_core::model::{RunId, Symbol, SymbolTag};
+use thiserror::Error;
+
+/// Error returned when constructing or validating a `BitfinexConfig`.
+///
+/// The rules themselves are evaluated by the shared validators in
+/// [`crate::config`]; a shared rejection is mapped back to the variant of the
+/// rule that failed.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    /// No symbols provided to the connector.
+    #[error("at least one symbol must be configured for Bitfinex")]
+    EmptySymbols,
+    /// Invalid order book depth length requested.
+    #[error("invalid order book depth {depth}: Bitfinex allows 1, 25, 100, or 250")]
+    InvalidDepth {
+        /// The invalid depth requested.
+        depth: usize,
+    },
+}
 
 /// Order book depths accepted by Bitfinex (`len` parameter of the book channel).
 pub const BOOK_DEPTHS: [usize; 4] = [1, 25, 100, 250];
@@ -79,10 +98,28 @@ impl Default for BitfinexConfig {
 }
 
 impl BitfinexConfig {
-    /// Validates configuration parameters through the shared validators.
-    pub fn validate(&self) -> Result<(), MdcError> {
-        crate::config::validate_symbol_count(self.symbols.len())?;
-        validate_book_depth(self.orderbook_depth)
+    /// Validates configuration parameters, mapping a shared rejection to its [`ConfigError`].
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.check().map_err(|(legacy, _)| legacy)
+    }
+
+    /// Validates configuration parameters, surfacing the shared validator's rejection.
+    pub(crate) fn validate_shared(&self) -> Result<(), MdcError> {
+        self.check().map_err(|(_, shared)| shared)
+    }
+
+    /// Single owner of the rule list; a failure pairs the legacy variant with the shared rejection.
+    fn check(&self) -> Result<(), (ConfigError, MdcError)> {
+        crate::config::validate_symbol_count(self.symbols.len())
+            .map_err(|shared| (ConfigError::EmptySymbols, shared))?;
+        validate_book_depth(self.orderbook_depth).map_err(|shared| {
+            (
+                ConfigError::InvalidDepth {
+                    depth: self.orderbook_depth,
+                },
+                shared,
+            )
+        })
     }
 }
 
