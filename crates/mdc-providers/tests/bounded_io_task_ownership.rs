@@ -119,10 +119,13 @@ async fn test_token_cancellation_aborts_inflight_snapshot_request() {
     cancel.cancel();
 
     // The runner must abort promptly, far under the 3-second REST delay
-    let run_res = tokio::time::timeout(Duration::from_millis(500), runner).await;
+    let joined = tokio::time::timeout(Duration::from_millis(500), runner)
+        .await
+        .expect("Connector did not abort promptly on cancellation");
+    let outcome = joined.expect("connector task must not panic");
     assert!(
-        run_res.is_ok(),
-        "Connector did not abort promptly on cancellation"
+        outcome.is_ok(),
+        "cancellation must end the run cleanly: {outcome:?}"
     );
     assert!(start.elapsed() < Duration::from_secs(2));
 }
@@ -196,7 +199,14 @@ async fn test_duplicate_snapshot_triggers_coalesce_to_one_http_request() {
     rest.inner().verify().await;
 
     cancel.cancel();
-    let _ = runner.await;
+    let outcome = tokio::time::timeout(Duration::from_secs(5), runner)
+        .await
+        .expect("shutdown must complete promptly")
+        .expect("connector task must not panic");
+    assert!(
+        outcome.is_ok(),
+        "cancellation must end the run cleanly: {outcome:?}"
+    );
 }
 
 #[tokio::test]
