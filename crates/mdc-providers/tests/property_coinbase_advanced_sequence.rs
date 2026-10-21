@@ -211,7 +211,7 @@ proptest! {
 
     #[test]
     fn property_tracker_equality_edge_and_epoch_recovery(
-        start_seq in 100u64..10_000,
+        start_seq in 100_000u64..1_000_000,
         threshold in 2u32..5,
     ) {
         let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(threshold);

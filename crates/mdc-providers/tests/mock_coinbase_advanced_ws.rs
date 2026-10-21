@@ -1125,7 +1125,7 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
         "channel": "l2_data",
         "client_id": "",
         "timestamp": "2023-02-09T20:32:50.000000000Z",
-        "sequence_num": 100,
+        "sequence_num": 100000,
         "events": [
             {
                 "type": "snapshot",
@@ -1241,7 +1241,7 @@ async fn test_sequence_reset_recovery_one_alert_per_episode() {
             matches!(
                 a,
                 IntegrityAlert::GapDetected {
-                    expected: 101,
+                    expected: 100_001,
                     received: 11
                 }
             )

@@ -219,7 +219,7 @@ proptest! {
 
     #[test]
     fn property_equality_edge_yields_reset_not_silent_continuity(
-        anchor in 100u64..10_000,
+        anchor in 100_000u64..1_000_000,
         threshold in 2u32..5,
     ) {
         let mut tracker = SequenceTracker::new().with_reset_threshold(threshold);

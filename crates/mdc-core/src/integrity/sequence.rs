@@ -19,28 +19,35 @@ pub const DEFAULT_RETRANSMIT_WINDOW: u64 = 1024;
 /// A frame at or behind the accepted tail is either a re-delivery of data that
 /// was already accepted or the first sign of a venue counter reset. Only the
 /// second may advance a reset candidate. A stale frame is *eligible* (may be
-/// a reset candidate) when it is:
+/// a reset candidate) only when it is more than `window` units behind the
+/// tail, i.e. `value + window < tail`. Anything closer to the tail is treated
+/// as a re-delivery and ignored without touching candidate state. In
+/// particular a frame below the epoch anchor is *not* eligible by itself: a
+/// venue may replay pre-anchor frames after a snapshot.
 ///
-/// - below the epoch floor (the anchor or first value accepted in this epoch), or
-/// - more than `window` units behind the tail.
+/// Consequences, with the default window of 1024:
 ///
-/// Anything else lies inside the span that was already accepted and is ignored
-/// without touching candidate state, so retransmission runs of any length (for
-/// example frames 99 then 100 when 101 is expected) can never reach the reset
-/// threshold on their own.
+/// - Tail 100 (for example just anchored at 100): frames 98, 99, 100 in any
+///   order and any length can never reach the threshold; neither can any
+///   frame sequence whose values all lie in `tail - 1024 ..= tail`.
+/// - Tail 100000: frames 1, 2 (threshold 2) reach the threshold, because 1
+///   and 2 are more than 1024 behind the tail.
+/// - A real counter reset whose frames all stay within `window` of the
+///   tail (a tail at or below `window` restarting near zero, say) is
+///   indistinguishable from re-delivery and is deliberately not reported;
+///   gap or silence detection catches it downstream. A false reset would
+///   force a spurious reconnect, which is the worse failure.
 ///
 /// Eligible frames count as progress when strictly increasing; an exact
 /// duplicate of the previous candidate is ignored; a decrease restarts the
 /// count at one. Once a candidate run is active, a frame equal to the tail
 /// (the *equality edge*: the new epoch climbing to the accepted tail) counts as
 /// further progress. With no active candidate a tail frame is a plain
-/// duplicate. Ambiguity is inherent when the tail is within `window` of the
-/// floor; there only values below the floor can start a candidate.
+/// duplicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResetDetector {
     threshold: u32,
     window: u64,
-    floor: Option<u64>,
     count: u32,
     last_candidate: Option<u64>,
     latched: bool,
@@ -51,7 +58,6 @@ impl ResetDetector {
         Self {
             threshold: DEFAULT_RESET_THRESHOLD,
             window: DEFAULT_RETRANSMIT_WINDOW,
-            floor: None,
             count: 0,
             last_candidate: None,
             latched: false,
@@ -68,35 +74,25 @@ impl ResetDetector {
         self
     }
 
-    /// Drops candidate state and the reset latch, keeping the epoch floor.
+    /// Drops candidate state, keeping the reset latch.
     fn clear_candidates(&mut self) {
         self.count = 0;
         self.last_candidate = None;
     }
 
-    /// Starts a new epoch whose already-accepted span begins at `floor`.
-    fn anchor(&mut self, floor: u64) {
-        self.floor = Some(floor);
+    /// Starts a new epoch: drops candidate state and the reset latch.
+    fn anchor(&mut self) {
         self.clear_candidates();
         self.latched = false;
     }
 
     /// Returns to the uninitialized state.
     fn clear(&mut self) {
-        self.floor = None;
-        self.clear_candidates();
-        self.latched = false;
-    }
-
-    /// Records the first accepted value of an epoch if no floor is set yet.
-    fn anchor_if_unset(&mut self, floor: u64) {
-        if self.floor.is_none() {
-            self.floor = Some(floor);
-        }
+        self.anchor();
     }
 
     fn is_eligible(&self, value: u64, tail: u64) -> bool {
-        self.floor.is_some_and(|floor| value < floor) || value.saturating_add(self.window) < tail
+        value.saturating_add(self.window) < tail
     }
 
     fn progress(&mut self, value: u64) -> bool {
@@ -203,7 +199,7 @@ impl SequenceTracker {
     /// Anchors the tracker to an authoritative snapshot update ID.
     pub fn reset_to(&mut self, snapshot_last_update_id: u64) {
         self.last = Some(snapshot_last_update_id);
-        self.detector.anchor(snapshot_last_update_id);
+        self.detector.anchor();
     }
 
     /// Clears the tracker state, returning to uninitialized (`NotSynchronized`).
@@ -364,7 +360,7 @@ impl GlobalSequenceTracker {
             self.exhausted = false;
             self.next = Some(seq + 1);
         }
-        self.detector.anchor(seq);
+        self.detector.anchor();
     }
 
     /// Returns the expected next sequence number, if initialized and not exhausted.
@@ -391,7 +387,7 @@ impl GlobalSequenceTracker {
     /// # Progression Rules:
     /// 1. Exhausted (`exhausted == true`) -> [`GlobalSequenceCheck::SequenceExhausted`].
     /// 2. Reset (`is_reset == true`) -> [`GlobalSequenceCheck::OldDataIgnored`] (latched until `reset` or `reset_to`).
-    /// 3. Uninitialized (`next == None`) -> [`GlobalSequenceCheck::First`]. Anchors the epoch floor at `n`.
+    /// 3. Uninitialized (`next == None`) -> [`GlobalSequenceCheck::First`]. Starts a new epoch at `n`.
     ///    If `n == u64::MAX`, transitions to exhausted; otherwise sets `next = n + 1`.
     /// 4. `n == next` -> [`GlobalSequenceCheck::Valid`]: the in-order frame ends any lower-epoch
     ///    candidate run (a stray stale frame followed by live data is not a reset).
@@ -412,7 +408,6 @@ impl GlobalSequenceTracker {
         }
 
         let Some(expected) = self.next else {
-            self.detector.anchor_if_unset(n);
             self.advance_to(n);
             return GlobalSequenceCheck::First;
         };
@@ -794,7 +789,7 @@ mod tests {
     #[test]
     fn sequence_tracker_equality_edge_triggers_reset() {
         let mut tracker = SequenceTracker::new().with_reset_threshold(2);
-        tracker.reset_to(100);
+        tracker.reset_to(100_000);
 
         // Frame 1 in lower epoch: candidate 1
         assert_eq!(
@@ -803,11 +798,11 @@ mod tests {
         );
         assert!(!tracker.is_reset());
 
-        // Frame 2 climbs to exactly current (100): equality edge must count as candidate
+        // Frame 2 climbs to exactly current (100_000): equality edge must count as candidate
         assert_eq!(
-            tracker.check(SequenceRange::new(91, 100)),
+            tracker.check(SequenceRange::new(91, 100_000)),
             SequenceCheck::SequenceReset {
-                current: 100,
+                current: 100_000,
                 reset_to: 91,
             }
         );
@@ -815,7 +810,7 @@ mod tests {
 
         // Frame 3 trying to silently continue is dropped as latched OldDataIgnored
         assert_eq!(
-            tracker.check(SequenceRange::new(101, 105)),
+            tracker.check(SequenceRange::new(100_001, 100_005)),
             SequenceCheck::OldDataIgnored
         );
     }
@@ -899,31 +894,31 @@ mod tests {
     #[test]
     fn global_sequence_tracker_equality_edge_triggers_reset() {
         let mut tracker = GlobalSequenceTracker::new().with_reset_threshold(2);
-        assert_eq!(tracker.check(99), GlobalSequenceCheck::First);
-        assert_eq!(tracker.next(), Some(100));
+        assert_eq!(tracker.check(99_999), GlobalSequenceCheck::First);
+        assert_eq!(tracker.next(), Some(100_000));
 
         // Lower epoch candidate
         assert_eq!(tracker.check(50), GlobalSequenceCheck::OldDataIgnored);
         assert!(!tracker.is_reset());
 
-        // Equality edge: n reaches current (99 < expected 100) and must trigger reset
+        // Equality edge: n reaches current (99_999 < expected 100_000) and must trigger reset
         assert_eq!(
-            tracker.check(99),
+            tracker.check(99_999),
             GlobalSequenceCheck::SequenceReset {
-                expected: 100,
-                reset_to: 99,
+                expected: 100_000,
+                reset_to: 99_999,
             }
         );
         assert!(tracker.is_reset());
 
         // Subsequent frame 100 is latched in OldDataIgnored, preventing silent continuity
-        assert_eq!(tracker.check(100), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(tracker.check(100_000), GlobalSequenceCheck::OldDataIgnored);
 
         // Epoch recovery via reset_to
-        tracker.reset_to(99);
+        tracker.reset_to(99_999);
         assert!(!tracker.is_reset());
-        assert_eq!(tracker.next(), Some(100));
-        assert_eq!(tracker.check(100), GlobalSequenceCheck::Valid);
+        assert_eq!(tracker.next(), Some(100_000));
+        assert_eq!(tracker.check(100_000), GlobalSequenceCheck::Valid);
     }
 
     #[test]
@@ -963,8 +958,8 @@ mod tests {
     }
 
     #[test]
-    fn deep_lower_epoch_run_resets_beyond_window_even_above_floor() {
-        // Epoch floor is 0, so only distance from the tail separates replay from reset.
+    fn deep_lower_epoch_run_resets_beyond_window() {
+        // Only distance from the tail separates replay from reset.
         let mut tracker = GlobalSequenceTracker::new().with_retransmit_window(10);
         assert_eq!(tracker.check(0), GlobalSequenceCheck::First);
         for n in 1..=100 {
@@ -1000,16 +995,16 @@ mod tests {
     fn trackers_agree_on_equality_edge() {
         // Per-symbol: tail is `current`; global: tail is `next - 1`.
         let mut symbol = SequenceTracker::new();
-        symbol.reset_to(100);
+        symbol.reset_to(100_000);
         let mut global = GlobalSequenceTracker::new();
-        assert_eq!(global.check(100), GlobalSequenceCheck::First);
+        assert_eq!(global.check(100_000), GlobalSequenceCheck::First);
 
         // Tail frame without an active candidate is a duplicate in both.
         assert_eq!(
-            symbol.check(SequenceRange::new(100, 100)),
+            symbol.check(SequenceRange::new(100_000, 100_000)),
             SequenceCheck::OldDataIgnored
         );
-        assert_eq!(global.check(100), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(global.check(100_000), GlobalSequenceCheck::OldDataIgnored);
 
         // With an active lower-epoch candidate it counts as progress in both.
         assert_eq!(
@@ -1018,12 +1013,73 @@ mod tests {
         );
         assert_eq!(global.check(50), GlobalSequenceCheck::OldDataIgnored);
         assert!(matches!(
-            symbol.check(SequenceRange::new(51, 100)),
+            symbol.check(SequenceRange::new(51, 100_000)),
             SequenceCheck::SequenceReset { .. }
         ));
         assert!(matches!(
-            global.check(100),
+            global.check(100_000),
             GlobalSequenceCheck::SequenceReset { .. }
         ));
+    }
+
+    #[test]
+    fn symbol_redelivery_below_fresh_anchor_never_resets() {
+        let mut tracker = SequenceTracker::new();
+        tracker.reset_to(100);
+        for last in [98, 99, 100] {
+            assert_eq!(
+                tracker.check(SequenceRange::new(last, last)),
+                SequenceCheck::OldDataIgnored
+            );
+        }
+        assert!(!tracker.is_reset());
+        assert_eq!(
+            tracker.check(SequenceRange::new(101, 101)),
+            SequenceCheck::Valid
+        );
+    }
+
+    #[test]
+    fn symbol_genuine_reset_far_below_tail_fires() {
+        let mut tracker = SequenceTracker::new();
+        tracker.reset_to(100_000);
+        assert_eq!(
+            tracker.check(SequenceRange::new(1, 1)),
+            SequenceCheck::OldDataIgnored
+        );
+        assert_eq!(
+            tracker.check(SequenceRange::new(2, 2)),
+            SequenceCheck::SequenceReset {
+                current: 100_000,
+                reset_to: 2,
+            }
+        );
+        assert!(tracker.is_reset());
+    }
+
+    #[test]
+    fn global_redelivery_below_fresh_anchor_never_resets() {
+        let mut tracker = GlobalSequenceTracker::new();
+        tracker.reset_to(100);
+        for n in [98, 99, 100] {
+            assert_eq!(tracker.check(n), GlobalSequenceCheck::OldDataIgnored);
+        }
+        assert!(!tracker.is_reset());
+        assert_eq!(tracker.check(101), GlobalSequenceCheck::Valid);
+    }
+
+    #[test]
+    fn global_genuine_reset_far_below_tail_fires() {
+        let mut tracker = GlobalSequenceTracker::new();
+        tracker.reset_to(100_000);
+        assert_eq!(tracker.check(1), GlobalSequenceCheck::OldDataIgnored);
+        assert_eq!(
+            tracker.check(2),
+            GlobalSequenceCheck::SequenceReset {
+                expected: 100_001,
+                reset_to: 2,
+            }
+        );
+        assert!(tracker.is_reset());
     }
 }
