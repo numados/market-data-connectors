@@ -53,13 +53,16 @@ fn event_symbol(event: &RecordedEvent) -> Option<&Symbol> {
 /// - No nested or unclosed `begin_book`.
 /// - No market data (`Level`, `Delta`, `Trade`, `BookTicker`) for a symbol between its
 ///   stale-marking alert and the next snapshot / `ResyncCompleted`.
-/// - Alert ordering: `ResyncCompleted` needs a preceding `ResyncStarted`, and nothing follows a
-///   symbol's terminal `Shutdown` alert.
+/// - Alert ordering: `ResyncCompleted` needs a preceding `ResyncStarted` and a snapshot book
+///   (`BeginBook` of kind `Snapshot` through `EndBook`) completed for that symbol since it, and
+///   nothing follows a symbol's terminal `Shutdown` alert.
 pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
     let mut report = ConformanceReport::default();
     let mut in_book: HashMap<Symbol, BookKind> = HashMap::new();
     let mut stale_symbols: HashSet<Symbol> = HashSet::new();
     let mut open_resyncs: HashSet<Symbol> = HashSet::new();
+    // Symbols whose snapshot book completed since their latest `ResyncStarted`.
+    let mut snapshot_since_resync: HashSet<Symbol> = HashSet::new();
     let mut shut_down: HashSet<Symbol> = HashSet::new();
     let mut sink_failed = false;
 
@@ -117,13 +120,17 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                 }
             }
 
-            RecordedEvent::EndBook { symbol, .. } => {
-                if in_book.remove(symbol).is_none() {
+            RecordedEvent::EndBook { symbol, .. } => match in_book.remove(symbol) {
+                None => {
                     return Err(format!(
                         "Event {idx}: EndBook for {symbol} without matching BeginBook"
                     ));
                 }
-            }
+                Some(BookKind::Snapshot) => {
+                    snapshot_since_resync.insert(symbol.clone());
+                }
+                Some(BookKind::Delta) => {}
+            },
 
             RecordedEvent::Trade { symbol, .. } => {
                 if stale_symbols.contains(symbol) {
@@ -156,6 +163,11 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                                 "Event {idx}: ResyncCompleted for {symbol} without a preceding ResyncStarted"
                             ));
                         }
+                        if !snapshot_since_resync.remove(symbol) {
+                            return Err(format!(
+                                "Event {idx}: ResyncCompleted for {symbol} without a snapshot book since its ResyncStarted"
+                            ));
+                        }
                         stale_symbols.remove(symbol);
                     }
                     IntegrityAlert::SinkFailure => {
@@ -164,6 +176,7 @@ pub fn validate(events: &[RecordedEvent]) -> Result<ConformanceReport, String> {
                     }
                     IntegrityAlert::ResyncStarted => {
                         open_resyncs.insert(symbol.clone());
+                        snapshot_since_resync.remove(symbol);
                         stale_symbols.insert(symbol.clone());
                     }
                     IntegrityAlert::ConnectionLost {
@@ -617,6 +630,68 @@ mod tests {
         }];
         let err = validate(&events).unwrap_err();
         assert!(err.contains("without a preceding ResyncStarted"), "{err}");
+    }
+
+    fn alert(symbol: Symbol, alert: IntegrityAlert) -> RecordedEvent {
+        RecordedEvent::Alert { symbol, alert }
+    }
+
+    fn book(symbol: Symbol, kind: BookKind) -> [RecordedEvent; 2] {
+        [
+            RecordedEvent::BeginBook {
+                symbol: symbol.clone(),
+                kind,
+            },
+            RecordedEvent::EndBook { symbol, seq: None },
+        ]
+    }
+
+    const COMPLETED: IntegrityAlert = IntegrityAlert::ResyncCompleted {
+        last_update_id: None,
+    };
+
+    #[test]
+    fn test_conformance_resync_completed_without_snapshot_fails_closed() {
+        let events = vec![
+            alert(sym(), IntegrityAlert::ResyncStarted),
+            alert(sym(), COMPLETED),
+        ];
+        let err = validate(&events).unwrap_err();
+        assert!(err.contains("without a snapshot book"), "{err}");
+    }
+
+    #[test]
+    fn test_conformance_resync_completed_needs_snapshot_after_latest_started() {
+        // The first resync's snapshot must not satisfy the second resync.
+        let mut events = vec![alert(sym(), IntegrityAlert::ResyncStarted)];
+        events.extend(book(sym(), BookKind::Snapshot));
+        events.push(alert(sym(), IntegrityAlert::ResyncStarted));
+        events.push(alert(sym(), COMPLETED));
+        let err = validate(&events).unwrap_err();
+        assert!(err.contains("without a snapshot book"), "{err}");
+    }
+
+    #[test]
+    fn test_conformance_resync_completed_snapshot_is_tracked_per_symbol() {
+        let other = Symbol::from("ETHUSDT");
+        let mut events = vec![
+            alert(sym(), IntegrityAlert::ResyncStarted),
+            alert(other.clone(), IntegrityAlert::ResyncStarted),
+        ];
+        events.extend(book(other.clone(), BookKind::Snapshot));
+        events.push(alert(other, COMPLETED));
+        // The other symbol's snapshot does not complete this symbol's resync.
+        events.push(alert(sym(), COMPLETED));
+        let err = validate(&events).unwrap_err();
+        assert!(err.contains("BTCUSDT"), "{err}");
+    }
+
+    #[test]
+    fn test_conformance_resync_completed_with_snapshot_passes() {
+        let mut events = vec![alert(sym(), IntegrityAlert::ResyncStarted)];
+        events.extend(book(sym(), BookKind::Snapshot));
+        events.push(alert(sym(), COMPLETED));
+        assert!(validate(&events).is_ok());
     }
 
     #[test]
