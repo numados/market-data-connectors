@@ -11,7 +11,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use mdc_sinks::loss_intolerant::loss_intolerant_channel;
 use tokio::sync::watch;
-use tokio::time::{Instant, timeout};
+use tokio::time::{Instant, MissedTickBehavior, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{RENDER_CADENCE, SHUTDOWN_BOUND, SessionConfig};
@@ -87,9 +87,12 @@ pub async fn run_session(
     let mut provider_done = false;
     let mut terminal: Option<Terminal> = None;
 
-    // Phase 1 — running: select over cancellation, stream items, and
-    // provider completion. The session join is never awaited inline by the
-    // application loop; stop arrives as token cancellation.
+    // Phase 1 — running: select over cancellation, stream items, provider
+    // completion, and the publish ticker. Deferred publishes need a trigger:
+    // without the ticker arm a dirty snapshot would sit unpublished until
+    // the next event (requirement 52's cadence bound).
+    let mut publish_ticker = tokio::time::interval(RENDER_CADENCE);
+    publish_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
@@ -121,6 +124,9 @@ pub async fn run_session(
                     break;
                 }
             },
+            _ = publish_ticker.tick() => {
+                // Fall through: the cadence publish happens below.
+            }
         }
         publish_if_dirty(&mut dirty, &mut last_publish, &reducer, &display);
     }

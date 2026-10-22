@@ -246,10 +246,13 @@ pub trait SessionAdapter: Send + Sync + 'static {
 pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn SessionAdapter>, Error> {
     match kind {
         #[cfg(feature = "binance")]
-        ProviderKind::Binance => Err(Error::NotYetImplemented(kind.label().to_string())),
+        ProviderKind::Binance => Ok(Arc::new(binance::BinanceAdapter::new())),
     }
 }
 
+/// Binance adapter module (feature-gated).
+#[cfg(feature = "binance")]
+pub mod binance;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
