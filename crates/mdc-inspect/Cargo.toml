@@ -1,0 +1,32 @@
+[package]
+name = "mdc-inspect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["binance", "native-tls"]
+binance = ["mdc-providers/binance"]
+native-tls = ["mdc-providers/native-tls"]
+rustls = ["mdc-providers/rustls"]
+
+[dependencies]
+mdc-core.workspace = true
+mdc-sinks.workspace = true
+mdc-providers.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+rust_decimal.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+mdc-testkit.workspace = true

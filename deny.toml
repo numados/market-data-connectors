@@ -66,6 +66,7 @@ feature-depth = 1
 # A list of advisory IDs to ignore.
 ignore = [
     { id = "RUSTSEC-2026-0215", reason = "smallstr is required by engineering standards invariant 4 for inline 16-byte symbols" },
+    { id = "RUSTSEC-2024-0436", reason = "paste v1 is unmaintained but required by ratatui 0.29 (ratatui 0.30 needs Rust 1.88, above the workspace MSRV 1.85)" },
 ]
 
 # This section is considered when running `cargo deny check licenses`
@@ -90,6 +91,8 @@ confidence-threshold = 0.8
 exceptions = [
     # Each entry is the crate and version constraint, and its specific allow
     # list
+    # ratatui 0.29 → lru → hashbrown → foldhash (Zlib-licensed, OSI approved)
+    { allow = ["Zlib"], crate = "foldhash" },
     #{ allow = ["Zlib"], crate = "adler32" },
 ]
 
