@@ -28,6 +28,9 @@ pub enum Error {
     /// Session orchestration failure with a sanitized cause.
     #[error("session failed: {0}")]
     Session(String),
+    /// Terminal activation, restoration, rendering, or input failure.
+    #[error("terminal error: {0}")]
+    Terminal(String),
 }
 
 impl From<ParseProviderError> for Error {

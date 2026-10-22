@@ -20,10 +20,16 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(unexpected_cfgs))]
 
+pub mod action;
+pub mod app;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod display;
 pub mod error;
 pub mod provider;
 pub mod reducer;
 pub mod session;
+pub mod setup;
+pub mod terminal;
+pub mod view;
