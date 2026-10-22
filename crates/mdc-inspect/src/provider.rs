@@ -172,7 +172,7 @@ pub type ProviderFuture = Pin<Box<dyn Future<Output = Result<(), MdcError>> + Se
 /// A started provider session returned by an adapter.
 ///
 /// Owns the provider run future and any teardown guards. Dropping or
-/// aborting the future must terminate the provider; spawned [`JoinHandle`]s
+/// aborting the future must terminate the provider; spawned `JoinHandle`s
 /// must be wrapped in [`AbortOnDropHandle`] guards so no provider task is
 /// ever detached.
 pub struct ProviderRun {
