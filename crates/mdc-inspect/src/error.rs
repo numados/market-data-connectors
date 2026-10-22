@@ -25,6 +25,9 @@ pub enum Error {
     /// The inspector requires an interactive terminal.
     #[error("mdc-inspect requires an interactive terminal (stdin and stdout)")]
     NotInteractive,
+    /// Session orchestration failure with a sanitized cause.
+    #[error("session failed: {0}")]
+    Session(String),
 }
 
 impl From<ParseProviderError> for Error {

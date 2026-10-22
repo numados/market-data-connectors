@@ -43,7 +43,7 @@ impl Cli {
                 let config = SessionConfig::new(provider, symbols)?;
                 Ok(StartupMode::Direct(config))
             }
-            (None, symbols) if symbols.is_empty() => Ok(StartupMode::Guided),
+            (None, []) => Ok(StartupMode::Guided),
             (None, _) => Err(Error::Config(
                 "--symbol requires --provider; pass both to start directly".to_string(),
             )),
@@ -52,6 +52,7 @@ impl Cli {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use clap::error::ErrorKind;

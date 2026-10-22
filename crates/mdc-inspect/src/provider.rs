@@ -5,7 +5,16 @@
 //! enabled, and every feature forwards one-to-one to the identically named
 //! `mdc-providers` feature.
 
-use mdc_core::ProviderCapabilities;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use mdc_core::{MdcError, ProviderCapabilities};
+use mdc_sinks::loss_intolerant::LossIntolerantSender;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::SessionConfig;
+use crate::error::Error;
 
 /// Adapter-supplied session resource bounds (PRD 31 §3.10).
 ///
@@ -49,6 +58,8 @@ const KNOWN_PROVIDERS: &[(&str, &str)] = &[
 ];
 
 /// Failures when resolving a provider name against the compiled registry.
+///
+/// Placeholder: real definition follows below.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ParseProviderError {
@@ -155,7 +166,92 @@ impl ProviderKind {
     }
 }
 
+/// Owned provider run future type (PRD 31 §3.10 requirement 149).
+pub type ProviderFuture = Pin<Box<dyn Future<Output = Result<(), MdcError>> + Send>>;
+
+/// A started provider session returned by an adapter.
+///
+/// Owns the provider run future and any teardown guards. Dropping or
+/// aborting the future must terminate the provider; spawned [`JoinHandle`]s
+/// must be wrapped in [`AbortOnDropHandle`] guards so no provider task is
+/// ever detached.
+pub struct ProviderRun {
+    /// Owned provider run future.
+    pub future: ProviderFuture,
+    /// Abort-on-drop ownership of spawned provider tasks.
+    pub abort_guards: Vec<AbortOnDropHandle<()>>,
+}
+
+/// Wrapper around a [`tokio::task::JoinHandle`] that aborts the task on
+/// drop, so dropped sessions never leak provider tasks.
+pub struct AbortOnDropHandle<T>(tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDropHandle<T> {
+    /// Wraps a join handle.
+    pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(handle)
+    }
+
+    /// Aborts the task without consuming the guard.
+    pub fn abort(&self) {
+        self.0.abort();
+    }
+
+    /// Returns `true` when the task has finished.
+    pub fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+}
+
+impl<T> Drop for AbortOnDropHandle<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::fmt::Debug for AbortOnDropHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AbortOnDropHandle")
+            .field("finished", &self.0.is_finished())
+            .finish()
+    }
+}
+
+/// App-private session-adapter trait: the only seam through which provider
+/// connectors are integrated (PRD 31 §3.10 requirement 148).
+///
+/// Implementations normalize the providers' three lifecycle styles into one
+/// owned run future: builder-owned-sink connectors with `run(cancel)`,
+/// sink-taking connectors returning an unspawned future, and sink-taking
+/// connectors returning an already spawned `JoinHandle`.
+pub trait SessionAdapter: Send + Sync + 'static {
+    /// Starts the provider session.
+    ///
+    /// Receives the validated session configuration, the loss-intolerant
+    /// sender the provider must feed, and the session child token. Returns
+    /// an owned run future plus teardown guards, or an actionable error
+    /// before any provider network I/O when configuration is invalid.
+    fn start(
+        &self,
+        config: &SessionConfig,
+        sink: LossIntolerantSender,
+        session_token: CancellationToken,
+    ) -> Result<ProviderRun, Error>;
+}
+
+/// Returns the session adapter for a compiled provider kind.
+///
+/// Dispatch for a variant whose adapter is not implemented in this build
+/// returns a typed not-yet-implemented error and performs no network I/O.
+pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn SessionAdapter>, Error> {
+    match kind {
+        #[cfg(feature = "binance")]
+        ProviderKind::Binance => Err(Error::NotYetImplemented(kind.label().to_string())),
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
