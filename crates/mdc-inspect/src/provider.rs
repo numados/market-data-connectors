@@ -39,6 +39,36 @@ pub enum ProviderKind {
     /// Binance Spot.
     #[cfg(feature = "binance")]
     Binance,
+    /// Kraken.
+    #[cfg(feature = "kraken")]
+    Kraken,
+    /// Coinbase Exchange.
+    #[cfg(feature = "coinbase")]
+    Coinbase,
+    /// Bitfinex.
+    #[cfg(feature = "bitfinex")]
+    Bitfinex,
+    /// Gate.io.
+    #[cfg(feature = "gateio")]
+    Gateio,
+    /// Bitstamp.
+    #[cfg(feature = "bitstamp")]
+    Bitstamp,
+    /// Huobi/HTX.
+    #[cfg(feature = "huobi")]
+    Huobi,
+    /// Coinbase Advanced.
+    #[cfg(feature = "coinbase-advanced")]
+    CoinbaseAdvanced,
+    /// LMAX Digital.
+    #[cfg(feature = "lmax")]
+    Lmax,
+    /// Frankfurter/ECB.
+    #[cfg(feature = "frankfurter")]
+    Frankfurter,
+    /// VWD/Infront.
+    #[cfg(feature = "vwd")]
+    Vwd,
 }
 
 /// Provider names known to the inspector, mapped to the feature that
@@ -93,6 +123,26 @@ impl ProviderKind {
     pub const ALL: &'static [ProviderKind] = &[
         #[cfg(feature = "binance")]
         ProviderKind::Binance,
+        #[cfg(feature = "kraken")]
+        ProviderKind::Kraken,
+        #[cfg(feature = "coinbase")]
+        ProviderKind::Coinbase,
+        #[cfg(feature = "bitfinex")]
+        ProviderKind::Bitfinex,
+        #[cfg(feature = "gateio")]
+        ProviderKind::Gateio,
+        #[cfg(feature = "bitstamp")]
+        ProviderKind::Bitstamp,
+        #[cfg(feature = "huobi")]
+        ProviderKind::Huobi,
+        #[cfg(feature = "coinbase-advanced")]
+        ProviderKind::CoinbaseAdvanced,
+        #[cfg(feature = "lmax")]
+        ProviderKind::Lmax,
+        #[cfg(feature = "frankfurter")]
+        ProviderKind::Frankfurter,
+        #[cfg(feature = "vwd")]
+        ProviderKind::Vwd,
     ];
 
     /// Stable wire name, used by the CLI and the registry parser.
@@ -100,6 +150,26 @@ impl ProviderKind {
         match self {
             #[cfg(feature = "binance")]
             ProviderKind::Binance => "binance",
+            #[cfg(feature = "kraken")]
+            ProviderKind::Kraken => "kraken",
+            #[cfg(feature = "coinbase")]
+            ProviderKind::Coinbase => "coinbase",
+            #[cfg(feature = "bitfinex")]
+            ProviderKind::Bitfinex => "bitfinex",
+            #[cfg(feature = "gateio")]
+            ProviderKind::Gateio => "gateio",
+            #[cfg(feature = "bitstamp")]
+            ProviderKind::Bitstamp => "bitstamp",
+            #[cfg(feature = "huobi")]
+            ProviderKind::Huobi => "huobi",
+            #[cfg(feature = "coinbase-advanced")]
+            ProviderKind::CoinbaseAdvanced => "coinbase-advanced",
+            #[cfg(feature = "lmax")]
+            ProviderKind::Lmax => "lmax",
+            #[cfg(feature = "frankfurter")]
+            ProviderKind::Frankfurter => "frankfurter",
+            #[cfg(feature = "vwd")]
+            ProviderKind::Vwd => "vwd",
         }
     }
 
@@ -108,6 +178,26 @@ impl ProviderKind {
         match self {
             #[cfg(feature = "binance")]
             ProviderKind::Binance => "Binance Spot",
+            #[cfg(feature = "kraken")]
+            ProviderKind::Kraken => "Kraken",
+            #[cfg(feature = "coinbase")]
+            ProviderKind::Coinbase => "Coinbase Exchange",
+            #[cfg(feature = "bitfinex")]
+            ProviderKind::Bitfinex => "Bitfinex",
+            #[cfg(feature = "gateio")]
+            ProviderKind::Gateio => "Gate.io",
+            #[cfg(feature = "bitstamp")]
+            ProviderKind::Bitstamp => "Bitstamp",
+            #[cfg(feature = "huobi")]
+            ProviderKind::Huobi => "Huobi/HTX",
+            #[cfg(feature = "coinbase-advanced")]
+            ProviderKind::CoinbaseAdvanced => "Coinbase Advanced",
+            #[cfg(feature = "lmax")]
+            ProviderKind::Lmax => "LMAX Digital",
+            #[cfg(feature = "frankfurter")]
+            ProviderKind::Frankfurter => "Frankfurter/ECB",
+            #[cfg(feature = "vwd")]
+            ProviderKind::Vwd => "VWD/Infront",
         }
     }
 
@@ -117,6 +207,28 @@ impl ProviderKind {
         match self {
             #[cfg(feature = "binance")]
             ProviderKind::Binance => Some(&mdc_providers::binance::BINANCE_CAPABILITIES),
+            #[cfg(feature = "kraken")]
+            ProviderKind::Kraken => Some(&mdc_providers::kraken::KRAKEN_CAPABILITIES),
+            #[cfg(feature = "coinbase")]
+            ProviderKind::Coinbase => Some(&mdc_providers::coinbase::COINBASE_CAPABILITIES),
+            #[cfg(feature = "bitfinex")]
+            ProviderKind::Bitfinex => Some(&mdc_providers::bitfinex::BITFINEX_CAPABILITIES),
+            #[cfg(feature = "gateio")]
+            ProviderKind::Gateio => Some(&mdc_providers::gateio::GATEIO_CAPABILITIES),
+            #[cfg(feature = "bitstamp")]
+            ProviderKind::Bitstamp => Some(&mdc_providers::bitstamp::BITSTAMP_CAPABILITIES),
+            #[cfg(feature = "huobi")]
+            ProviderKind::Huobi => Some(&mdc_providers::huobi::HUOBI_CAPABILITIES),
+            #[cfg(feature = "coinbase-advanced")]
+            ProviderKind::CoinbaseAdvanced => None,
+            #[cfg(feature = "lmax")]
+            ProviderKind::Lmax => Some(&mdc_providers::lmax::connector::LMAX_CAPABILITIES),
+            #[cfg(feature = "frankfurter")]
+            ProviderKind::Frankfurter => {
+                Some(&mdc_providers::frankfurter::FRANKFURTER_CAPABILITIES)
+            }
+            #[cfg(feature = "vwd")]
+            ProviderKind::Vwd => None,
         }
     }
 
@@ -130,6 +242,82 @@ impl ProviderKind {
                     .max_symbols_per_connection,
                 // Matches the Binance REST depth snapshot request limit.
                 projector_depth: 1000,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "kraken")]
+            ProviderKind::Kraken => SessionBounds {
+                max_symbols: mdc_providers::kraken::KRAKEN_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 1000,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "coinbase")]
+            ProviderKind::Coinbase => SessionBounds {
+                max_symbols: mdc_providers::coinbase::COINBASE_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 1000,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "bitfinex")]
+            ProviderKind::Bitfinex => SessionBounds {
+                max_symbols: mdc_providers::bitfinex::BITFINEX_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 250,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "gateio")]
+            ProviderKind::Gateio => SessionBounds {
+                max_symbols: mdc_providers::gateio::GATEIO_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 50,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "bitstamp")]
+            ProviderKind::Bitstamp => SessionBounds {
+                max_symbols: mdc_providers::bitstamp::BITSTAMP_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 100,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "huobi")]
+            ProviderKind::Huobi => SessionBounds {
+                max_symbols: mdc_providers::huobi::HUOBI_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 150,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "coinbase-advanced")]
+            ProviderKind::CoinbaseAdvanced => SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "lmax")]
+            ProviderKind::Lmax => SessionBounds {
+                max_symbols: mdc_providers::lmax::connector::LMAX_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 20,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "frankfurter")]
+            ProviderKind::Frankfurter => SessionBounds {
+                max_symbols: mdc_providers::frankfurter::FRANKFURTER_CAPABILITIES
+                    .bounds
+                    .max_symbols_per_connection,
+                projector_depth: 1,
+                affected_connection: 1,
+            },
+            #[cfg(feature = "vwd")]
+            ProviderKind::Vwd => SessionBounds {
+                max_symbols: 25,
+                projector_depth: 1,
                 affected_connection: 1,
             },
         }
@@ -247,12 +435,59 @@ pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn Sessio
     match kind {
         #[cfg(feature = "binance")]
         ProviderKind::Binance => Ok(Arc::new(binance::BinanceAdapter::new())),
+        #[cfg(feature = "kraken")]
+        ProviderKind::Kraken => Ok(Arc::new(kraken::KrakenAdapter::new())),
+        #[cfg(feature = "coinbase")]
+        ProviderKind::Coinbase => Ok(Arc::new(coinbase::CoinbaseAdapter::new())),
+        #[cfg(feature = "bitfinex")]
+        ProviderKind::Bitfinex => Ok(Arc::new(bitfinex::BitfinexAdapter::new())),
+        #[cfg(feature = "gateio")]
+        ProviderKind::Gateio => Ok(Arc::new(gateio::GateioAdapter::new())),
+        #[cfg(feature = "bitstamp")]
+        ProviderKind::Bitstamp => Ok(Arc::new(bitstamp::BitstampAdapter::new())),
+        #[cfg(feature = "huobi")]
+        ProviderKind::Huobi => Ok(Arc::new(huobi::HuobiAdapter::new())),
+        #[cfg(feature = "coinbase-advanced")]
+        ProviderKind::CoinbaseAdvanced => {
+            Ok(Arc::new(coinbase_advanced::CoinbaseAdvancedAdapter::new()))
+        }
+        #[cfg(feature = "lmax")]
+        ProviderKind::Lmax => Ok(Arc::new(lmax::LmaxAdapter::new())),
+        #[cfg(feature = "frankfurter")]
+        ProviderKind::Frankfurter => Err(Error::NotYetImplemented(kind.as_str().to_string())),
+        #[cfg(feature = "vwd")]
+        ProviderKind::Vwd => Err(Error::NotYetImplemented(kind.as_str().to_string())),
     }
 }
 
 /// Binance adapter module (feature-gated).
 #[cfg(feature = "binance")]
 pub mod binance;
+/// Bitfinex session adapter.
+#[cfg(feature = "bitfinex")]
+pub mod bitfinex;
+/// Bitstamp session adapter.
+#[cfg(feature = "bitstamp")]
+pub mod bitstamp;
+/// Coinbase Exchange session adapter.
+#[cfg(feature = "coinbase")]
+pub mod coinbase;
+/// Coinbase Advanced session adapter.
+#[cfg(feature = "coinbase-advanced")]
+pub mod coinbase_advanced;
+/// Gate.io session adapter.
+#[cfg(feature = "gateio")]
+pub mod gateio;
+/// Huobi/HTX session adapter.
+#[cfg(feature = "huobi")]
+pub mod huobi;
+/// Kraken session adapter.
+#[cfg(feature = "kraken")]
+pub mod kraken;
+/// LMAX Digital session adapter.
+#[cfg(feature = "lmax")]
+pub mod lmax;
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -298,5 +533,207 @@ mod tests {
             panic!("expected not-compiled error, got {error:?}");
         };
         assert_eq!(feature, "kraken");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod remaining_bounds {
+    use super::*;
+    #[cfg(feature = "kraken")]
+    #[test]
+    fn kraken_bounds_and_capabilities() {
+        let kind = ProviderKind::Kraken;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 300,
+                projector_depth: 1000,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "coinbase")]
+    #[test]
+    fn coinbase_bounds_and_capabilities() {
+        let kind = ProviderKind::Coinbase;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 1000,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "bitfinex")]
+    #[test]
+    fn bitfinex_bounds_and_capabilities() {
+        let kind = ProviderKind::Bitfinex;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 12,
+                projector_depth: 250,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "gateio")]
+    #[test]
+    fn gateio_bounds_and_capabilities() {
+        let kind = ProviderKind::Gateio;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 50,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "bitstamp")]
+    #[test]
+    fn bitstamp_bounds_and_capabilities() {
+        let kind = ProviderKind::Bitstamp;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "huobi")]
+    #[test]
+    fn huobi_bounds_and_capabilities() {
+        let kind = ProviderKind::Huobi;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 150,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "coinbase-advanced")]
+    #[test]
+    fn coinbase_advanced_bounds_and_capabilities() {
+        let kind = ProviderKind::CoinbaseAdvanced;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_none());
+    }
+    #[cfg(feature = "lmax")]
+    #[test]
+    fn lmax_bounds_and_capabilities() {
+        let kind = ProviderKind::Lmax;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 26,
+                projector_depth: 20,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "frankfurter")]
+    #[test]
+    fn frankfurter_bounds_and_capabilities() {
+        let kind = ProviderKind::Frankfurter;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 100,
+                projector_depth: 1,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_some());
+        assert_eq!(
+            kind.session_bounds().max_symbols,
+            kind.capabilities()
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        );
+    }
+    #[cfg(feature = "vwd")]
+    #[test]
+    fn vwd_bounds_and_capabilities() {
+        let kind = ProviderKind::Vwd;
+        assert_eq!(
+            kind.session_bounds(),
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 1,
+                affected_connection: 1
+            }
+        );
+        assert!(kind.capabilities().is_none());
     }
 }

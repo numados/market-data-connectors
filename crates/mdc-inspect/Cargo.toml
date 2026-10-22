@@ -11,6 +11,17 @@ workspace = true
 [features]
 default = ["binance", "native-tls"]
 binance = ["mdc-providers/binance"]
+kraken = ["mdc-providers/kraken"]
+coinbase = ["mdc-providers/coinbase"]
+bitfinex = ["mdc-providers/bitfinex"]
+gateio = ["mdc-providers/gateio"]
+bitstamp = ["mdc-providers/bitstamp"]
+huobi = ["mdc-providers/huobi"]
+coinbase-advanced = ["mdc-providers/coinbase-advanced"]
+lmax = ["mdc-providers/lmax"]
+frankfurter = ["mdc-providers/frankfurter"]
+vwd = ["mdc-providers/vwd"]
+all = ["binance", "kraken", "coinbase", "bitfinex", "gateio", "bitstamp", "huobi", "coinbase-advanced", "lmax", "frankfurter", "vwd"]
 native-tls = ["mdc-providers/native-tls"]
 rustls = ["mdc-providers/rustls"]
 
@@ -33,3 +44,14 @@ url.workspace = true
 mdc-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock.workspace = true
+
+[[test]]
+name = "mock_ws_wave1"
+required-features = ["kraken", "coinbase", "bitfinex", "gateio"]
+
+[[test]]
+name = "mock_ws_wave2"
+required-features = ["bitstamp", "huobi", "coinbase-advanced", "lmax"]
+
+[[test]]
+name = "registry_features"
