@@ -142,9 +142,22 @@ impl MockWsServer {
                         server_conns.fetch_add(1, Ordering::SeqCst);
                         s_conn_notify.notify_waiters();
 
-                        let refused = server_refuse
-                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                            .is_ok();
+                        let mut curr = server_refuse.load(Ordering::SeqCst);
+                        let refused = loop {
+                            if let Some(next) = curr.checked_sub(1) {
+                                match server_refuse.compare_exchange_weak(
+                                    curr,
+                                    next,
+                                    Ordering::SeqCst,
+                                    Ordering::SeqCst,
+                                ) {
+                                    Ok(_) => break true,
+                                    Err(actual) => curr = actual,
+                                }
+                            } else {
+                                break false;
+                            }
+                        };
                         if refused {
                             // Close the socket before the upgrade so the client's connect fails.
                             drop(stream);

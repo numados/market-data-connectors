@@ -244,9 +244,13 @@ async fn test_ws_heartbeat_silence_timeout_resubscribes_single_product() {
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
 
-    // Wait until ETH-USD triggers resubscribe after silence timeout
+    // Wait until ETH-USD triggers unsubscribe + subscribe after silence timeout
     ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("ETH-USD"))
         .await;
+    ws.wait_for_client_message_matching(|m| {
+        m.contains(r#""type":"subscribe""#) && !m.contains("heartbeat") && m.contains("ETH-USD")
+    })
+    .await;
 
     let received = ws.received_messages();
     // Verify an unsubscribe and subscribe was sent for ETH-USD
@@ -332,6 +336,10 @@ async fn test_ws_startup_silence_without_any_heartbeat_resubscribes() {
 
     ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD"))
         .await;
+    ws.wait_for_client_message_matching(|m| {
+        m.contains(r#""type":"subscribe""#) && !m.contains("heartbeat") && m.contains("BTC-USD")
+    })
+    .await;
     let resubscribed = ws.received_messages().iter().any(|m| {
         serde_json::from_str::<serde_json::Value>(m).is_ok_and(|v| {
             v["type"] == "subscribe" && v["product_ids"] == serde_json::json!(["BTC-USD"])
@@ -387,6 +395,10 @@ async fn test_ws_heartbeat_sequence_jump_resubscribes() {
     let _ = ws.broadcast_text(hb2.to_string());
     ws.wait_for_client_message_matching(|m| m.contains("unsubscribe") && m.contains("BTC-USD"))
         .await;
+    ws.wait_for_client_message_matching(|m| {
+        m.contains(r#""type":"subscribe""#) && !m.contains("heartbeat") && m.contains("BTC-USD")
+    })
+    .await;
 
     let received = ws.received_messages();
     let mut has_unsub = false;
