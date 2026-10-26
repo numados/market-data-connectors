@@ -49,6 +49,19 @@ pub enum Error {
 
 impl Error {
     /// Wraps a provider-native validation error while preserving its source.
+    #[cfg(any(
+        feature = "binance",
+        feature = "kraken",
+        feature = "coinbase",
+        feature = "bitfinex",
+        feature = "gateio",
+        feature = "bitstamp",
+        feature = "huobi",
+        feature = "coinbase-advanced",
+        feature = "lmax",
+        feature = "frankfurter",
+        feature = "vwd"
+    ))]
     pub(crate) fn provider_config<E>(provider: &'static str, source: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,

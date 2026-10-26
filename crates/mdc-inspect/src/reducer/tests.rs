@@ -32,7 +32,7 @@ fn bounds(depth: usize) -> SessionBounds {
 
 fn config(symbols: &[&str]) -> SessionConfig {
     let raw: Vec<String> = symbols.iter().map(|s| s.to_string()).collect();
-    SessionConfig::new(ProviderKind::Binance, &raw).expect("valid config")
+    SessionConfig::new(ProviderKind::Test, &raw).expect("valid config")
 }
 
 fn event(symbol: &str, kind: MarketDataKind, ordinal: u64) -> MarketEvent<MarketDataKind> {

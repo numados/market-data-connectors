@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mdc_core::{MdcError, ProviderCapabilities};
-use mdc_sinks::loss_intolerant::{LossIntolerantSender, loss_intolerant_channel};
+use mdc_sinks::loss_intolerant::LossIntolerantSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SessionConfig;
@@ -36,6 +36,9 @@ pub struct SessionBounds {
 /// fails with an actionable error instead of offering a dead entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderKind {
+    /// Provider-neutral identity for unit scenarios; never selectable.
+    #[cfg(test)]
+    Test,
     /// Binance Spot.
     #[cfg(feature = "binance")]
     Binance,
@@ -146,6 +149,8 @@ impl ProviderKind {
     /// Stable wire name, used by the CLI and the registry parser.
     pub fn as_str(self) -> &'static str {
         match self {
+            #[cfg(test)]
+            Self::Test => "test",
             #[cfg(feature = "binance")]
             ProviderKind::Binance => "binance",
             #[cfg(feature = "kraken")]
@@ -174,6 +179,8 @@ impl ProviderKind {
     /// Human-facing label for headers and pickers.
     pub fn label(self) -> &'static str {
         match self {
+            #[cfg(test)]
+            Self::Test => "Test provider",
             #[cfg(feature = "binance")]
             ProviderKind::Binance => "Binance Spot",
             #[cfg(feature = "kraken")]
@@ -203,6 +210,8 @@ impl ProviderKind {
     /// none; `None` must be displayed as `capabilities: unknown`.
     pub fn capabilities(self) -> Option<&'static ProviderCapabilities> {
         match self {
+            #[cfg(test)]
+            Self::Test => None,
             #[cfg(feature = "binance")]
             ProviderKind::Binance => Some(&mdc_providers::binance::BINANCE_CAPABILITIES),
             #[cfg(feature = "kraken")]
@@ -250,6 +259,12 @@ impl ProviderKind {
     /// Adapter-supplied session bounds (PRD 31 §3.10 requirement 153).
     pub fn session_bounds(self) -> SessionBounds {
         match self {
+            #[cfg(test)]
+            Self::Test => SessionBounds {
+                max_symbols: 25,
+                projector_depth: 1000,
+                affected_connection: 1,
+            },
             #[cfg(feature = "binance")]
             ProviderKind::Binance => binance::BinanceAdapter::session_bounds(),
             #[cfg(feature = "kraken")]
@@ -422,9 +437,22 @@ pub trait SessionAdapter: Send + Sync + 'static {
 ///
 /// The channel is never run or connected to a provider. Dropping its stream
 /// after construction keeps validation free of provider I/O and task spawns.
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
+    feature = "coinbase-advanced",
+    feature = "lmax"
+))]
 pub(crate) fn validation_sink(bounds: SessionBounds) -> LossIntolerantSender {
-    let (sink, _stream) =
-        loss_intolerant_channel(1, bounds.affected_connection, CancellationToken::new());
+    let (sink, _stream) = mdc_sinks::loss_intolerant::loss_intolerant_channel(
+        1,
+        bounds.affected_connection,
+        CancellationToken::new(),
+    );
     sink
 }
 
@@ -433,6 +461,8 @@ pub(crate) fn validation_sink(bounds: SessionBounds) -> LossIntolerantSender {
 /// Adapter construction performs no network I/O.
 pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn SessionAdapter>, Error> {
     match kind {
+        #[cfg(test)]
+        ProviderKind::Test => Err(Error::NotYetImplemented("unit-test identity".to_string())),
         #[cfg(feature = "binance")]
         ProviderKind::Binance => Ok(Arc::new(binance::BinanceAdapter::new())),
         #[cfg(feature = "kraken")]

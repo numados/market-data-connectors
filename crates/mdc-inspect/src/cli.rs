@@ -89,10 +89,18 @@ mod tests {
 
     #[test]
     fn provider_without_symbol_is_a_configuration_error() {
-        let error = cli(&["--provider", "binance"])
+        let provider = ProviderKind::ALL
+            .first()
+            .map(|kind| kind.as_str())
+            .unwrap_or("binance");
+        let error = cli(&["--provider", provider])
             .startup_mode()
             .expect_err("provider without symbols must fail");
-        assert!(error.to_string().contains("at least one symbol"));
+        if ProviderKind::ALL.is_empty() {
+            assert!(error.to_string().contains("no provider features"));
+        } else {
+            assert!(error.to_string().contains("at least one symbol"));
+        }
     }
 
     #[test]
@@ -108,7 +116,11 @@ mod tests {
         let error = cli(&["--provider", "notaprovider", "--symbol", "X"])
             .startup_mode()
             .expect_err("unknown provider must fail");
-        assert!(error.to_string().contains("unknown provider"));
+        assert!(error.to_string().contains(if ProviderKind::ALL.is_empty() {
+            "no provider features"
+        } else {
+            "unknown provider"
+        }));
     }
 
     #[cfg(not(feature = "kraken"))]
@@ -117,7 +129,11 @@ mod tests {
         let error = cli(&["--provider", "kraken", "--symbol", "BTC/USD"])
             .startup_mode()
             .expect_err("uncompiled provider must fail");
-        assert!(error.to_string().contains("--features kraken"));
+        assert!(error.to_string().contains(if ProviderKind::ALL.is_empty() {
+            "no provider features"
+        } else {
+            "--features kraken"
+        }));
     }
 
     #[test]

@@ -158,6 +158,18 @@ fn vwd_missing_empty_and_whitespace_credentials_are_redacted() {
     }
 }
 
+#[cfg(any(
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
+    feature = "coinbase-advanced",
+    feature = "lmax",
+    feature = "frankfurter",
+    feature = "vwd"
+))]
 mod remaining_bounds {
     use super::*;
     #[cfg(feature = "kraken")]

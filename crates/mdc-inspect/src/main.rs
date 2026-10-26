@@ -40,9 +40,9 @@ fn main() -> ExitCode {
     }
     install_panic_hook();
 
-    let direct = match &mode {
+    let direct = match mode {
         StartupMode::Guided => None,
-        StartupMode::Direct(config) => Some(config.clone()),
+        StartupMode::Direct(config) => Some(config),
     };
 
     let factory = |kind| adapter_for(kind);

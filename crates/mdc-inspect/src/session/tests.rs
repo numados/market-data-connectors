@@ -21,7 +21,7 @@ fn bounds() -> SessionBounds {
 }
 
 fn config() -> SessionConfig {
-    SessionConfig::new(ProviderKind::Binance, &["BTCUSDT".to_string()]).unwrap()
+    SessionConfig::new(ProviderKind::Test, &["BTCUSDT".to_string()]).unwrap()
 }
 
 fn event(ordinal: u64, kind: MarketDataKind) -> MarketEvent<MarketDataKind> {
@@ -366,7 +366,7 @@ async fn burst_headroom_with_full_symbol_configuration() {
     for symbol_index in 0..25u64 {
         symbols.push(format!("SYM{symbol_index}USDT"));
     }
-    let burst_config = SessionConfig::new(ProviderKind::Binance, &symbols).unwrap();
+    let burst_config = SessionConfig::new(ProviderKind::Test, &symbols).unwrap();
     let mut events = Vec::new();
     let mut ordinal = 0u64;
     for symbol_index in 0..25u64 {

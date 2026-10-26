@@ -2,17 +2,24 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::VecDeque;
+#[cfg(feature = "frankfurter")]
 use std::str::FromStr;
 
+#[cfg(feature = "frankfurter")]
 use mdc_core::{
     DeliveryStamp, MarketDataKind, MarketEvent, ReferenceRate, RunId, Symbol, UnixNanos, VenueId,
 };
+#[cfg(feature = "frankfurter")]
 use mdc_inspect::config::SessionConfig;
 use mdc_inspect::display::{DisplaySnapshot, DisplayStatus, UiState};
+#[cfg(feature = "frankfurter")]
 use mdc_inspect::provider::{ProviderKind, SessionBounds};
+#[cfg(feature = "frankfurter")]
 use mdc_inspect::reducer::Reducer;
+#[cfg(feature = "frankfurter")]
 use rust_decimal::Decimal;
 
+#[cfg(feature = "frankfurter")]
 fn rate_event(symbol: &str) -> MarketEvent<MarketDataKind> {
     MarketEvent {
         exchange_ts: Some(UnixNanos::from_millis(1_704_067_200_000)),

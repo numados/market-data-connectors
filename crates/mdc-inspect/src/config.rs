@@ -138,7 +138,7 @@ impl SessionConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "binance"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
