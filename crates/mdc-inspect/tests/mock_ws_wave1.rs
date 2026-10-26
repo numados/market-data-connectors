@@ -107,9 +107,7 @@ async fn wait_for_quote(
     })
     .await;
     assert_eq!(snapshot.symbols.len(), 1);
-    // Session-level status stays Loading while running; per-symbol status
-    // carries the integrity state.
-    assert_eq!(snapshot.session, DisplayStatus::Loading);
+    assert_eq!(snapshot.session, DisplayStatus::InSync);
     let display = &snapshot.symbols[0];
     assert_eq!(display.symbol.as_str(), symbol);
     assert_eq!(display.status, DisplayStatus::InSync);

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use mdc_inspect::config::SessionConfig;
@@ -11,10 +12,11 @@ use mdc_inspect::display::{DisplaySnapshot, DisplayStatus};
 use mdc_inspect::provider::ProviderKind;
 use mdc_inspect::provider::frankfurter::FrankfurterAdapter;
 use mdc_inspect::provider::vwd::{EnvLookup, VwdAdapter};
-use mdc_inspect::session::run_session;
+use mdc_inspect::session::{SessionOutcome, run_session};
 use mdc_testkit::{MockRest, load_fixture};
 use ratatui::{Terminal, backend::TestBackend};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{header_exists, method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -46,35 +48,70 @@ fn display(
     }))
 }
 
-async fn wait_for(rx: &mut watch::Receiver<Arc<DisplaySnapshot>>, status: DisplayStatus) {
+async fn wait_for(
+    rx: &mut watch::Receiver<Arc<DisplaySnapshot>>,
+    status: DisplayStatus,
+) -> Arc<DisplaySnapshot> {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if rx
-                .borrow()
-                .symbols
-                .iter()
-                .any(|symbol| symbol.status == status)
+            let snapshot = rx.borrow_and_update().clone();
+            if !snapshot.symbols.is_empty()
+                && snapshot
+                    .symbols
+                    .iter()
+                    .all(|symbol| symbol.status == status)
             {
-                break;
+                return snapshot;
             }
-            rx.changed().await.expect("display remains open");
+            assert_ne!(
+                snapshot.session,
+                DisplayStatus::Failed,
+                "polling session failed while waiting for {status:?}: {snapshot:#?}"
+            );
+            rx.changed().await.unwrap_or_else(|error| {
+                panic!("display channel closed while waiting for {status:?}: {error}")
+            });
         }
     })
     .await
-    .expect("polling adapter reached expected state");
+    .unwrap_or_else(|error| panic!("polling adapter did not reach {status:?}: {error}"))
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "same nested wiremock+tokio runtime starvation as the vwd E2E: poll task timers intermittently never fire (all workers idle-parked); provider-level mock suites cover the connector behavior - follow-up needed"]
+async fn stop_session(root: CancellationToken, task: JoinHandle<SessionOutcome>, provider: &str) {
+    root.cancel();
+    assert!(root.is_cancelled());
+    let mut task = task;
+    let outcome = match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+        Ok(joined) => {
+            joined.unwrap_or_else(|error| panic!("{provider} session join failed: {error}"))
+        }
+        Err(error) => {
+            task.abort();
+            let _ = task.await;
+            panic!("{provider} session did not stop within the bound: {error}");
+        }
+    };
+    assert_eq!(outcome.status, DisplayStatus::Stopped);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn frankfurter_reduces_reference_rate_without_book_fields() {
     let mock = MockRest::start().await;
+    let fixture = load_fixture(RATES).expect("fixture");
+    let failing = Arc::new(AtomicBool::new(false));
+    let response_state = Arc::clone(&failing);
     Mock::given(method("GET"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(load_fixture(RATES).expect("fixture"), "application/json"),
-        )
+        .and(path("/v2/providers/ecb/rates"))
+        .respond_with(move |_: &wiremock::Request| {
+            if response_state.load(Ordering::SeqCst) {
+                ResponseTemplate::new(500)
+            } else {
+                ResponseTemplate::new(200).set_body_raw(fixture.clone(), "application/json")
+            }
+        })
         .mount(mock.inner())
         .await;
+
     let config = SessionConfig::new(
         ProviderKind::Frankfurter,
         &["EUR".into(), "GBP".into(), "USD".into()],
@@ -91,36 +128,92 @@ async fn frankfurter_reduces_reference_rate_without_book_fields() {
         root.clone(),
         tx,
     ));
-    wait_for(&mut rx, DisplayStatus::InSync).await;
-    let symbol = &rx.borrow().symbols[0];
+
+    let initial = wait_for(&mut rx, DisplayStatus::InSync).await;
+    let initial_rate = initial.symbols[0].rate.as_ref().expect("initial rate");
+    assert_eq!(initial_rate.rate.midpoint.to_string(), "0.8623");
     assert_eq!(
-        symbol
-            .rate
-            .as_ref()
-            .expect("rate")
-            .rate
-            .midpoint
-            .to_string(),
-        "0.8623"
+        initial_rate.rate.observation_ts.0,
+        1_774_396_800_000_000_000
     );
-    assert!(symbol.quote.is_none());
-    assert!(symbol.bids.is_empty() && symbol.asks.is_empty());
-    root.cancel();
-    let outcome = task.await.expect("session join");
-    assert_eq!(outcome.status, DisplayStatus::Stopped);
+    assert_eq!(
+        initial_rate.rate.observation_date,
+        initial_rate.rate.observation_ts
+    );
+    assert!(initial_rate.rate.received_ts.0 > 0);
+    assert!(!initial_rate.historical);
+    assert!(initial.symbols[0].quote.is_none());
+    assert!(initial.symbols[0].bids.is_empty() && initial.symbols[0].asks.is_empty());
+
+    failing.store(true, Ordering::SeqCst);
+    let failed = wait_for(&mut rx, DisplayStatus::Unavailable).await;
+    let failed_rate = failed.symbols[0].rate.as_ref().expect("historical rate");
+    assert!(failed_rate.historical);
+    assert!(
+        failed
+            .alerts
+            .iter()
+            .any(|alert| alert.summary == "source error (HttpStatus(500))")
+    );
+
+    failing.store(false, Ordering::SeqCst);
+    let recovered = wait_for(&mut rx, DisplayStatus::InSync).await;
+    let recovered_rate = recovered.symbols[0].rate.as_ref().expect("recovered rate");
+    assert_eq!(recovered_rate.rate.midpoint.to_string(), "0.8623");
+    assert_eq!(
+        recovered_rate.rate.observation_ts.0,
+        1_774_396_800_000_000_000
+    );
+    assert_eq!(
+        recovered_rate.rate.observation_date,
+        recovered_rate.rate.observation_ts
+    );
+    assert!(!recovered_rate.historical);
+    assert_eq!(
+        recovered_rate.rate.diagnostic.as_deref(),
+        Some("source error (HttpStatus(500))")
+    );
+    let trace: Vec<&str> = recovered
+        .alerts
+        .iter()
+        .filter(|alert| {
+            alert
+                .symbol
+                .as_ref()
+                .is_some_and(|symbol| symbol.as_str() == "EURGBP")
+        })
+        .map(|alert| alert.summary.as_str())
+        .collect();
+    let fault = trace
+        .iter()
+        .rposition(|summary| *summary == "source error (HttpStatus(500))")
+        .expect("source failure observed");
+    let recovery = trace
+        .iter()
+        .rposition(|summary| *summary == "resync completed")
+        .expect("recovery completed");
+    assert_eq!(trace.first(), Some(&"resync started"));
+    assert!(fault < recovery, "{trace:?}");
+
+    stop_session(root, task, "Frankfurter").await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "vwd poll task never schedules under the nested wiremock+tokio test runtime (all workers idle-parked, timers not firing); frankfurter E2E with the identical composition passes — follow-up needed"]
+#[tokio::test(flavor = "current_thread")]
 async fn vwd_uses_injected_credentials_and_synthetic_book() {
     let mock = MockRest::start().await;
+    let fixture = load_fixture(VWD).expect("fixture");
+    let failing = Arc::new(AtomicBool::new(false));
+    let response_state = Arc::clone(&failing);
     Mock::given(method("GET"))
         .and(path("/account/JSON/QUOTE/SNAPQUOTE/EURUSD.XRATE.SPOT~X"))
         .and(header_exists("authorization"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(load_fixture(VWD).expect("fixture"), "application/json"),
-        )
+        .respond_with(move |_: &wiremock::Request| {
+            if response_state.load(Ordering::SeqCst) {
+                ResponseTemplate::new(401)
+            } else {
+                ResponseTemplate::new(200).set_body_raw(fixture.clone(), "application/json")
+            }
+        })
         .mount(mock.inner())
         .await;
     let env = TestEnv(HashMap::from([
@@ -139,14 +232,67 @@ async fn vwd_uses_injected_credentials_and_synthetic_book() {
         root.clone(),
         tx,
     ));
-    wait_for(&mut rx, DisplayStatus::InSync).await;
-    let symbol = &rx.borrow().symbols[0];
-    assert!(symbol.quote.is_some());
-    assert_eq!(symbol.bids.len(), 1);
-    assert_eq!(symbol.asks.len(), 1);
-    root.cancel();
-    let outcome = task.await.expect("session join");
-    assert_eq!(outcome.status, DisplayStatus::Stopped);
+
+    let initial = wait_for(&mut rx, DisplayStatus::InSync).await;
+    let initial_symbol = initial.symbols[0].clone();
+    let initial_quote = initial_symbol.quote.as_ref().expect("initial quote");
+    assert_eq!(initial_quote.quote.bid.to_string(), "1.0842");
+    assert_eq!(initial_quote.quote.ask.to_string(), "1.0844");
+    assert_eq!(initial_quote.quote.bid_size.to_string(), "200000000");
+    assert_eq!(initial_quote.quote.ask_size.to_string(), "200000000");
+    assert_eq!(
+        initial_quote.quote.effective_ts.0,
+        1_790_668_800_000_000_000
+    );
+    assert!(initial_quote.quote.received_ts.0 > 0);
+    assert!(!initial_quote.historical);
+    assert_eq!(initial_symbol.bids.len(), 1);
+    assert_eq!(initial_symbol.asks.len(), 1);
+
+    failing.store(true, Ordering::SeqCst);
+    let failed = wait_for(&mut rx, DisplayStatus::Unavailable).await;
+    let failed_quote = failed.symbols[0].quote.as_ref().expect("historical quote");
+    assert!(failed_quote.historical);
+    assert!(
+        failed
+            .alerts
+            .iter()
+            .any(|alert| alert.summary == "source error (HttpStatus(401))")
+    );
+
+    failing.store(false, Ordering::SeqCst);
+    let recovered = wait_for(&mut rx, DisplayStatus::InSync).await;
+    let recovered_quote = recovered.symbols[0]
+        .quote
+        .as_ref()
+        .expect("recovered quote");
+    assert_eq!(recovered_quote.quote.bid.to_string(), "1.0842");
+    assert_eq!(recovered_quote.quote.ask.to_string(), "1.0844");
+    assert_eq!(recovered_quote.quote.bid_size.to_string(), "200000000");
+    assert_eq!(recovered_quote.quote.ask_size.to_string(), "200000000");
+    assert!(!recovered_quote.historical);
+    let trace: Vec<&str> = recovered
+        .alerts
+        .iter()
+        .filter(|alert| {
+            alert
+                .symbol
+                .as_ref()
+                .is_some_and(|symbol| symbol.as_str() == "EURUSD")
+        })
+        .map(|alert| alert.summary.as_str())
+        .collect();
+    let fault = trace
+        .iter()
+        .rposition(|summary| *summary == "source error (HttpStatus(401))")
+        .expect("authentication failure observed");
+    let recovery = trace
+        .iter()
+        .rposition(|summary| *summary == "resync completed")
+        .expect("recovery completed");
+    assert!(fault < recovery, "{trace:?}");
+
+    stop_session(root, task, "VWD").await;
 }
 
 #[test]

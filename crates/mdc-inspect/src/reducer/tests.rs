@@ -74,6 +74,9 @@ fn resync_completed() -> MarketDataKind {
     })
 }
 
+#[cfg(feature = "frankfurter")]
+mod reference_rates;
+
 fn reduce(mut reducer: Reducer, items: &[MarketEvent<MarketDataKind>]) -> Reducer {
     for item in items {
         reducer.apply_event(item);
@@ -408,6 +411,27 @@ fn delivery_fault_fails_session_and_marks_quotes_historical() {
     assert!(snap.failure.is_some());
     let quote = snap.symbols[0].quote.as_ref().expect("quote retained");
     assert!(quote.historical);
+}
+
+#[test]
+fn requested_stop_marks_retained_quote_historical() {
+    let mut reducer = reduce(
+        Reducer::new(&config(&["BTCUSDT"]), bounds(100)),
+        &[
+            event("BTCUSDT", balanced_snapshot(), 1),
+            event("BTCUSDT", resync_completed(), 2),
+        ],
+    );
+    reducer.apply_eof(true);
+    let snapshot = reducer.snapshot();
+    assert_eq!(snapshot.session, DisplayStatus::Stopped);
+    assert!(
+        snapshot.symbols[0]
+            .quote
+            .as_ref()
+            .expect("quote")
+            .historical
+    );
 }
 
 #[test]

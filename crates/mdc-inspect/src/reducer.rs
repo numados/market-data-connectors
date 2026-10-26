@@ -2,10 +2,11 @@
 //! state.
 //!
 //! The reducer is pure with respect to the terminal: it owns one
-//! [`TopOfBookProjector`] per configured symbol, reduces every accepted event
-//! exactly once in receive order, and produces immutable display snapshots on
-//! demand. It implements no second sequence, resync, or book-integrity
-//! algorithm — integrity control belongs to the projector and the provider.
+//! [`TopOfBookProjector`] per configured L2 symbol and separate retained state
+//! for reference-rate symbols, reduces every accepted event exactly once in
+//! receive order, and produces immutable display snapshots on demand. It
+//! implements no second sequence, resync, or book-integrity algorithm —
+//! integrity control belongs to the projector and the provider.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,13 +22,25 @@ use crate::display::{
 };
 use crate::provider::SessionBounds;
 
+/// Data-mode-specific state owned by one configured symbol.
+///
+/// Reference rates do not have a book projector. Keeping the modes separate
+/// prevents rate alerts from being interpreted as L2 integrity events.
+enum SymbolData {
+    Book {
+        projector: Box<TopOfBookProjector>,
+        retained: Option<QuoteView>,
+    },
+    Rate {
+        retained: Option<RateView>,
+    },
+}
+
 /// Per-symbol reducer state.
 struct SymbolState {
     symbol: Symbol,
     status: DisplayStatus,
-    projector: TopOfBookProjector,
-    retained: Option<QuoteView>,
-    rate: Option<RateView>,
+    data: SymbolData,
     unavailability: Option<String>,
 }
 
@@ -60,16 +73,22 @@ impl Reducer {
                 } else {
                     symbol.clone()
                 };
+                let data = if reference {
+                    SymbolData::Rate { retained: None }
+                } else {
+                    SymbolData::Book {
+                        projector: Box::new(TopOfBookProjector::new_l2(
+                            display_symbol.clone(),
+                            index as SymbolTag,
+                            Some(bounds.projector_depth),
+                        )),
+                        retained: None,
+                    }
+                };
                 SymbolState {
-                    symbol: display_symbol.clone(),
+                    symbol: display_symbol,
                     status: DisplayStatus::Loading,
-                    projector: TopOfBookProjector::new_l2(
-                        display_symbol,
-                        index as SymbolTag,
-                        Some(bounds.projector_depth),
-                    ),
-                    retained: None,
-                    rate: None,
+                    data,
                     unavailability: None,
                 }
             })
@@ -95,16 +114,27 @@ impl Reducer {
         let Some(&index) = self.lookup.get(&event.symbol) else {
             return;
         };
-        if matches!(event.kind, MarketDataKind::ReferenceRate(_)) {
-            self.apply_rate(index, event);
-            return;
-        }
-        let projection = self.symbols[index].projector.handle_event(event);
         match &event.kind {
+            MarketDataKind::ReferenceRate(_) => self.apply_rate(index, event),
+            MarketDataKind::IntegrityAlert(alert)
+                if matches!(&self.symbols[index].data, SymbolData::Rate { .. }) =>
+            {
+                self.apply_rate_alert(index, alert, event);
+            }
             MarketDataKind::IntegrityAlert(alert) => {
+                let projection = match &mut self.symbols[index].data {
+                    SymbolData::Book { projector, .. } => projector.handle_event(event),
+                    SymbolData::Rate { .. } => None,
+                };
                 self.apply_alert(index, alert, event, projection);
             }
-            _ => self.apply_projection(index, projection),
+            _ => {
+                let projection = match &mut self.symbols[index].data {
+                    SymbolData::Book { projector, .. } => projector.handle_event(event),
+                    SymbolData::Rate { .. } => None,
+                };
+                self.apply_projection(index, projection);
+            }
         }
     }
 
@@ -117,7 +147,7 @@ impl Reducer {
     /// Applies stream end. `stop_requested` distinguishes operator stop from
     /// unexpected EOF; a fault already recorded keeps precedence.
     pub fn apply_eof(&mut self, stop_requested: bool) {
-        if self.session == DisplayStatus::Failed {
+        if matches!(self.session, DisplayStatus::Failed | DisplayStatus::Stopped) {
             return;
         }
         if stop_requested {
@@ -130,6 +160,9 @@ impl Reducer {
 
     /// Marks the session failed with a sanitized orchestration cause.
     pub fn apply_session_failure(&mut self, cause: String) {
+        if matches!(self.session, DisplayStatus::Failed | DisplayStatus::Stopped) {
+            return;
+        }
         self.session = DisplayStatus::Failed;
         if self.failure.is_none() {
             self.failure = Some(cause);
@@ -141,43 +174,60 @@ impl Reducer {
         let symbols = self
             .symbols
             .iter()
-            .map(|state| SymbolDisplay {
-                symbol: state.symbol.clone(),
-                status: state.status,
-                quote: state.retained.as_ref().map(|quote| DisplayedQuote {
-                    quote: quote.clone(),
-                    historical: state.status != DisplayStatus::InSync
-                        || self.session == DisplayStatus::Failed,
-                }),
-                rate: state.rate.as_ref().map(|rate| DisplayedRate {
-                    rate: RateView {
-                        receipt_age: receipt_age(rate.received_ts),
-                        ..rate.clone()
-                    },
-                    historical: state.status != DisplayStatus::InSync
-                        || self.session == DisplayStatus::Failed,
-                }),
-                bids: state
-                    .projector
-                    .book()
-                    .bids()
-                    .iter()
-                    .map(|level| LevelView {
-                        price: level.price,
-                        size: level.volume,
-                    })
-                    .collect(),
-                asks: state
-                    .projector
-                    .book()
-                    .asks()
-                    .iter()
-                    .map(|level| LevelView {
-                        price: level.price,
-                        size: level.volume,
-                    })
-                    .collect(),
-                unavailability: state.unavailability.clone(),
+            .map(|state| {
+                let historical = state.status != DisplayStatus::InSync
+                    || matches!(self.session, DisplayStatus::Stopped | DisplayStatus::Failed);
+                let (quote, rate, bids, asks) = match &state.data {
+                    SymbolData::Book {
+                        projector,
+                        retained,
+                    } => (
+                        retained.as_ref().map(|quote| DisplayedQuote {
+                            quote: quote.clone(),
+                            historical,
+                        }),
+                        None,
+                        projector
+                            .book()
+                            .bids()
+                            .iter()
+                            .map(|level| LevelView {
+                                price: level.price,
+                                size: level.volume,
+                            })
+                            .collect(),
+                        projector
+                            .book()
+                            .asks()
+                            .iter()
+                            .map(|level| LevelView {
+                                price: level.price,
+                                size: level.volume,
+                            })
+                            .collect(),
+                    ),
+                    SymbolData::Rate { retained } => (
+                        None,
+                        retained.as_ref().map(|rate| DisplayedRate {
+                            rate: RateView {
+                                receipt_age: receipt_age(rate.received_ts),
+                                ..rate.clone()
+                            },
+                            historical,
+                        }),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                };
+                SymbolDisplay {
+                    symbol: state.symbol.clone(),
+                    status: state.status,
+                    quote,
+                    rate,
+                    bids,
+                    asks,
+                    unavailability: state.unavailability.clone(),
+                }
             })
             .collect();
         DisplaySnapshot {
@@ -221,10 +271,6 @@ impl Reducer {
                         state.status = DisplayStatus::Unavailable;
                         state.unavailability = Some(format!("{reason:?}"));
                     }
-                    None if state.rate.is_some() => {
-                        state.status = DisplayStatus::InSync;
-                        state.unavailability = None;
-                    }
                     None => {
                         state.status = DisplayStatus::AwaitingSnapshot;
                         state.unavailability = None;
@@ -242,38 +288,93 @@ impl Reducer {
                 state.unavailability = Some(alert_summary(other));
             }
         }
-        let diagnostic = state.unavailability.clone();
-        if let Some(rate) = &mut state.rate {
-            rate.diagnostic = diagnostic;
-        }
         self.retain_quote(index, projection);
+        self.update_session_status();
+    }
+
+    fn apply_rate_alert(
+        &mut self,
+        index: usize,
+        alert: &IntegrityAlert,
+        event: &MarketEvent<MarketDataKind>,
+    ) {
+        self.push_alert(AlertRecord {
+            symbol: Some(event.symbol.clone()),
+            summary: alert_summary(alert),
+            received_ts: event.received_ts,
+        });
+        let state = &mut self.symbols[index];
+        let summary = alert_summary(alert);
+        let SymbolData::Rate { retained } = &mut state.data else {
+            return;
+        };
+        match alert {
+            IntegrityAlert::ResyncStarted => {
+                state.status = DisplayStatus::AwaitingSnapshot;
+            }
+            IntegrityAlert::ResyncCompleted { .. } => {
+                if retained.is_some() {
+                    state.status = DisplayStatus::InSync;
+                    state.unavailability = None;
+                } else {
+                    state.status = DisplayStatus::AwaitingSnapshot;
+                }
+            }
+            IntegrityAlert::ConnectionLost {
+                reason: mdc_core::DisconnectKind::Paused,
+            } => {
+                state.status = DisplayStatus::Paused;
+                state.unavailability = None;
+                if let Some(rate) = retained {
+                    rate.diagnostic = Some(summary);
+                }
+            }
+            _ => {
+                state.status = DisplayStatus::Unavailable;
+                state.unavailability = Some(summary.clone());
+                if let Some(rate) = retained {
+                    rate.diagnostic = Some(summary);
+                }
+            }
+        }
         self.update_session_status();
     }
 
     fn apply_rate(&mut self, index: usize, event: &MarketEvent<MarketDataKind>) {
         let state = &mut self.symbols[index];
-        if let MarketDataKind::ReferenceRate(rate) = &event.kind {
-            let observation_ts = event.exchange_ts.unwrap_or(event.received_ts);
-            let day = observation_ts.0 / 86_400_000_000_000;
-            state.rate = Some(RateView {
-                provider: self.provider_label,
-                pair: event.symbol.clone(),
-                midpoint: rate.mid,
-                observation_ts,
-                observation_date: UnixNanos(day * 86_400_000_000_000),
-                received_ts: event.received_ts,
-                receipt_age: Duration::ZERO,
-                diagnostic: state.unavailability.clone(),
-            });
-            state.status = DisplayStatus::InSync;
-            state.unavailability = None;
+        let MarketDataKind::ReferenceRate(rate) = &event.kind else {
+            return;
+        };
+        let diagnostic = match &state.data {
+            SymbolData::Rate { retained } => {
+                retained.as_ref().and_then(|rate| rate.diagnostic.clone())
+            }
+            SymbolData::Book { .. } => None,
         }
+        .or_else(|| state.unavailability.clone());
+        let SymbolData::Rate { retained } = &mut state.data else {
+            return;
+        };
+        let observation_ts = event.exchange_ts.unwrap_or(event.received_ts);
+        let day = observation_ts.0 / 86_400_000_000_000;
+        *retained = Some(RateView {
+            provider: self.provider_label,
+            pair: event.symbol.clone(),
+            midpoint: rate.mid,
+            observation_ts,
+            observation_date: UnixNanos(day * 86_400_000_000_000),
+            received_ts: event.received_ts,
+            receipt_age: Duration::ZERO,
+            diagnostic,
+        });
+        state.status = DisplayStatus::InSync;
+        state.unavailability = None;
         self.update_session_status();
     }
 
     /// Applies a data-event projection: `Available` promotes to `InSync`,
-    /// `Unavailable` demotes with its reason, `None` leaves status unchanged
-    /// (candidate buffering, trades, reference rates).
+    /// `Unavailable` demotes with its reason, and `None` leaves status
+    /// unchanged while a candidate is buffered or an event has no projection.
     fn apply_projection(&mut self, index: usize, projection: Option<QuoteProjection>) {
         let state = &mut self.symbols[index];
         match projection {
@@ -304,35 +405,51 @@ impl Reducer {
             ..
         }) = projection.as_ref()
         {
-            self.symbols[index].retained = Some(QuoteView {
-                bid: *bid,
-                ask: *ask,
-                bid_size: *bid_size,
-                ask_size: *ask_size,
-                spread: ask.checked_sub(*bid),
-                effective_ts: *effective_ts,
-                received_ts: *received_ts,
-            });
+            if let SymbolData::Book { retained, .. } = &mut self.symbols[index].data {
+                *retained = Some(QuoteView {
+                    bid: *bid,
+                    ask: *ask,
+                    bid_size: *bid_size,
+                    ask_size: *ask_size,
+                    spread: ask.checked_sub(*bid),
+                    effective_ts: *effective_ts,
+                    received_ts: *received_ts,
+                });
+            }
         }
     }
 
     fn update_session_status(&mut self) {
-        if self.session == DisplayStatus::Failed {
+        if matches!(self.session, DisplayStatus::Failed | DisplayStatus::Stopped) {
             return;
         }
-        if self
+        self.session = if self
             .symbols
             .iter()
             .any(|state| state.status == DisplayStatus::InSync)
         {
-            self.session = DisplayStatus::InSync;
+            DisplayStatus::InSync
         } else if self
             .symbols
             .iter()
             .any(|state| state.status == DisplayStatus::Unavailable)
         {
-            self.session = DisplayStatus::Unavailable;
-        }
+            DisplayStatus::Unavailable
+        } else if self
+            .symbols
+            .iter()
+            .any(|state| state.status == DisplayStatus::AwaitingSnapshot)
+        {
+            DisplayStatus::AwaitingSnapshot
+        } else if self
+            .symbols
+            .iter()
+            .any(|state| state.status == DisplayStatus::Paused)
+        {
+            DisplayStatus::Paused
+        } else {
+            DisplayStatus::Loading
+        };
     }
 
     fn push_alert(&mut self, record: AlertRecord) {
