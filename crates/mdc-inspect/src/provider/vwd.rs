@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderRun, SessionAdapter};
+use crate::provider::{ProviderRun, SessionAdapter, SessionBounds};
 
 const ACCOUNT_PATH: &str = "MDC_INSPECT_VWD_ACCOUNT_PATH";
 const USERNAME: &str = "MDC_INSPECT_VWD_USERNAME";
@@ -46,6 +46,18 @@ impl std::fmt::Debug for VwdAdapter {
 }
 
 impl VwdAdapter {
+    const MAX_SYMBOLS: usize = 25;
+    const REQUESTED_DEPTH: usize = 1;
+
+    /// Bounds owned by the VWD synthetic one-level adapter.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: Self::MAX_SYMBOLS,
+            projector_depth: Self::REQUESTED_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Uses the process environment and the provider's production endpoint.
     pub fn new() -> Self {
         Self {
@@ -66,17 +78,17 @@ impl VwdAdapter {
         let account = self
             .env
             .get(ACCOUNT_PATH)
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| Error::Config(ACCOUNT_PATH.to_string()))?;
         let username = self
             .env
             .get(USERNAME)
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| Error::Config(USERNAME.to_string()))?;
         let password = self
             .env
             .get(PASSWORD)
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.trim().is_empty())
             .ok_or_else(|| Error::Config(PASSWORD.to_string()))?;
         Ok((account, username, password))
     }
@@ -100,7 +112,7 @@ impl VwdAdapter {
         }
         builder
             .build()
-            .map_err(|_| Error::Config("VWD configuration is invalid".to_string()))
+            .map_err(|error| Error::provider_config("VWD/Infront", error))
     }
 }
 
@@ -111,8 +123,12 @@ impl Default for VwdAdapter {
 }
 
 impl SessionAdapter for VwdAdapter {
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
     fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
-        let _ = self.build_config(config)?;
+        let _ = self.prepare(config)?;
         Ok(())
     }
 
@@ -122,11 +138,22 @@ impl SessionAdapter for VwdAdapter {
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
+        Ok((self.prepare(config)?)(sink, session_token))
+    }
+}
+
+impl VwdAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+    ) -> Result<impl FnOnce(LossIntolerantSender, CancellationToken) -> ProviderRun, Error> {
         let provider_config = self.build_config(config)?;
         let connector = VwdConnector::builder(provider_config)
             .build()
-            .map_err(|_| Error::Config("VWD configuration is invalid".to_string()))?;
-        let (handle, join) = connector.run(Owned::new(sink), session_token);
-        Ok(ProviderRun::spawned(join, handle))
+            .map_err(|error| Error::provider_config("VWD/Infront", error))?;
+        Ok(move |sink, session_token| {
+            let (handle, join) = connector.run(Owned::new(sink), session_token);
+            ProviderRun::spawned(join, handle)
+        })
     }
 }

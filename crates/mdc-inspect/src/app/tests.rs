@@ -84,6 +84,14 @@ async fn repeated_ctrl_c_forces_then_reaps_the_owned_session() {
     struct SleepingAdapter;
 
     impl SessionAdapter for SleepingAdapter {
+        fn bounds(&self) -> SessionBounds {
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            }
+        }
+
         fn start(
             &self,
             _config: &SessionConfig,
@@ -131,6 +139,14 @@ async fn input_error_reaps_a_running_session_before_returning() {
         dropped: Arc<AtomicBool>,
     }
     impl SessionAdapter for SleepingAdapter {
+        fn bounds(&self) -> SessionBounds {
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            }
+        }
+
         fn start(
             &self,
             _config: &SessionConfig,
@@ -166,7 +182,7 @@ async fn input_error_reaps_a_running_session_before_returning() {
     )
     .await;
 
-    assert!(matches!(result, Err(Error::Terminal(message)) if message == "input failed"));
+    assert!(matches!(result, Err(Error::TerminalIo(error)) if error.to_string() == "input failed"));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
@@ -185,6 +201,14 @@ async fn render_error_reaps_a_running_session_before_returning() {
         dropped: Arc<AtomicBool>,
     }
     impl SessionAdapter for SleepingAdapter {
+        fn bounds(&self) -> SessionBounds {
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            }
+        }
+
         fn start(
             &self,
             _config: &SessionConfig,
@@ -219,7 +243,9 @@ async fn render_error_reaps_a_running_session_before_returning() {
     )
     .await;
 
-    assert!(matches!(result, Err(Error::Terminal(message)) if message == "render failed"));
+    assert!(
+        matches!(result, Err(Error::TerminalIo(error)) if error.to_string() == "render failed")
+    );
     assert!(dropped.load(Ordering::SeqCst));
 }
 
@@ -307,6 +333,14 @@ async fn dropping_app_aborts_owned_session() {
         dropped: Arc<AtomicBool>,
     }
     impl SessionAdapter for SleepingAdapter {
+        fn bounds(&self) -> SessionBounds {
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            }
+        }
+
         fn start(
             &self,
             _config: &SessionConfig,
@@ -345,6 +379,27 @@ async fn dropping_app_aborts_owned_session() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+#[cfg(feature = "bitstamp")]
+#[test]
+fn provider_validation_failure_keeps_setup_before_spawn() {
+    let mut app = app();
+    let factory: Box<AdapterFactory> = Box::new(|kind| {
+        assert_eq!(kind, ProviderKind::Bitstamp);
+        Ok(Arc::new(
+            crate::provider::bitstamp::BitstampAdapter::with_endpoints(
+                url::Url::parse("http://invalid-websocket.example").unwrap(),
+                url::Url::parse("http://127.0.0.1:1").unwrap(),
+            ),
+        ))
+    });
+    let config = SessionConfig::new(ProviderKind::Bitstamp, &["btcusd".to_string()]).unwrap();
+
+    let error = app.start_session(config, &factory).unwrap_err();
+    assert!(matches!(error, Error::ProviderConfig { .. }));
+    assert_eq!(app.state(), &AppState::Setup);
+    assert!(app.session.is_none());
+}
+
 #[test]
 fn configure_and_help_and_focus_transitions() {
     let mut app = app();
@@ -378,6 +433,14 @@ fn adapter_trait_objects_are_object_safe_enough_for_factories() {
     fn make() -> Result<Arc<dyn SessionAdapter>, Error> {
         struct NeverAdapter;
         impl SessionAdapter for NeverAdapter {
+            fn bounds(&self) -> SessionBounds {
+                SessionBounds {
+                    max_symbols: 25,
+                    projector_depth: 100,
+                    affected_connection: 1,
+                }
+            }
+
             fn start(
                 &self,
                 _config: &SessionConfig,

@@ -13,7 +13,9 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter};
+use crate::provider::{
+    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+};
 use mdc_sinks::loss_intolerant::LossIntolerantSender;
 
 /// Session adapter for Binance Spot.
@@ -25,6 +27,19 @@ pub struct BinanceAdapter {
 }
 
 impl BinanceAdapter {
+    const REST_DEPTH: usize = 1000;
+
+    /// Bounds owned by the Binance adapter and its REST snapshot contract.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: mdc_providers::binance::BINANCE_CAPABILITIES
+                .bounds
+                .max_symbols_per_connection,
+            projector_depth: Self::REST_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Production adapter using provider defaults (`BinanceConfig::default`,
     /// requirement 28).
     pub fn new() -> Self {
@@ -64,6 +79,7 @@ impl BinanceAdapter {
         config.streams.depth = true;
         config.streams.book_ticker = false;
         config.streams.trade = false;
+        config.symbols_per_connection = Self::session_bounds().max_symbols;
         if let Some(url) = &self.ws_url {
             config.ws_base_url = url.clone();
         }
@@ -91,26 +107,45 @@ impl Default for BinanceAdapter {
 }
 
 impl SessionAdapter for BinanceAdapter {
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        let _ = self.prepare(config, validation_sink(Self::session_bounds()))?;
+        Ok(())
+    }
+
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
     fn start(
         &self,
         config: &SessionConfig,
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
-        let provider_config = self.build_config();
+        Ok((self.prepare(config, sink)?)(session_token))
+    }
+}
+
+impl BinanceAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+        sink: LossIntolerantSender,
+    ) -> Result<impl FnOnce(CancellationToken) -> ProviderRun, Error> {
+        config.validate()?;
         let symbols = config.symbols.clone();
-        let (connector, handle) = BinanceConnectorBuilder::new(provider_config)
+        let (connector, handle) = BinanceConnectorBuilder::new(self.build_config())
             .symbols(symbols)
             .sink(sink)
             .build()
-            .map_err(|error| Error::Session(error.to_string()))?;
-        let future: ProviderFuture = Box::pin(async move {
-            // The handle is retained for lifecycle ownership but never
-            // exposed as a control (requirement 36).
-            let _ownership = handle;
-            connector.run(session_token).await
-        });
-        Ok(ProviderRun::Future(future))
+            .map_err(|error| Error::provider_config("Binance Spot", error))?;
+        Ok(move |session_token| {
+            let future: ProviderFuture = Box::pin(async move {
+                let _ownership = handle;
+                connector.run(session_token).await
+            });
+            ProviderRun::Future(future)
+        })
     }
 }
 

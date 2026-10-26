@@ -9,7 +9,9 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter};
+use crate::provider::{
+    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+};
 
 /// Session adapter for Coinbase Exchange.
 pub struct CoinbaseAdapter {
@@ -17,6 +19,19 @@ pub struct CoinbaseAdapter {
 }
 
 impl CoinbaseAdapter {
+    const REQUESTED_DEPTH: usize = 1000;
+
+    /// Bounds and depth owned by the Coinbase Exchange adapter.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: mdc_providers::coinbase::COINBASE_CAPABILITIES
+                .bounds
+                .max_symbols_per_connection,
+            projector_depth: Self::REQUESTED_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Uses the provider's production endpoints and retry timing.
     pub fn new() -> Self {
         Self { ws_url: None }
@@ -39,6 +54,7 @@ impl CoinbaseAdapter {
             },
             ..CoinbaseConfig::default()
         };
+        config.products_per_connection = Self::session_bounds().max_symbols;
         if let Some(url) = &self.ws_url {
             config.ws_base_url = url.to_string();
             config.initial_backoff = Duration::from_millis(20);
@@ -57,12 +73,32 @@ impl Default for CoinbaseAdapter {
 }
 
 impl SessionAdapter for CoinbaseAdapter {
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        let _ = self.prepare(config, validation_sink(Self::session_bounds()))?;
+        Ok(())
+    }
+
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
     fn start(
         &self,
         config: &SessionConfig,
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
+        Ok((self.prepare(config, sink)?)(session_token))
+    }
+}
+
+impl CoinbaseAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+        sink: LossIntolerantSender,
+    ) -> Result<impl FnOnce(CancellationToken) -> ProviderRun, Error> {
+        config.validate()?;
         let mut builder = CoinbaseConnectorBuilder::new(self.build_config());
         for (index, symbol) in config.symbols.iter().enumerate() {
             builder = builder.symbol_with_tag(symbol.clone(), index as mdc_core::SymbolTag);
@@ -70,11 +106,13 @@ impl SessionAdapter for CoinbaseAdapter {
         let (connector, handle) = builder
             .sink(sink)
             .build()
-            .map_err(|error| Error::Session(format!("Coinbase Exchange: {error}")))?;
-        let future: ProviderFuture = Box::pin(async move {
-            let _ownership = handle;
-            connector.run(session_token).await
-        });
-        Ok(ProviderRun::Future(future))
+            .map_err(|error| Error::provider_config("Coinbase Exchange", error))?;
+        Ok(move |session_token| {
+            let future: ProviderFuture = Box::pin(async move {
+                let _ownership = handle;
+                connector.run(session_token).await
+            });
+            ProviderRun::Future(future)
+        })
     }
 }

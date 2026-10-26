@@ -9,7 +9,9 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter};
+use crate::provider::{
+    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+};
 
 /// Session adapter for LMAX Digital.
 pub struct LmaxAdapter {
@@ -17,6 +19,19 @@ pub struct LmaxAdapter {
 }
 
 impl LmaxAdapter {
+    const REQUESTED_DEPTH: usize = 20;
+
+    /// Bounds and limits owned by the LMAX adapter.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: mdc_providers::lmax::connector::LMAX_CAPABILITIES
+                .bounds
+                .max_symbols_per_connection,
+            projector_depth: Self::REQUESTED_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Uses the provider's production endpoints and retry timing.
     pub fn new() -> Self {
         Self { ws_url: None }
@@ -32,9 +47,7 @@ impl LmaxAdapter {
 
     fn build_config(&self) -> LmaxConfig {
         let mut config = LmaxConfig {
-            symbols_per_connection: mdc_providers::lmax::connector::LMAX_CAPABILITIES
-                .bounds
-                .max_symbols_per_connection,
+            symbols_per_connection: Self::session_bounds().max_symbols,
             streams: mdc_providers::lmax::LmaxStreams {
                 book: true,
                 trades: false,
@@ -59,12 +72,32 @@ impl Default for LmaxAdapter {
 }
 
 impl SessionAdapter for LmaxAdapter {
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        let _ = self.prepare(config, validation_sink(Self::session_bounds()))?;
+        Ok(())
+    }
+
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
     fn start(
         &self,
         config: &SessionConfig,
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
+        Ok((self.prepare(config, sink)?)(session_token))
+    }
+}
+
+impl LmaxAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+        sink: LossIntolerantSender,
+    ) -> Result<impl FnOnce(CancellationToken) -> ProviderRun, Error> {
+        config.validate()?;
         let mut builder = LmaxConnectorBuilder::new(self.build_config());
         for (index, symbol) in config.symbols.iter().enumerate() {
             builder = builder.symbol_with_tag(symbol.clone(), index as mdc_core::SymbolTag);
@@ -72,11 +105,13 @@ impl SessionAdapter for LmaxAdapter {
         let (connector, handle) = builder
             .sink(sink)
             .build()
-            .map_err(|error| Error::Session(format!("LMAX Digital: {error}")))?;
-        let future: ProviderFuture = Box::pin(async move {
-            let _ownership = handle;
-            connector.run(session_token).await
-        });
-        Ok(ProviderRun::Future(future))
+            .map_err(|error| Error::provider_config("LMAX Digital", error))?;
+        Ok(move |session_token| {
+            let future: ProviderFuture = Box::pin(async move {
+                let _ownership = handle;
+                connector.run(session_token).await
+            });
+            ProviderRun::Future(future)
+        })
     }
 }

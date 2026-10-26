@@ -36,38 +36,38 @@ pub struct CrosstermLifecycle;
 
 impl TerminalLifecycle for CrosstermLifecycle {
     fn enable_raw(&mut self) -> Result<(), Error> {
-        enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))
+        enable_raw_mode().map_err(Error::TerminalIo)
     }
 
     fn disable_raw(&mut self) -> Result<(), Error> {
-        disable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))
+        disable_raw_mode().map_err(Error::TerminalIo)
     }
 
     fn enter_alternate(&mut self) -> Result<(), Error> {
         io::stdout()
             .execute(EnterAlternateScreen)
-            .map_err(|e| Error::Terminal(e.to_string()))?;
+            .map_err(Error::TerminalIo)?;
         Ok(())
     }
 
     fn leave_alternate(&mut self) -> Result<(), Error> {
         io::stdout()
             .execute(LeaveAlternateScreen)
-            .map_err(|e| Error::Terminal(e.to_string()))?;
+            .map_err(Error::TerminalIo)?;
         Ok(())
     }
 
     fn hide_cursor(&mut self) -> Result<(), Error> {
         io::stdout()
             .execute(crossterm::cursor::Hide)
-            .map_err(|e| Error::Terminal(e.to_string()))?;
+            .map_err(Error::TerminalIo)?;
         Ok(())
     }
 
     fn show_cursor(&mut self) -> Result<(), Error> {
         io::stdout()
             .execute(crossterm::cursor::Show)
-            .map_err(|e| Error::Terminal(e.to_string()))?;
+            .map_err(Error::TerminalIo)?;
         Ok(())
     }
 }
@@ -151,7 +151,7 @@ pub fn require_interactive_terminal() -> Result<(), Error> {
 /// Builds the real Ratatui terminal over stdout.
 pub fn ratatui_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Error> {
     let backend = CrosstermBackend::new(io::stdout());
-    Terminal::new(backend).map_err(|e| Error::Terminal(e.to_string()))
+    Terminal::new(backend).map_err(Error::TerminalIo)
 }
 
 /// Installs a panic hook that restores the terminal for main-thread panics

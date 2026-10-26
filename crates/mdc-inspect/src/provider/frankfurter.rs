@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderRun, SessionAdapter};
+use crate::provider::{ProviderRun, SessionAdapter, SessionBounds};
 
 /// Adapter for reference-rate-only Frankfurter sessions.
 #[derive(Debug, Default)]
@@ -19,6 +19,19 @@ pub struct FrankfurterAdapter {
 }
 
 impl FrankfurterAdapter {
+    const REQUESTED_DEPTH: usize = 1;
+
+    /// Bounds owned by the Frankfurter adapter and quote configuration.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: mdc_providers::frankfurter::FRANKFURTER_CAPABILITIES
+                .bounds
+                .max_symbols_per_connection,
+            projector_depth: Self::REQUESTED_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Uses production endpoints and the default one-hour poll interval.
     pub fn new() -> Self {
         Self::default()
@@ -33,12 +46,30 @@ impl FrankfurterAdapter {
 }
 
 impl SessionAdapter for FrankfurterAdapter {
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        let _ = self.prepare(config)?;
+        Ok(())
+    }
+
     fn start(
         &self,
         config: &SessionConfig,
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
+        Ok((self.prepare(config)?)(sink, session_token))
+    }
+}
+
+impl FrankfurterAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+    ) -> Result<impl FnOnce(LossIntolerantSender, CancellationToken) -> ProviderRun, Error> {
         config.validate()?;
         let base = config
             .base
@@ -54,13 +85,13 @@ impl SessionAdapter for FrankfurterAdapter {
         }
         let provider_config = builder
             .build()
-            .map_err(|_| Error::Config("Frankfurter configuration is invalid".to_string()))?;
+            .map_err(|error| Error::provider_config("Frankfurter/ECB", error))?;
         let connector = FrankfurterConnector::builder(provider_config)
             .build()
-            .map_err(|_| {
-                Error::Config("Frankfurter connector configuration is invalid".to_string())
-            })?;
-        let (handle, join) = connector.run(Owned::new(sink), session_token);
-        Ok(ProviderRun::spawned(join, handle))
+            .map_err(|error| Error::provider_config("Frankfurter/ECB", error))?;
+        Ok(move |sink, session_token| {
+            let (handle, join) = connector.run(Owned::new(sink), session_token);
+            ProviderRun::spawned(join, handle)
+        })
     }
 }

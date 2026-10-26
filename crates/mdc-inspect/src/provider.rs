@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mdc_core::{MdcError, ProviderCapabilities};
-use mdc_sinks::loss_intolerant::LossIntolerantSender;
+use mdc_sinks::loss_intolerant::{LossIntolerantSender, loss_intolerant_channel};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SessionConfig;
@@ -88,8 +88,6 @@ const KNOWN_PROVIDERS: &[(&str, &str)] = &[
 ];
 
 /// Failures when resolving a provider name against the compiled registry.
-///
-/// Placeholder: real definition follows below.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ParseProviderError {
@@ -253,90 +251,29 @@ impl ProviderKind {
     pub fn session_bounds(self) -> SessionBounds {
         match self {
             #[cfg(feature = "binance")]
-            ProviderKind::Binance => SessionBounds {
-                max_symbols: mdc_providers::binance::BINANCE_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                // Matches the Binance REST depth snapshot request limit.
-                projector_depth: 1000,
-                affected_connection: 1,
-            },
+            ProviderKind::Binance => binance::BinanceAdapter::session_bounds(),
             #[cfg(feature = "kraken")]
-            ProviderKind::Kraken => SessionBounds {
-                max_symbols: mdc_providers::kraken::KRAKEN_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 1000,
-                affected_connection: 1,
-            },
+            ProviderKind::Kraken => kraken::KrakenAdapter::session_bounds(),
             #[cfg(feature = "coinbase")]
-            ProviderKind::Coinbase => SessionBounds {
-                max_symbols: mdc_providers::coinbase::COINBASE_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 1000,
-                affected_connection: 1,
-            },
+            ProviderKind::Coinbase => coinbase::CoinbaseAdapter::session_bounds(),
             #[cfg(feature = "bitfinex")]
-            ProviderKind::Bitfinex => SessionBounds {
-                max_symbols: mdc_providers::bitfinex::BITFINEX_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 250,
-                affected_connection: 1,
-            },
+            ProviderKind::Bitfinex => bitfinex::BitfinexAdapter::session_bounds(),
             #[cfg(feature = "gateio")]
-            ProviderKind::Gateio => SessionBounds {
-                max_symbols: mdc_providers::gateio::GATEIO_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 50,
-                affected_connection: 1,
-            },
+            ProviderKind::Gateio => gateio::GateioAdapter::session_bounds(),
             #[cfg(feature = "bitstamp")]
-            ProviderKind::Bitstamp => SessionBounds {
-                max_symbols: mdc_providers::bitstamp::BITSTAMP_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 100,
-                affected_connection: 1,
-            },
+            ProviderKind::Bitstamp => bitstamp::BitstampAdapter::session_bounds(),
             #[cfg(feature = "huobi")]
-            ProviderKind::Huobi => SessionBounds {
-                max_symbols: mdc_providers::huobi::HUOBI_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 150,
-                affected_connection: 1,
-            },
+            ProviderKind::Huobi => huobi::HuobiAdapter::session_bounds(),
             #[cfg(feature = "coinbase-advanced")]
-            ProviderKind::CoinbaseAdvanced => SessionBounds {
-                max_symbols: 25,
-                projector_depth: 100,
-                affected_connection: 1,
-            },
+            ProviderKind::CoinbaseAdvanced => {
+                coinbase_advanced::CoinbaseAdvancedAdapter::session_bounds()
+            }
             #[cfg(feature = "lmax")]
-            ProviderKind::Lmax => SessionBounds {
-                max_symbols: mdc_providers::lmax::connector::LMAX_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 20,
-                affected_connection: 1,
-            },
+            ProviderKind::Lmax => lmax::LmaxAdapter::session_bounds(),
             #[cfg(feature = "frankfurter")]
-            ProviderKind::Frankfurter => SessionBounds {
-                max_symbols: mdc_providers::frankfurter::FRANKFURTER_CAPABILITIES
-                    .bounds
-                    .max_symbols_per_connection,
-                projector_depth: 1,
-                affected_connection: 1,
-            },
+            ProviderKind::Frankfurter => frankfurter::FrankfurterAdapter::session_bounds(),
             #[cfg(feature = "vwd")]
-            ProviderKind::Vwd => SessionBounds {
-                max_symbols: 25,
-                projector_depth: 1,
-                affected_connection: 1,
-            },
+            ProviderKind::Vwd => vwd::VwdAdapter::session_bounds(),
         }
     }
 
@@ -459,6 +396,9 @@ impl<T> std::fmt::Debug for AbortOnDropHandle<T> {
 /// connectors returning an unspawned future, and sink-taking connectors
 /// returning an already spawned `JoinHandle`.
 pub trait SessionAdapter: Send + Sync + 'static {
+    /// Returns the adapter-owned bounds used by the session and reducer.
+    fn bounds(&self) -> SessionBounds;
+
     /// Performs offline pre-start validation. Failures keep the setup screen active.
     fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
         config.validate()
@@ -476,6 +416,16 @@ pub trait SessionAdapter: Send + Sync + 'static {
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error>;
+}
+
+/// Creates a sink for offline connector-builder validation.
+///
+/// The channel is never run or connected to a provider. Dropping its stream
+/// after construction keeps validation free of provider I/O and task spawns.
+pub(crate) fn validation_sink(bounds: SessionBounds) -> LossIntolerantSender {
+    let (sink, _stream) =
+        loss_intolerant_channel(1, bounds.affected_connection, CancellationToken::new());
+    sink
 }
 
 /// Returns the session adapter for a compiled provider kind.

@@ -3,6 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::error::Error as StdError;
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -58,6 +59,16 @@ impl TerminalLifecycle for FakeLifecycle {
 
 fn calls_of(log: &CallLog) -> Vec<&'static str> {
     log.lock().unwrap().clone()
+}
+
+#[test]
+fn terminal_io_error_retains_the_io_source() {
+    let error = Error::TerminalIo(std::io::Error::other("terminal failed"));
+    assert_eq!(error.to_string(), "terminal I/O error: terminal failed");
+    assert_eq!(
+        StdError::source(&error).unwrap().to_string(),
+        "terminal failed"
+    );
 }
 
 #[test]

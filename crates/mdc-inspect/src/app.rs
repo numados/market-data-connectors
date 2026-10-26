@@ -137,7 +137,7 @@ impl App {
         }
         let adapter = factory(config.provider)?;
         adapter.validate(&config)?;
-        let bounds: SessionBounds = config.provider.session_bounds();
+        let bounds: SessionBounds = adapter.bounds();
         let session_token = self.root.child_token();
         let force_stop = CancellationToken::new();
         let (display_tx, display_rx) = watch::channel(Arc::new(DisplaySnapshot {
@@ -467,7 +467,7 @@ where
 
     let mut loop_error = None;
     if let Err(error) = render(&mut terminal, &app) {
-        loop_error = Some(Error::Terminal(error.to_string()));
+        loop_error = Some(Error::TerminalIo(error));
     }
 
     let mut ticker = interval_at(Instant::now() + RENDER_CADENCE, RENDER_CADENCE);
@@ -490,7 +490,7 @@ where
         tokio::select! {
             _ = ticker.tick() => {
                 if let Err(error) = render(&mut terminal, &app) {
-                    loop_error = Some(Error::Terminal(error.to_string()));
+                    loop_error = Some(Error::TerminalIo(error));
                 }
             }
             result = joined => {
@@ -510,7 +510,7 @@ where
                         }
                     }
                     Some(Err(error)) => {
-                        loop_error = Some(Error::Terminal(error.to_string()));
+                        loop_error = Some(Error::TerminalIo(error));
                     }
                     None => {
                         loop_error = Some(Error::Terminal("input stream ended".to_string()));

@@ -76,6 +76,10 @@ enum FakeBehavior {
 }
 
 impl SessionAdapter for FakeAdapter {
+    fn bounds(&self) -> SessionBounds {
+        bounds()
+    }
+
     fn start(
         &self,
         _config: &SessionConfig,
@@ -304,6 +308,10 @@ async fn shutdown_deadline_without_operator_stop_fails_visibly() {
     }
 
     impl SessionAdapter for OpenStreamAdapter {
+        fn bounds(&self) -> SessionBounds {
+            bounds()
+        }
+
         fn start(
             &self,
             _config: &SessionConfig,

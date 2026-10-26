@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn no_arguments_opens_guided_mode() {
-        assert_eq!(cli(&[]).startup_mode(), Ok(StartupMode::Guided));
+        assert!(matches!(cli(&[]).startup_mode(), Ok(StartupMode::Guided)));
     }
 
     #[cfg(feature = "binance")]

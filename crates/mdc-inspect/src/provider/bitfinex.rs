@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter};
+use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter, SessionBounds};
 
 /// Session adapter for Bitfinex.
 pub struct BitfinexAdapter {
@@ -17,6 +17,19 @@ pub struct BitfinexAdapter {
 }
 
 impl BitfinexAdapter {
+    const REQUESTED_DEPTH: usize = 250;
+
+    /// Bounds and depth owned by the Bitfinex adapter.
+    pub(crate) fn session_bounds() -> SessionBounds {
+        SessionBounds {
+            max_symbols: mdc_providers::bitfinex::BITFINEX_CAPABILITIES
+                .bounds
+                .max_symbols_per_connection,
+            projector_depth: Self::REQUESTED_DEPTH,
+            affected_connection: 1,
+        }
+    }
+
     /// Uses the provider's production endpoints and retry timing.
     pub fn new() -> Self {
         Self { ws_url: None }
@@ -38,17 +51,36 @@ impl Default for BitfinexAdapter {
 }
 
 impl SessionAdapter for BitfinexAdapter {
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        let _ = self.prepare(config)?;
+        Ok(())
+    }
+
+    fn bounds(&self) -> SessionBounds {
+        Self::session_bounds()
+    }
+
     fn start(
         &self,
         config: &SessionConfig,
         sink: LossIntolerantSender,
         session_token: CancellationToken,
     ) -> Result<ProviderRun, Error> {
+        Ok((self.prepare(config)?)(sink, session_token))
+    }
+}
+
+impl BitfinexAdapter {
+    fn prepare(
+        &self,
+        config: &SessionConfig,
+    ) -> Result<impl FnOnce(LossIntolerantSender, CancellationToken) -> ProviderRun, Error> {
+        config.validate()?;
         let mut builder = BitfinexConnectorBuilder::new()
             .enable_depth(true)
             .enable_trades(false)
-            .orderbook_depth(250)
-            .map_err(|error| Error::Session(format!("Bitfinex: {error}")))?;
+            .orderbook_depth(Self::REQUESTED_DEPTH)
+            .map_err(|error| Error::provider_config("Bitfinex", error))?;
         for (index, symbol) in config.symbols.iter().enumerate() {
             builder = builder.symbol_with_tag(symbol.clone(), index as mdc_core::SymbolTag);
         }
@@ -60,12 +92,14 @@ impl SessionAdapter for BitfinexAdapter {
         }
         let connector = builder
             .build()
-            .map_err(|error| Error::Session(format!("Bitfinex: {error}")))?;
-        let (handle, run) = connector.run(mdc_core::Owned::new(sink), session_token);
-        let future: ProviderFuture = Box::pin(async move {
-            let _ownership = handle;
-            run.await
-        });
-        Ok(ProviderRun::Future(future))
+            .map_err(|error| Error::provider_config("Bitfinex", error))?;
+        Ok(move |sink, session_token| {
+            let (handle, run) = connector.run(mdc_core::Owned::new(sink), session_token);
+            let future: ProviderFuture = Box::pin(async move {
+                let _ownership = handle;
+                run.await
+            });
+            ProviderRun::Future(future)
+        })
     }
 }
