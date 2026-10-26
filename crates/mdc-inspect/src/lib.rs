@@ -10,6 +10,18 @@
 //! # Features
 //!
 //! - `binance` — Binance Spot inspection (enabled by default).
+//! - `kraken` — Kraken inspection.
+//! - `coinbase` — Coinbase Exchange inspection.
+//! - `bitfinex` — Bitfinex inspection.
+//! - `gateio` — Gate.io inspection.
+//! - `bitstamp` — Bitstamp inspection.
+//! - `huobi` — Huobi/HTX inspection.
+//! - `coinbase-advanced` — Coinbase Advanced inspection.
+//! - `lmax` — LMAX Digital inspection.
+//! - `frankfurter` — Frankfurter/ECB dated reference rates.
+//! - `vwd` — VWD/Infront synthetic indicative FX books; credentials come
+//!   from the `MDC_INSPECT_VWD_*` environment variables.
+//! - `all` — All eleven venue features.
 //! - `native-tls` — TLS backend via native-tls (enabled by default).
 //! - `rustls` — TLS backend via rustls.
 //!

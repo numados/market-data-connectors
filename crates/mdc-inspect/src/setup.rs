@@ -130,7 +130,8 @@ impl SetupState {
             self.error = Some(format!("duplicate symbol '{trimmed}'"));
             return;
         }
-        if self.symbols.len() >= bounds.max_symbols {
+        let base_entries = usize::from(provider.as_str() == "frankfurter");
+        if self.symbols.len() >= bounds.max_symbols.saturating_add(base_entries) {
             self.error = Some(format!(
                 "{} accepts at most {} symbols per session",
                 provider.label(),
@@ -236,6 +237,39 @@ mod tests {
         assert_eq!(setup.handle_key(&key(KeyCode::Enter)), SetupAction::None);
         assert_eq!(setup.symbols().len(), 1);
         assert!(setup.error().unwrap().contains("duplicate"));
+    }
+
+    #[cfg(feature = "frankfurter")]
+    #[test]
+    fn reference_configuration_accepts_base_and_one_hundred_quotes() {
+        let mut setup = SetupState::new();
+        setup.selected_provider = setup
+            .providers
+            .iter()
+            .position(|provider| *provider == ProviderKind::Frankfurter)
+            .expect("Frankfurter compiled");
+        for code in std::iter::once("EUR".to_string()).chain((0..100u8).map(|index| {
+            format!(
+                "A{}{}",
+                char::from(b'A' + index / 26),
+                char::from(b'A' + index % 26)
+            )
+        })) {
+            for character in code.chars() {
+                setup.handle_key(&key(KeyCode::Char(character)));
+            }
+            setup.handle_key(&key(KeyCode::Enter));
+            assert!(setup.error().is_none(), "{}: {:?}", code, setup.error());
+        }
+        let config = setup.start_config().expect("full quote configuration");
+        assert_eq!(config.base.as_ref().map(|base| base.as_str()), Some("EUR"));
+        assert_eq!(config.symbols.len(), 100);
+        for character in "ZZZ".chars() {
+            setup.handle_key(&key(KeyCode::Char(character)));
+        }
+        setup.handle_key(&key(KeyCode::Enter));
+        assert!(setup.error().is_some());
+        assert_eq!(setup.start_config().unwrap().symbols.len(), 100);
     }
 
     #[test]
