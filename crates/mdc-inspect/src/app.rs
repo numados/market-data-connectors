@@ -101,6 +101,11 @@ impl App {
                     .selected_provider()
                     .map(|kind| kind.label())
                     .unwrap_or(""),
+                presentation: self
+                    .setup
+                    .selected_provider()
+                    .map(ProviderKind::presentation)
+                    .unwrap_or_default(),
                 session: DisplayStatus::Empty,
                 failure: None,
                 symbols: Vec::new(),
@@ -137,6 +142,7 @@ impl App {
         let force_stop = CancellationToken::new();
         let (display_tx, display_rx) = watch::channel(Arc::new(DisplaySnapshot {
             provider: config.provider.label(),
+            presentation: config.provider.presentation(),
             session: DisplayStatus::Loading,
             failure: None,
             symbols: Vec::new(),

@@ -66,6 +66,7 @@ fn reference_rate_state_keeps_exact_midpoint_and_date() {
 fn display_snapshot_shape_remains_book_compatible() {
     let snapshot = DisplaySnapshot {
         provider: "test",
+        presentation: Default::default(),
         session: DisplayStatus::Loading,
         failure: None,
         symbols: Vec::new(),

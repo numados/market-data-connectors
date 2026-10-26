@@ -50,6 +50,7 @@ fn in_sync_quote() -> DisplayedQuote {
 fn snapshot(session: DisplayStatus, symbols: Vec<SymbolDisplay>) -> DisplaySnapshot {
     DisplaySnapshot {
         provider: "Binance Spot",
+        presentation: Default::default(),
         session,
         failure: None,
         symbols,
@@ -213,6 +214,204 @@ fn narrow_terminal_stacks_without_panicking() {
     );
     let text = render(40, 20, &snap, &empty_ui(), &empty_diagnostics());
     assert!(text.contains("BTCUSDT"), "{text}");
+}
+
+#[test]
+fn reference_view_is_selected_before_any_rate_arrives() {
+    for status in [
+        DisplayStatus::Loading,
+        DisplayStatus::AwaitingSnapshot,
+        DisplayStatus::Unavailable,
+    ] {
+        let mut snap = snapshot(status, vec![view(Symbol::from("EURUSD"), status, None)]);
+        snap.provider = "Frankfurter/ECB";
+        snap.presentation.mode = DisplayMode::ReferenceRate;
+        let text = render(120, 40, &snap, &empty_ui(), &empty_diagnostics());
+        assert!(text.contains("Reference rate"), "{text}");
+        for forbidden in ["Top of book", "Level 2", "spread", "bid ", "ask "] {
+            assert!(!text.contains(forbidden), "unexpected {forbidden}: {text}");
+        }
+    }
+}
+
+#[test]
+fn six_character_native_symbols_are_not_synthetic() {
+    let snap = snapshot(
+        DisplayStatus::InSync,
+        vec![view(
+            Symbol::from("BTCUSD"),
+            DisplayStatus::InSync,
+            Some(in_sync_quote()),
+        )],
+    );
+    let text = render(120, 40, &snap, &empty_ui(), &empty_diagnostics());
+    assert!(!text.contains("synthetic"), "{text}");
+    assert!(text.contains("Level 2"), "{text}");
+}
+
+#[test]
+fn retained_book_levels_are_labelled_historical_after_stop_or_invalidation() {
+    for (session, symbol) in [
+        (DisplayStatus::Unavailable, DisplayStatus::Unavailable),
+        (DisplayStatus::Stopped, DisplayStatus::InSync),
+        (DisplayStatus::Failed, DisplayStatus::InSync),
+    ] {
+        let snap = snapshot(session, vec![view(Symbol::from("BTCUSDT"), symbol, None)]);
+        let text = render(120, 40, &snap, &empty_ui(), &empty_diagnostics());
+        assert!(text.contains("HISTORICAL"), "{text}");
+    }
+}
+
+#[test]
+fn scroll_offsets_move_all_three_viewports() {
+    let mut symbol = view(Symbol::from("BTCUSDT"), DisplayStatus::InSync, None);
+    symbol.bids = (0..20)
+        .map(|index| LevelView {
+            price: Decimal::from(11000 + index),
+            size: Decimal::ONE,
+        })
+        .collect();
+    let mut snap = snapshot(DisplayStatus::InSync, vec![symbol]);
+    snap.alerts = (0..20)
+        .map(|index| AlertRecord {
+            symbol: None,
+            summary: format!("alert-{index:02}"),
+            received_ts: UnixNanos(1),
+        })
+        .collect();
+    let diagnostics = DiagnosticsSnapshot {
+        records: (0..20)
+            .map(|index| DiagnosticRecord {
+                level: tracing::Level::INFO,
+                target: "mdc".to_string(),
+                name: format!("record-{index:02}"),
+                fields: Vec::new(),
+            })
+            .collect(),
+        evicted: 0,
+    };
+    let mut ui = empty_ui();
+    let initial = render(120, 40, &snap, &ui, &diagnostics);
+    for first in ["11000", "alert-00", "record-00"] {
+        assert!(initial.contains(first), "{initial}");
+    }
+    ui.book_scroll = 1;
+    ui.alerts_scroll = 1;
+    ui.diagnostics_scroll = 1;
+    let scrolled = render(120, 40, &snap, &ui, &diagnostics);
+    for first in ["11000", "alert-00", "record-00"] {
+        assert!(
+            !scrolled.contains(first),
+            "{first} stayed visible: {scrolled}"
+        );
+    }
+    for second in ["11001", "alert-01", "record-01"] {
+        assert!(scrolled.contains(second), "{scrolled}");
+    }
+}
+
+#[test]
+fn narrow_terminal_keeps_depth_and_every_other_pane() {
+    let snap = snapshot(
+        DisplayStatus::InSync,
+        vec![view(
+            Symbol::from("BTCUSDT"),
+            DisplayStatus::InSync,
+            Some(in_sync_quote()),
+        )],
+    );
+    let text = render(60, 45, &snap, &empty_ui(), &empty_diagnostics());
+    for heading in ["Level 2", "Top of book", "Integrity alerts", "Diagnostics"] {
+        assert!(text.contains(heading), "missing {heading}: {text}");
+    }
+}
+
+#[test]
+fn rates_use_calendar_dates_and_the_render_clock_without_new_market_events() {
+    use crate::display::{DisplayedRate, RateView};
+    let mut symbol = view(Symbol::from("EURUSD"), DisplayStatus::InSync, None);
+    symbol.bids.clear();
+    symbol.asks.clear();
+    symbol.rate = Some(DisplayedRate {
+        rate: RateView {
+            provider: "Frankfurter/ECB",
+            pair: Symbol::from("EURUSD"),
+            midpoint: "1.08900".parse().unwrap(),
+            observation_ts: UnixNanos::from_secs(1_704_067_200),
+            observation_date: UnixNanos::from_secs(1_704_067_200),
+            received_ts: UnixNanos::from_secs(10),
+            diagnostic: Some("source error (HttpStatus(500))".to_string()),
+        },
+        historical: false,
+    });
+    let mut snap = snapshot(DisplayStatus::InSync, vec![symbol]);
+    snap.presentation.mode = DisplayMode::ReferenceRate;
+    let render_at = |now| {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_main_at(
+                    frame,
+                    &snap,
+                    &empty_ui(),
+                    &empty_diagnostics(),
+                    UnixNanos::from_secs(now),
+                )
+            })
+            .unwrap();
+        buffer_text(terminal.backend().buffer())
+    };
+    let early = render_at(13);
+    let later = render_at(19);
+    assert!(early.contains("receipt age 3s"), "{early}");
+    assert!(later.contains("receipt age 9s"), "{later}");
+    for text in [&early, &later] {
+        for required in ["2024-01-01", "EURUSD", "1.08900", "HttpStatus(500)"] {
+            assert!(text.contains(required), "{text}");
+        }
+        for forbidden in ["bid ", "ask ", "spread", "Level 2", "stale", "latency"] {
+            assert!(!text.contains(forbidden), "{text}");
+        }
+    }
+}
+
+#[test]
+fn synthetic_disclosure_depends_on_provider_mode_not_symbol_length() {
+    let mut snap = snapshot(
+        DisplayStatus::InSync,
+        vec![view(
+            Symbol::from("EURUSD"),
+            DisplayStatus::InSync,
+            Some(in_sync_quote()),
+        )],
+    );
+    snap.provider = "VWD/Infront";
+    snap.presentation.mode = DisplayMode::SyntheticBook;
+    let text = render(160, 40, &snap, &empty_ui(), &empty_diagnostics());
+    assert!(text.contains("synthetic one-level indicative"), "{text}");
+    assert!(text.contains("capabilities: unknown"), "{text}");
+}
+
+#[cfg(feature = "binance")]
+#[test]
+fn static_capability_values_are_rendered_from_the_provider_declaration() {
+    let mut snap = snapshot(DisplayStatus::Loading, vec![]);
+    snap.presentation = crate::provider::ProviderKind::Binance.presentation();
+    let text = render(160, 40, &snap, &empty_ui(), &empty_diagnostics());
+    assert!(text.contains("capabilities: quotes"), "{text}");
+    assert!(text.contains("SequenceNumbers"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "symbols/connection: {}",
+            snap.presentation
+                .capabilities
+                .unwrap()
+                .bounds
+                .max_symbols_per_connection
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("capabilities: unknown"), "{text}");
 }
 
 #[test]

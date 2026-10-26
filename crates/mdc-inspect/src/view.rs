@@ -5,15 +5,18 @@
 //! values carry an explicit `HISTORICAL` label with dimmed styling, and
 //! narrow terminals degrade to stacked panes without panicking.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use mdc_core::UnixNanos;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs, Wrap};
 
 use crate::diagnostics::DiagnosticsSnapshot;
 use crate::display::{
-    DisplaySnapshot, DisplayStatus, DisplayedQuote, Focus, SymbolDisplay, UiState,
+    DisplayMode, DisplaySnapshot, DisplayStatus, DisplayedQuote, Focus, SymbolDisplay, UiState,
 };
 use crate::setup::SetupState;
 
@@ -97,55 +100,79 @@ pub fn draw_main(
     ui: &UiState,
     diagnostics: &DiagnosticsSnapshot,
 ) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let now = UnixNanos(now.as_nanos().min(u128::from(u64::MAX)) as u64);
+    draw_main_at(frame, snapshot, ui, diagnostics, now);
+}
+
+/// Draws with an explicit receipt clock, allowing deterministic age rendering.
+pub fn draw_main_at(
+    frame: &mut Frame<'_>,
+    snapshot: &DisplaySnapshot,
+    ui: &UiState,
+    diagnostics: &DiagnosticsSnapshot,
+    now: UnixNanos,
+) {
     let area = frame.area();
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(if area.width < NARROW_WIDTH { 7 } else { 5 }),
         Constraint::Length(1),
-        Constraint::Min(6),
+        Constraint::Min(0),
         Constraint::Length(1),
     ])
     .split(area);
-
     draw_header(frame, rows[0], snapshot);
     draw_symbol_tabs(frame, rows[1], snapshot, ui);
-
     let selected = selected_symbol(snapshot, ui);
-    let is_rate = snapshot.symbols.iter().any(|symbol| symbol.rate.is_some());
+    let is_rate = snapshot.presentation.mode == DisplayMode::ReferenceRate;
     if area.width < NARROW_WIDTH {
-        let stacked = Layout::vertical([
-            Constraint::Length(6),
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
-        .split(rows[2]);
         if is_rate {
-            draw_rate(frame, stacked[0], selected);
+            let stacked = Layout::vertical([
+                Constraint::Percentage(45),
+                Constraint::Percentage(28),
+                Constraint::Fill(1),
+            ])
+            .split(rows[2]);
+            draw_rate(frame, stacked[0], selected, now);
+            draw_alerts(frame, stacked[1], snapshot, ui);
+            draw_diagnostics(frame, stacked[2], diagnostics, ui);
         } else {
+            let stacked = Layout::vertical([
+                Constraint::Length(5),
+                Constraint::Percentage(40),
+                Constraint::Percentage(30),
+                Constraint::Fill(1),
+            ])
+            .split(rows[2]);
             draw_quote(frame, stacked[0], selected);
+            draw_book(frame, stacked[1], snapshot, selected, ui);
+            draw_alerts(frame, stacked[2], snapshot, ui);
+            draw_diagnostics(frame, stacked[3], diagnostics, ui);
         }
-        draw_alerts(frame, stacked[1], snapshot, ui);
-        draw_diagnostics(frame, stacked[2], diagnostics, ui);
     } else {
         let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(rows[2]);
         if is_rate {
-            draw_rate(frame, columns[0], selected);
+            draw_rate(frame, columns[0], selected, now);
+            let right = Layout::vertical([Constraint::Percentage(50), Constraint::Fill(1)])
+                .split(columns[1]);
+            draw_alerts(frame, right[0], snapshot, ui);
+            draw_diagnostics(frame, right[1], diagnostics, ui);
         } else {
-            draw_book(frame, columns[0], selected, ui);
-        }
-        let right = Layout::vertical([
-            Constraint::Length(6),
-            Constraint::Percentage(45),
-            Constraint::Min(4),
-        ])
-        .split(columns[1]);
-        if !is_rate {
+            draw_book(frame, columns[0], snapshot, selected, ui);
+            let right = Layout::vertical([
+                Constraint::Length(6),
+                Constraint::Percentage(45),
+                Constraint::Fill(1),
+            ])
+            .split(columns[1]);
             draw_quote(frame, right[0], selected);
+            draw_alerts(frame, right[1], snapshot, ui);
+            draw_diagnostics(frame, right[2], diagnostics, ui);
         }
-        draw_alerts(frame, right[1], snapshot, ui);
-        draw_diagnostics(frame, right[2], diagnostics, ui);
     }
-
     draw_hints(frame, rows[3], snapshot);
 }
 
@@ -155,17 +182,40 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
         Span::raw(format!("  provider: {}", snapshot.provider)),
         Span::raw(format!("  session: {}", snapshot.session.label())),
     ];
-    if capability_label(snapshot.provider) == "unknown" {
-        line.push(Span::raw("  capabilities: unknown"));
-    }
     if let Some(failure) = &snapshot.failure {
         line.push(Span::styled(
             format!("  failure: {failure}"),
             Style::new().fg(Color::Red),
         ));
     }
+    let mut lines = vec![Line::from(line)];
+    match snapshot.presentation.capabilities {
+        Some(capabilities) => {
+            lines.push(Line::from(format!(
+                "capabilities: quotes {:?}; integrity {:?}",
+                capabilities.quote_modes, capabilities.integrity,
+            )));
+            lines.push(Line::from(format!(
+                "max depth: {}; symbols/connection: {}; timestamps: {:?}",
+                capabilities
+                    .bounds
+                    .max_depth
+                    .map_or_else(|| "unbounded".to_string(), |depth| depth.to_string()),
+                capabilities.bounds.max_symbols_per_connection,
+                capabilities.timestamps,
+            )));
+        }
+        None => lines.push(Line::from("capabilities: unknown")),
+    }
+    if snapshot.presentation.mode == DisplayMode::SyntheticBook {
+        lines.push(Line::from(
+            "synthetic one-level indicative; not executable liquidity",
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(line)).block(Block::new().borders(Borders::ALL)),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::new().borders(Borders::ALL)),
         area,
     );
 }
@@ -255,7 +305,7 @@ const fn quote_style(status: DisplayStatus) -> Style {
     }
 }
 
-fn draw_rate(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>) {
+fn draw_rate(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>, now: UnixNanos) {
     let lines = match symbol.and_then(|symbol| symbol.rate.as_ref()) {
         Some(displayed) => {
             let rate = &displayed.rate;
@@ -269,20 +319,46 @@ fn draw_rate(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>) 
                     "status: {}",
                     symbol.map(|s| s.status.label()).unwrap_or("empty")
                 )),
+                Line::from(format!("pair: {}  provider: {}", rate.pair, rate.provider)),
                 Line::from(format!("{prefix}midpoint {}", rate.midpoint)),
-                Line::from(format!("observation date UTC {}", rate.observation_date.0)),
-                Line::from(format!("receipt age {:?}", rate.receipt_age)),
+                Line::from(format!(
+                    "observation date UTC {}",
+                    rate.observation_date_utc()
+                )),
+                Line::from(format!("receipt age {:?}", rate.receipt_age_at(now))),
+                Line::from(format!(
+                    "diagnostic: {}",
+                    rate.diagnostic.as_deref().unwrap_or("none")
+                )),
             ]
         }
         None => vec![Line::from("no reference rate observed yet")],
     };
     frame.render_widget(
-        Paragraph::new(lines).block(Block::new().borders(Borders::ALL).title("Reference rate")),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(
+                if symbol
+                    .and_then(|symbol| symbol.rate.as_ref())
+                    .is_some_and(|rate| rate.historical)
+                {
+                    Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                } else {
+                    Style::new()
+                },
+            )
+            .block(Block::new().borders(Borders::ALL).title("Reference rate")),
         area,
     );
 }
 
-fn draw_book(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>, ui: &UiState) {
+fn draw_book(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &DisplaySnapshot,
+    symbol: Option<&SymbolDisplay>,
+    ui: &UiState,
+) {
     let items: Vec<ListItem<'_>> = match symbol {
         None => vec![ListItem::new("no symbol selected")],
         Some(symbol) => {
@@ -305,16 +381,27 @@ fn draw_book(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>, 
             items
         }
     };
-    let offset = ui.book_scroll;
-    let title = if symbol.map(|s| s.symbol.as_str()).unwrap_or("").len() == 6 {
-        "Level 2 — synthetic one-level indicative (not executable liquidity)".to_string()
-    } else {
-        format!(
-            "Level 2 (scroll {offset}, focus {})   ",
-            focus_label(ui.focus)
-        )
+    let historical = matches!(
+        snapshot.session,
+        DisplayStatus::Stopped | DisplayStatus::Failed
+    ) || symbol.is_some_and(|symbol| symbol.status != DisplayStatus::InSync);
+    let title = match snapshot.presentation.mode {
+        DisplayMode::SyntheticBook => "Level 2 — synthetic indicative".to_string(),
+        _ => format!("Level 2 (focus {})", focus_label(ui.focus)),
     };
-    let list = List::new(items).block(Block::new().borders(Borders::ALL).title(title));
+    let title = if historical {
+        format!("[HISTORICAL] {title}")
+    } else {
+        title
+    };
+    let offset = ui.book_scroll.min(items.len().saturating_sub(1));
+    let list = List::new(items.into_iter().skip(offset))
+        .style(if historical {
+            Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+        } else {
+            Style::new()
+        })
+        .block(Block::new().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
@@ -336,10 +423,11 @@ fn draw_alerts(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot, ui
     if lines.is_empty() {
         lines.push(ListItem::new("no integrity alerts"));
     }
-    let list = List::new(lines).block(Block::new().borders(Borders::ALL).title(format!(
-        "Integrity alerts (focus {})",
-        focus_label(ui.focus)
-    )));
+    let offset = ui.alerts_scroll.min(lines.len().saturating_sub(1));
+    let list =
+        List::new(lines.into_iter().skip(offset)).block(Block::new().borders(Borders::ALL).title(
+            format!("Integrity alerts (focus {})", focus_label(ui.focus)),
+        ));
     frame.render_widget(list, area);
 }
 
@@ -371,7 +459,8 @@ fn draw_diagnostics(
     if lines.is_empty() {
         lines.push(ListItem::new("no diagnostics"));
     }
-    let list = List::new(lines).block(
+    let offset = ui.diagnostics_scroll.min(lines.len().saturating_sub(1));
+    let list = List::new(lines.into_iter().skip(offset)).block(
         Block::new()
             .borders(Borders::ALL)
             .title(format!("Diagnostics (focus {})", focus_label(ui.focus))),
@@ -385,13 +474,6 @@ const fn focus_label(focus: Focus) -> &'static str {
         Focus::Book => "book",
         Focus::Alerts => "alerts",
         Focus::Diagnostics => "diagnostics",
-    }
-}
-
-fn capability_label(provider: &str) -> &'static str {
-    match provider {
-        "VWD/Infront" | "Coinbase Advanced" => "unknown",
-        _ => "declared",
     }
 }
 

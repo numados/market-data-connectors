@@ -66,6 +66,7 @@ async fn spawn_session_with(
     let session_root = root.clone();
     let (tx, rx) = watch::channel(Arc::new(crate::display::DisplaySnapshot {
         provider: "Binance Spot",
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),

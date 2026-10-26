@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use mdc_core::Symbol;
 
+use crate::display::DisplayMode;
 use crate::error::Error;
 use crate::provider::ProviderKind;
 
@@ -72,7 +73,7 @@ impl SessionConfig {
                 "at least one symbol is required to start a session".to_string(),
             ));
         }
-        let base = if provider.as_str() == "frankfurter" {
+        let base = if provider.presentation().mode == DisplayMode::ReferenceRate {
             if symbols.len() < 2 {
                 return Err(Error::Config(
                     "Frankfurter requires one base followed by 1–100 quote currencies (3 uppercase ASCII letters)".to_string(),
@@ -87,18 +88,14 @@ impl SessionConfig {
                     )));
                 }
             }
-            let base_code = symbols[0].clone();
-            let base = symbols.remove(0);
-            if symbols.iter().any(|quote| quote == &base_code) {
-                return Err(Error::Config(format!(
-                    "Frankfurter quote '{base_code}' must differ from the base currency"
-                )));
-            }
-            Some(base)
+            let mut entries = symbols.into_iter();
+            let base = entries.next();
+            symbols = entries.collect();
+            base
         } else {
             None
         };
-        if provider.as_str() == "vwd" {
+        if provider.presentation().mode == DisplayMode::SyntheticBook {
             for pair in &symbols {
                 if pair.as_str().len() != 6
                     || !pair.as_str().bytes().all(|b| b.is_ascii_uppercase())

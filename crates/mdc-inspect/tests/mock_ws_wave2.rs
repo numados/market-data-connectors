@@ -44,6 +44,7 @@ fn spawn_session(
     let session_root = root.clone();
     let (tx, rx) = watch::channel(Arc::new(DisplaySnapshot {
         provider: provider.label(),
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),

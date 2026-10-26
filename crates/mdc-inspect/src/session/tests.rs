@@ -130,6 +130,7 @@ async fn run_with_config(
     let root = CancellationToken::new();
     let (tx, rx) = watch::channel(Arc::new(DisplaySnapshot {
         provider: "test",
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),
@@ -191,6 +192,7 @@ async fn force_stop_aborts_and_reaps_the_provider_task() {
     let force_stop = CancellationToken::new();
     let (tx, _rx) = watch::channel(Arc::new(DisplaySnapshot {
         provider: "test",
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),
@@ -323,6 +325,7 @@ async fn shutdown_deadline_without_operator_stop_fails_visibly() {
     let root = CancellationToken::new();
     let (tx, _rx) = watch::channel(Arc::new(DisplaySnapshot {
         provider: "test",
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),

@@ -9,7 +9,6 @@
 //! integrity control belongs to the projector and the provider.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mdc_core::{IntegrityAlert, MarketDataKind, MarketEvent, Symbol, SymbolTag, UnixNanos};
 use mdc_sinks::loss_intolerant::DeliveryFault;
@@ -49,6 +48,7 @@ pub struct Reducer {
     symbols: Vec<SymbolState>,
     lookup: HashMap<Symbol, usize>,
     provider_label: &'static str,
+    presentation: crate::display::ProviderPresentation,
     session: DisplayStatus,
     failure: Option<String>,
     alerts: VecDeque<AlertRecord>,
@@ -58,7 +58,8 @@ pub struct Reducer {
 impl Reducer {
     /// Builds a reducer for a validated session configuration.
     pub fn new(config: &SessionConfig, bounds: SessionBounds) -> Self {
-        let reference = config.provider.as_str() == "frankfurter";
+        let reference =
+            config.provider.presentation().mode == crate::display::DisplayMode::ReferenceRate;
         let symbols: Vec<SymbolState> = config
             .symbols
             .iter()
@@ -102,6 +103,7 @@ impl Reducer {
             symbols,
             lookup,
             provider_label: config.provider.label(),
+            presentation: config.provider.presentation(),
             session: DisplayStatus::Loading,
             failure: None,
             alerts: VecDeque::new(),
@@ -209,10 +211,7 @@ impl Reducer {
                     SymbolData::Rate { retained } => (
                         None,
                         retained.as_ref().map(|rate| DisplayedRate {
-                            rate: RateView {
-                                receipt_age: receipt_age(rate.received_ts),
-                                ..rate.clone()
-                            },
+                            rate: rate.clone(),
                             historical,
                         }),
                         Vec::new(),
@@ -232,6 +231,7 @@ impl Reducer {
             .collect();
         DisplaySnapshot {
             provider: self.provider_label,
+            presentation: self.presentation,
             session: self.session,
             failure: self.failure.clone(),
             symbols,
@@ -364,7 +364,6 @@ impl Reducer {
             observation_ts,
             observation_date: UnixNanos(day * 86_400_000_000_000),
             received_ts: event.received_ts,
-            receipt_age: Duration::ZERO,
             diagnostic,
         });
         state.status = DisplayStatus::InSync;
@@ -459,14 +458,6 @@ impl Reducer {
         }
         self.alerts.push_back(record);
     }
-}
-
-fn receipt_age(received: mdc_core::UnixNanos) -> Duration {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    let elapsed = now.as_nanos().saturating_sub(received.0 as u128);
-    Duration::from_nanos(elapsed.min(u64::MAX as u128) as u64)
 }
 
 /// Sanitized, human-readable alert summary. Contains venue-state words and

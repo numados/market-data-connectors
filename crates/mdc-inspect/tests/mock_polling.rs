@@ -40,6 +40,7 @@ fn display(
 ) {
     watch::channel(Arc::new(DisplaySnapshot {
         provider,
+        presentation: Default::default(),
         session: DisplayStatus::Empty,
         failure: None,
         symbols: Vec::new(),

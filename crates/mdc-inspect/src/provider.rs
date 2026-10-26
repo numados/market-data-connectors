@@ -232,6 +232,23 @@ impl ProviderKind {
         }
     }
 
+    /// Presentation semantics and existing static capabilities for this venue.
+    pub fn presentation(self) -> crate::display::ProviderPresentation {
+        use crate::display::{DisplayMode, ProviderPresentation};
+        let mode = match self {
+            #[cfg(feature = "frankfurter")]
+            Self::Frankfurter => DisplayMode::ReferenceRate,
+            #[cfg(feature = "vwd")]
+            Self::Vwd => DisplayMode::SyntheticBook,
+            #[allow(unreachable_patterns)]
+            _ => DisplayMode::OrderBook,
+        };
+        ProviderPresentation {
+            mode,
+            capabilities: self.capabilities(),
+        }
+    }
+
     /// Adapter-supplied session bounds (PRD 31 §3.10 requirement 153).
     pub fn session_bounds(self) -> SessionBounds {
         match self {

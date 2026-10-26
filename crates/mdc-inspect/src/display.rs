@@ -4,7 +4,28 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use mdc_core::{Symbol, UnixNanos};
+use mdc_core::{ProviderCapabilities, Symbol, UnixNanos};
+
+/// Provider-declared presentation semantics, independent of observed events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// Native order book with projected top of book.
+    #[default]
+    OrderBook,
+    /// Dated reference observations without executable sides or depth.
+    ReferenceRate,
+    /// Synthetic one-level indicative FX book.
+    SyntheticBook,
+}
+
+/// Immutable metadata supplied by the selected provider adapter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderPresentation {
+    /// View semantics, valid before the first observation arrives.
+    pub mode: DisplayMode,
+    /// Existing provider declaration; absence means capabilities are unknown.
+    pub capabilities: Option<&'static ProviderCapabilities>,
+}
 use rust_decimal::Decimal;
 
 /// Canonical display status set (PRD 31 §3.5 requirement 72).
@@ -62,10 +83,53 @@ pub struct RateView {
     pub observation_date: UnixNanos,
     /// Receipt timestamp captured by the connector.
     pub received_ts: UnixNanos,
-    /// Time since receipt, never market-data latency.
-    pub receipt_age: Duration,
     /// Latest bounded diagnostic for this pair.
     pub diagnostic: Option<String>,
+}
+
+impl RateView {
+    /// Elapsed receipt time at the renderer's clock, never market latency.
+    pub fn receipt_age_at(&self, now: UnixNanos) -> Duration {
+        Duration::from_nanos(now.0.saturating_sub(self.received_ts.0))
+    }
+
+    /// UTC calendar date derived from the observation timestamp.
+    pub fn observation_date_utc(&self) -> String {
+        let mut days = self.observation_ts.0 / 86_400_000_000_000;
+        let mut year = 1970u64;
+        let leap = |year: u64| year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        loop {
+            let year_days = if leap(year) { 366 } else { 365 };
+            if days < year_days {
+                break;
+            }
+            days -= year_days;
+            year += 1;
+        }
+        let months = [
+            31,
+            if leap(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut month = 1;
+        for month_days in months {
+            if days < month_days {
+                break;
+            }
+            days -= month_days;
+            month += 1;
+        }
+        format!("{year:04}-{month:02}-{:02}", days + 1)
+    }
 }
 
 /// A retained reference-rate observation.
@@ -156,6 +220,8 @@ pub struct AlertRecord {
 pub struct DisplaySnapshot {
     /// Provider label.
     pub provider: &'static str,
+    /// Provider-selected view semantics and declared capability metadata.
+    pub presentation: ProviderPresentation,
     /// Session-level aggregate status.
     pub session: DisplayStatus,
     /// Sanitized terminal failure cause when the session failed.
@@ -219,3 +285,6 @@ impl Default for UiState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests;

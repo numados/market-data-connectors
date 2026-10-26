@@ -130,7 +130,8 @@ impl SetupState {
             self.error = Some(format!("duplicate symbol '{trimmed}'"));
             return;
         }
-        let base_entries = usize::from(provider.as_str() == "frankfurter");
+        let base_entries =
+            usize::from(provider.presentation().mode == crate::display::DisplayMode::ReferenceRate);
         if self.symbols.len() >= bounds.max_symbols.saturating_add(base_entries) {
             self.error = Some(format!(
                 "{} accepts at most {} symbols per session",
