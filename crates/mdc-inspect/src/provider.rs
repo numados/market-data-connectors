@@ -391,6 +391,17 @@ impl<T> AbortOnDropHandle<T> {
     }
 }
 
+impl<T> Future for AbortOnDropHandle<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx)
+    }
+}
+
 impl<T> Drop for AbortOnDropHandle<T> {
     fn drop(&mut self) {
         self.0.abort();
@@ -413,6 +424,11 @@ impl<T> std::fmt::Debug for AbortOnDropHandle<T> {
 /// sink-taking connectors returning an unspawned future, and sink-taking
 /// connectors returning an already spawned `JoinHandle`.
 pub trait SessionAdapter: Send + Sync + 'static {
+    /// Performs offline pre-start validation. Failures keep the setup screen active.
+    fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
+        config.validate()
+    }
+
     /// Starts the provider session.
     ///
     /// Receives the validated session configuration, the loss-intolerant
@@ -429,8 +445,7 @@ pub trait SessionAdapter: Send + Sync + 'static {
 
 /// Returns the session adapter for a compiled provider kind.
 ///
-/// Dispatch for a variant whose adapter is not implemented in this build
-/// returns a typed not-yet-implemented error and performs no network I/O.
+/// Adapter construction performs no network I/O.
 pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn SessionAdapter>, Error> {
     match kind {
         #[cfg(feature = "binance")]
@@ -454,11 +469,18 @@ pub fn adapter_for(kind: crate::provider::ProviderKind) -> Result<Arc<dyn Sessio
         #[cfg(feature = "lmax")]
         ProviderKind::Lmax => Ok(Arc::new(lmax::LmaxAdapter::new())),
         #[cfg(feature = "frankfurter")]
-        ProviderKind::Frankfurter => Err(Error::NotYetImplemented(kind.as_str().to_string())),
+        ProviderKind::Frankfurter => Ok(Arc::new(frankfurter::FrankfurterAdapter::new())),
         #[cfg(feature = "vwd")]
-        ProviderKind::Vwd => Err(Error::NotYetImplemented(kind.as_str().to_string())),
+        ProviderKind::Vwd => Ok(Arc::new(vwd::VwdAdapter::new())),
     }
 }
+
+/// Frankfurter reference-rate adapter.
+#[cfg(feature = "frankfurter")]
+pub mod frankfurter;
+/// Environment-authenticated VWD adapter.
+#[cfg(feature = "vwd")]
+pub mod vwd;
 
 /// Binance adapter module (feature-gated).
 #[cfg(feature = "binance")]

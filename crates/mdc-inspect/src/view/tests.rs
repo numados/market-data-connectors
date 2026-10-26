@@ -19,6 +19,7 @@ fn view(symbol: Symbol, status: DisplayStatus, quote: Option<DisplayedQuote>) ->
         symbol,
         status,
         quote,
+        rate: None,
         bids: vec![LevelView {
             price: Decimal::from(100),
             size: Decimal::ONE,

@@ -55,3 +55,14 @@ required-features = ["bitstamp", "huobi", "coinbase-advanced", "lmax"]
 
 [[test]]
 name = "registry_features"
+
+[[test]]
+name = "mock_polling"
+required-features = ["frankfurter", "vwd"]
+
+[[test]]
+name = "display_modes"
+
+[[test]]
+name = "vwd_secrets"
+required-features = ["vwd"]

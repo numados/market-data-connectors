@@ -72,8 +72,15 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
         )),
         (None, Some(kind)) => {
             let bounds = kind.session_bounds();
+            let hint = match kind.as_str() {
+                "frankfurter" => {
+                    "first symbol is base currency, then 1–100 quote currencies (EUR, USD)"
+                }
+                "vwd" => "six uppercase letters per direct FX pair (for example EURUSD)",
+                _ => "provider-native identifiers",
+            };
             Line::from(format!(
-                "Enter with empty input starts the session; {} accepts up to {} symbols",
+                "Enter with empty input starts the session; {} accepts up to {} symbols; {hint}",
                 kind.label(),
                 bounds.max_symbols
             ))
@@ -103,6 +110,7 @@ pub fn draw_main(
     draw_symbol_tabs(frame, rows[1], snapshot, ui);
 
     let selected = selected_symbol(snapshot, ui);
+    let is_rate = snapshot.symbols.iter().any(|symbol| symbol.rate.is_some());
     if area.width < NARROW_WIDTH {
         let stacked = Layout::vertical([
             Constraint::Length(6),
@@ -110,20 +118,30 @@ pub fn draw_main(
             Constraint::Percentage(50),
         ])
         .split(rows[2]);
-        draw_quote(frame, stacked[0], selected);
+        if is_rate {
+            draw_rate(frame, stacked[0], selected);
+        } else {
+            draw_quote(frame, stacked[0], selected);
+        }
         draw_alerts(frame, stacked[1], snapshot, ui);
         draw_diagnostics(frame, stacked[2], diagnostics, ui);
     } else {
         let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(rows[2]);
-        draw_book(frame, columns[0], selected, ui);
+        if is_rate {
+            draw_rate(frame, columns[0], selected);
+        } else {
+            draw_book(frame, columns[0], selected, ui);
+        }
         let right = Layout::vertical([
             Constraint::Length(6),
             Constraint::Percentage(45),
             Constraint::Min(4),
         ])
         .split(columns[1]);
-        draw_quote(frame, right[0], selected);
+        if !is_rate {
+            draw_quote(frame, right[0], selected);
+        }
         draw_alerts(frame, right[1], snapshot, ui);
         draw_diagnostics(frame, right[2], diagnostics, ui);
     }
@@ -137,6 +155,9 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
         Span::raw(format!("  provider: {}", snapshot.provider)),
         Span::raw(format!("  session: {}", snapshot.session.label())),
     ];
+    if capability_label(snapshot.provider) == "unknown" {
+        line.push(Span::raw("  capabilities: unknown"));
+    }
     if let Some(failure) = &snapshot.failure {
         line.push(Span::styled(
             format!("  failure: {failure}"),
@@ -234,6 +255,33 @@ const fn quote_style(status: DisplayStatus) -> Style {
     }
 }
 
+fn draw_rate(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>) {
+    let lines = match symbol.and_then(|symbol| symbol.rate.as_ref()) {
+        Some(displayed) => {
+            let rate = &displayed.rate;
+            let prefix = if displayed.historical {
+                "[HISTORICAL] "
+            } else {
+                ""
+            };
+            vec![
+                Line::from(format!(
+                    "status: {}",
+                    symbol.map(|s| s.status.label()).unwrap_or("empty")
+                )),
+                Line::from(format!("{prefix}midpoint {}", rate.midpoint)),
+                Line::from(format!("observation date UTC {}", rate.observation_date.0)),
+                Line::from(format!("receipt age {:?}", rate.receipt_age)),
+            ]
+        }
+        None => vec![Line::from("no reference rate observed yet")],
+    };
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::new().borders(Borders::ALL).title("Reference rate")),
+        area,
+    );
+}
+
 fn draw_book(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>, ui: &UiState) {
     let items: Vec<ListItem<'_>> = match symbol {
         None => vec![ListItem::new("no symbol selected")],
@@ -258,10 +306,15 @@ fn draw_book(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>, 
         }
     };
     let offset = ui.book_scroll;
-    let list = List::new(items).block(Block::new().borders(Borders::ALL).title(format!(
-        "Level 2 (scroll {offset}, focus {})   ",
-        focus_label(ui.focus)
-    )));
+    let title = if symbol.map(|s| s.symbol.as_str()).unwrap_or("").len() == 6 {
+        "Level 2 — synthetic one-level indicative (not executable liquidity)".to_string()
+    } else {
+        format!(
+            "Level 2 (scroll {offset}, focus {})   ",
+            focus_label(ui.focus)
+        )
+    };
+    let list = List::new(items).block(Block::new().borders(Borders::ALL).title(title));
     frame.render_widget(list, area);
 }
 
@@ -332,6 +385,13 @@ const fn focus_label(focus: Focus) -> &'static str {
         Focus::Book => "book",
         Focus::Alerts => "alerts",
         Focus::Diagnostics => "diagnostics",
+    }
+}
+
+fn capability_label(provider: &str) -> &'static str {
+    match provider {
+        "VWD/Infront" | "Coinbase Advanced" => "unknown",
+        _ => "declared",
     }
 }
 

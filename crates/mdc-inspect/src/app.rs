@@ -126,6 +126,7 @@ impl App {
             return Err(Error::Session("a session is still active".to_string()));
         }
         let adapter = factory(config.provider)?;
+        adapter.validate(&config)?;
         let bounds: SessionBounds = config.provider.session_bounds();
         let session_token = self.root.child_token();
         let (display_tx, display_rx) = watch::channel(Arc::new(DisplaySnapshot {

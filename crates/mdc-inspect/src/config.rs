@@ -36,6 +36,8 @@ pub struct SessionConfig {
     /// Provider-native symbols, in operator order, deduplicated after
     /// trimming, bounded by the provider adapter.
     pub symbols: Vec<Symbol>,
+    /// Base currency for reference-rate sessions; `symbols` holds the quotes.
+    pub base: Option<Symbol>,
 }
 
 impl SessionConfig {
@@ -59,7 +61,8 @@ impl SessionConfig {
             let symbol = Symbol::from(trimmed);
             if symbols.contains(&symbol) {
                 return Err(Error::Config(format!(
-                    "duplicate symbol '{trimmed}' after trimming"
+                    "{} duplicate symbol '{trimmed}' after trimming (quotes must be distinct and different from the base)",
+                    provider.label()
                 )));
             }
             symbols.push(symbol);
@@ -69,6 +72,43 @@ impl SessionConfig {
                 "at least one symbol is required to start a session".to_string(),
             ));
         }
+        let base = if provider.as_str() == "frankfurter" {
+            if symbols.len() < 2 {
+                return Err(Error::Config(
+                    "Frankfurter requires one base followed by 1–100 quote currencies (3 uppercase ASCII letters)".to_string(),
+                ));
+            }
+            for code in &symbols {
+                if code.as_str().len() != 3
+                    || !code.as_str().bytes().all(|b| b.is_ascii_uppercase())
+                {
+                    return Err(Error::Config(format!(
+                        "Frankfurter currency '{code}' must be 3 uppercase ASCII letters"
+                    )));
+                }
+            }
+            let base_code = symbols[0].clone();
+            let base = symbols.remove(0);
+            if symbols.iter().any(|quote| quote == &base_code) {
+                return Err(Error::Config(format!(
+                    "Frankfurter quote '{base_code}' must differ from the base currency"
+                )));
+            }
+            Some(base)
+        } else {
+            None
+        };
+        if provider.as_str() == "vwd" {
+            for pair in &symbols {
+                if pair.as_str().len() != 6
+                    || !pair.as_str().bytes().all(|b| b.is_ascii_uppercase())
+                {
+                    return Err(Error::Config(format!(
+                        "VWD pair '{pair}' must be 6 uppercase ASCII letters (for example EURUSD)"
+                    )));
+                }
+            }
+        }
         if symbols.len() > bounds.max_symbols {
             return Err(Error::Config(format!(
                 "{} accepts at most {} symbols per session; got {}",
@@ -77,7 +117,27 @@ impl SessionConfig {
                 symbols.len()
             )));
         }
-        Ok(Self { provider, symbols })
+        Ok(Self {
+            provider,
+            symbols,
+            base,
+        })
+    }
+    /// Revalidates public configuration fields at the adapter boundary.
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        let raw: Vec<String> = self
+            .base
+            .iter()
+            .chain(&self.symbols)
+            .map(ToString::to_string)
+            .collect();
+        let validated = Self::new(self.provider, &raw)?;
+        if validated != *self {
+            return Err(Error::Config(
+                "session base/symbol fields do not match the provider format".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

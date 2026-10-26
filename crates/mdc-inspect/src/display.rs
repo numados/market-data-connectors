@@ -2,6 +2,7 @@
 //! coalesced snapshots, and UI focus/scroll state.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use mdc_core::{Symbol, UnixNanos};
 use rust_decimal::Decimal;
@@ -44,6 +45,36 @@ impl DisplayStatus {
             DisplayStatus::Failed => "failed",
         }
     }
+}
+
+/// A reference-rate observation with exact decimal and receipt timing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateView {
+    /// Provider that supplied the observation.
+    pub provider: &'static str,
+    /// Provider pair symbol.
+    pub pair: Symbol,
+    /// Exact reference midpoint.
+    pub midpoint: Decimal,
+    /// Observation timestamp from the provider event.
+    pub observation_ts: UnixNanos,
+    /// UTC midnight corresponding to the observation date.
+    pub observation_date: UnixNanos,
+    /// Receipt timestamp captured by the connector.
+    pub received_ts: UnixNanos,
+    /// Time since receipt, never market-data latency.
+    pub receipt_age: Duration,
+    /// Latest bounded diagnostic for this pair.
+    pub diagnostic: Option<String>,
+}
+
+/// A retained reference-rate observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayedRate {
+    /// The retained observation.
+    pub rate: RateView,
+    /// True after an invalidating alert or terminal failure.
+    pub historical: bool,
 }
 
 /// A projected top-of-book value with exact decimals.
@@ -96,6 +127,8 @@ pub struct SymbolDisplay {
     pub status: DisplayStatus,
     /// Retained quote, historical unless status is `InSync`.
     pub quote: Option<DisplayedQuote>,
+    /// Reference-rate observation, present only for rate providers.
+    pub rate: Option<DisplayedRate>,
     /// Bid levels, best first, bounded by the projector depth.
     pub bids: Vec<LevelView>,
     /// Ask levels, best first, bounded by the projector depth.

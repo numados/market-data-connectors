@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{RENDER_CADENCE, SHUTDOWN_BOUND, SessionConfig};
 use crate::display::{DisplaySnapshot, DisplayStatus};
-use crate::provider::{ProviderRun, SessionAdapter, SessionBounds};
+use crate::provider::{AbortOnDropHandle, ProviderRun, SessionAdapter, SessionBounds};
 use crate::reducer::Reducer;
 
 /// Terminal outcome of a session.
@@ -68,7 +68,7 @@ pub async fn run_session(
 
     let ProviderRun {
         future,
-        abort_guards,
+        abort_guards: _abort_guards,
     } = match adapter.start(&config, sender, session_token.clone()) {
         Ok(run) => run,
         Err(error) => {
@@ -76,10 +76,7 @@ pub async fn run_session(
             return finish(reducer, display, Terminal::StartFailed);
         }
     };
-    let mut provider_task = tokio::spawn(future);
-    // Guards already cover spawned provider tasks; the run future itself is
-    // owned by this spawned task and aborted below when it overruns.
-    drop(abort_guards);
+    let mut provider_task = AbortOnDropHandle::new(tokio::spawn(future));
 
     let mut dirty = false;
     let mut last_publish = Instant::now();
@@ -157,15 +154,15 @@ pub async fn run_session(
                 provider_done = true;
                 // Provider gone: drain what remains, then EOF ends the loop.
                 while terminal.is_none() {
-                    match stream.next().await {
-                        Some(Ok(event)) => {
+                    match stream.try_recv() {
+                        Ok(Some(Ok(event))) => {
                             reducer.apply_event(&event);
                         }
-                        Some(Err(fault)) => {
+                        Ok(Some(Err(fault))) => {
                             reducer.apply_fault(&fault);
                             terminal = Some(Terminal::DeliveryFault);
                         }
-                        None => {
+                        _ => {
                             terminal = Some(Terminal::StreamEof);
                         }
                     }

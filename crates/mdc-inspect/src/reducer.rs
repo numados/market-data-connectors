@@ -8,15 +8,16 @@
 //! algorithm — integrity control belongs to the projector and the provider.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mdc_core::{IntegrityAlert, MarketDataKind, MarketEvent, Symbol, SymbolTag};
+use mdc_core::{IntegrityAlert, MarketDataKind, MarketEvent, Symbol, SymbolTag, UnixNanos};
 use mdc_sinks::loss_intolerant::DeliveryFault;
 use mdc_sinks::top_of_book::{QuoteProjection, TopOfBookProjector};
 
 use crate::config::{ALERT_HISTORY, SessionConfig};
 use crate::display::{
-    AlertRecord, DisplaySnapshot, DisplayStatus, DisplayedQuote, LevelView, QuoteView,
-    SymbolDisplay,
+    AlertRecord, DisplaySnapshot, DisplayStatus, DisplayedQuote, DisplayedRate, LevelView,
+    QuoteView, RateView, SymbolDisplay,
 };
 use crate::provider::SessionBounds;
 
@@ -26,6 +27,7 @@ struct SymbolState {
     status: DisplayStatus,
     projector: TopOfBookProjector,
     retained: Option<QuoteView>,
+    rate: Option<RateView>,
     unavailability: Option<String>,
 }
 
@@ -43,20 +45,33 @@ pub struct Reducer {
 impl Reducer {
     /// Builds a reducer for a validated session configuration.
     pub fn new(config: &SessionConfig, bounds: SessionBounds) -> Self {
+        let reference = config.provider.as_str() == "frankfurter";
         let symbols: Vec<SymbolState> = config
             .symbols
             .iter()
             .enumerate()
-            .map(|(index, symbol)| SymbolState {
-                symbol: symbol.clone(),
-                status: DisplayStatus::Loading,
-                projector: TopOfBookProjector::new_l2(
-                    symbol.clone(),
-                    index as SymbolTag,
-                    Some(bounds.projector_depth),
-                ),
-                retained: None,
-                unavailability: None,
+            .map(|(index, symbol)| {
+                let display_symbol = if reference {
+                    config
+                        .base
+                        .as_ref()
+                        .map(|base| Symbol::from(format!("{base}{symbol}").as_str()))
+                        .unwrap_or_else(|| symbol.clone())
+                } else {
+                    symbol.clone()
+                };
+                SymbolState {
+                    symbol: display_symbol.clone(),
+                    status: DisplayStatus::Loading,
+                    projector: TopOfBookProjector::new_l2(
+                        display_symbol,
+                        index as SymbolTag,
+                        Some(bounds.projector_depth),
+                    ),
+                    retained: None,
+                    rate: None,
+                    unavailability: None,
+                }
             })
             .collect();
         let lookup = symbols
@@ -80,6 +95,10 @@ impl Reducer {
         let Some(&index) = self.lookup.get(&event.symbol) else {
             return;
         };
+        if matches!(event.kind, MarketDataKind::ReferenceRate(_)) {
+            self.apply_rate(index, event);
+            return;
+        }
         let projection = self.symbols[index].projector.handle_event(event);
         match &event.kind {
             MarketDataKind::IntegrityAlert(alert) => {
@@ -127,6 +146,14 @@ impl Reducer {
                 status: state.status,
                 quote: state.retained.as_ref().map(|quote| DisplayedQuote {
                     quote: quote.clone(),
+                    historical: state.status != DisplayStatus::InSync
+                        || self.session == DisplayStatus::Failed,
+                }),
+                rate: state.rate.as_ref().map(|rate| DisplayedRate {
+                    rate: RateView {
+                        receipt_age: receipt_age(rate.received_ts),
+                        ..rate.clone()
+                    },
                     historical: state.status != DisplayStatus::InSync
                         || self.session == DisplayStatus::Failed,
                 }),
@@ -194,6 +221,10 @@ impl Reducer {
                         state.status = DisplayStatus::Unavailable;
                         state.unavailability = Some(format!("{reason:?}"));
                     }
+                    None if state.rate.is_some() => {
+                        state.status = DisplayStatus::InSync;
+                        state.unavailability = None;
+                    }
                     None => {
                         state.status = DisplayStatus::AwaitingSnapshot;
                         state.unavailability = None;
@@ -211,7 +242,33 @@ impl Reducer {
                 state.unavailability = Some(alert_summary(other));
             }
         }
+        let diagnostic = state.unavailability.clone();
+        if let Some(rate) = &mut state.rate {
+            rate.diagnostic = diagnostic;
+        }
         self.retain_quote(index, projection);
+        self.update_session_status();
+    }
+
+    fn apply_rate(&mut self, index: usize, event: &MarketEvent<MarketDataKind>) {
+        let state = &mut self.symbols[index];
+        if let MarketDataKind::ReferenceRate(rate) = &event.kind {
+            let observation_ts = event.exchange_ts.unwrap_or(event.received_ts);
+            let day = observation_ts.0 / 86_400_000_000_000;
+            state.rate = Some(RateView {
+                provider: self.provider_label,
+                pair: event.symbol.clone(),
+                midpoint: rate.mid,
+                observation_ts,
+                observation_date: UnixNanos(day * 86_400_000_000_000),
+                received_ts: event.received_ts,
+                receipt_age: Duration::ZERO,
+                diagnostic: state.unavailability.clone(),
+            });
+            state.status = DisplayStatus::InSync;
+            state.unavailability = None;
+        }
+        self.update_session_status();
     }
 
     /// Applies a data-event projection: `Available` promotes to `InSync`,
@@ -231,6 +288,7 @@ impl Reducer {
             None => {}
         }
         self.retain_quote(index, projection);
+        self.update_session_status();
     }
 
     /// Retains the last valid projection; retained values become historical
@@ -258,6 +316,25 @@ impl Reducer {
         }
     }
 
+    fn update_session_status(&mut self) {
+        if self.session == DisplayStatus::Failed {
+            return;
+        }
+        if self
+            .symbols
+            .iter()
+            .any(|state| state.status == DisplayStatus::InSync)
+        {
+            self.session = DisplayStatus::InSync;
+        } else if self
+            .symbols
+            .iter()
+            .any(|state| state.status == DisplayStatus::Unavailable)
+        {
+            self.session = DisplayStatus::Unavailable;
+        }
+    }
+
     fn push_alert(&mut self, record: AlertRecord) {
         if self.alerts.len() >= ALERT_HISTORY {
             self.alerts.pop_front();
@@ -265,6 +342,14 @@ impl Reducer {
         }
         self.alerts.push_back(record);
     }
+}
+
+fn receipt_age(received: mdc_core::UnixNanos) -> Duration {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let elapsed = now.as_nanos().saturating_sub(received.0 as u128);
+    Duration::from_nanos(elapsed.min(u64::MAX as u128) as u64)
 }
 
 /// Sanitized, human-readable alert summary. Contains venue-state words and
