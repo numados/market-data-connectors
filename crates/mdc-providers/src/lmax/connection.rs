@@ -23,15 +23,15 @@ use crate::sink_util::ConnectionSink;
 /// Builds a JSON subscribe message frame for the target channel and instruments.
 pub fn build_subscribe_frame(channel: &str, instruments: &[String]) -> String {
     let req = SubscribeMessage::subscribe(channel, instruments);
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON unsubscribe message frame for the target channel and instruments.
 pub fn build_unsubscribe_frame(channel: &str, instruments: &[String]) -> String {
     let req = SubscribeMessage::unsubscribe(channel, instruments);
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Runs a single LMAX Digital WebSocket connection worker managing a slice of symbols.

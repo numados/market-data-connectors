@@ -50,8 +50,8 @@ pub fn build_live_trades_channel(symbol: &str) -> String {
 /// Builds a JSON subscribe message frame for a target channel.
 pub fn build_subscribe_frame(channel: &str) -> String {
     let req = SubscribeMessage::new(channel);
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Runs a single Bitstamp WebSocket connection worker managing a slice of symbols.

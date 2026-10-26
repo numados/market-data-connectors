@@ -38,24 +38,24 @@ pub fn extract_levels_from_channel(ch: &str) -> Option<u32> {
 pub fn build_sub_mbp_frame(symbol: &str, levels: u32, id: &str) -> String {
     let topic = format!("market.{symbol}.mbp.{levels}");
     let req = SubRequest { sub: &topic, id };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON unsubscription frame for incremental Market-By-Price (`mbp.{levels}`).
 pub fn build_unsub_mbp_frame(symbol: &str, levels: u32, id: Option<&str>) -> String {
     let topic = format!("market.{symbol}.mbp.{levels}");
     let req = UnsubRequest { unsub: &topic, id };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON subscription frame for public trades (`market.{symbol}.trade.detail`).
 pub fn build_sub_trades_frame(symbol: &str, id: &str) -> String {
     let topic = format!("market.{symbol}.trade.detail");
     let req = SubRequest { sub: &topic, id };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON request frame to fetch an in-band MBP order book snapshot.
@@ -65,15 +65,15 @@ pub fn build_req_snapshot_frame(symbol: &str, levels: u32, req_id: &str) -> Stri
         req: &topic,
         id: req_id,
     };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON pong response frame answering Huobi's application ping.
 pub fn build_pong_frame(ping_ts: u64) -> String {
     let pong = PongFrame { pong: ping_ts };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&pong).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&pong).expect("infallible static frame serialization")
 }
 
 /// Outgoing subscription request payload.

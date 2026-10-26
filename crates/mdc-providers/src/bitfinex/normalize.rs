@@ -7,6 +7,27 @@ use rust_decimal::Decimal;
 
 use crate::bitfinex::raw::{RawBookLevel, RawTradeEntry};
 
+/// Formats a `u64` into an ASCII string buffer without heap allocation.
+fn format_u64_to_buf(mut n: u64, buf: &mut [u8; 20]) -> &str {
+    if n == 0 {
+        buf[0] = b'0';
+        return match std::str::from_utf8(&buf[..1]) {
+            Ok(s) => s,
+            Err(_) => "0",
+        };
+    }
+    let mut i = 20;
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    match std::str::from_utf8(&buf[i..]) {
+        Ok(s) => s,
+        Err(_) => "0",
+    }
+}
+
 /// Maps a raw trade entry into a canonical `Trade` domain model.
 pub fn normalize_trade(
     trade: &RawTradeEntry<'_>,
@@ -24,11 +45,12 @@ pub fn normalize_trade(
     };
 
     let volume = raw_amount.abs();
-    let id_str = trade.id.to_string();
-    let namespace = TradeNamespace::new("bitfinex")
-        .unwrap_or_else(|_| panic!("static namespace 'bitfinex' is valid"));
-    let trade_id =
-        TradeId::new(&id_str).unwrap_or_else(|_| panic!("numeric trade id is valid ASCII"));
+    let mut id_buf = [0u8; 20];
+    let id_str = format_u64_to_buf(trade.id, &mut id_buf);
+    #[allow(clippy::expect_used)]
+    let namespace = TradeNamespace::new("bitfinex").expect("static namespace 'bitfinex' is valid");
+    #[allow(clippy::expect_used)]
+    let trade_id = TradeId::new(id_str).expect("numeric trade id is valid ASCII");
     let identity = Some(NativeTradeIdentity::new(namespace, trade_id));
 
     Ok(Trade {

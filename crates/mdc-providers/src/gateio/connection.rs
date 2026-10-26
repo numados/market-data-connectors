@@ -50,8 +50,8 @@ pub fn build_obu_subscribe_frame(symbol: &str, levels: u32, time_secs: u64) -> S
         event: "subscribe",
         payload: vec![&payload],
     };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON unsubscribe message frame for order book updates.
@@ -63,8 +63,8 @@ pub fn build_obu_unsubscribe_frame(symbol: &str, levels: u32, time_secs: u64) ->
         event: "unsubscribe",
         payload: vec![&payload],
     };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Builds a JSON subscribe message frame for public trades.
@@ -76,8 +76,8 @@ pub fn build_trades_subscribe_frame(symbols: &[Symbol], time_secs: u64) -> Strin
         event: "subscribe",
         payload: payloads,
     };
-    #[allow(clippy::unwrap_used)]
-    serde_json::to_string(&req).unwrap()
+    #[allow(clippy::expect_used)]
+    serde_json::to_string(&req).expect("infallible static frame serialization")
 }
 
 /// Runs a single Gate.io WebSocket connection worker managing a slice of symbols.
@@ -414,8 +414,9 @@ pub async fn run_connection_task<S: StreamingSink>(
                             // Heartbeat: spot.ping must be answered immediately with spot.pong
                             if env.channel == "spot.ping" {
                                 let pong = SpotPong::new(env.time);
-                                #[allow(clippy::unwrap_used)]
-                                let pong_str = serde_json::to_string(&pong).unwrap();
+                                #[allow(clippy::expect_used)]
+                                let pong_str = serde_json::to_string(&pong)
+                                    .expect("infallible static frame serialization");
                                 if let Err(e) = ws_tx.send(Message::Text(pong_str)).await {
                                     warn!(connection_id, error = %e, "Failed to reply to spot.ping with spot.pong");
                                     break 'frame_loop;
