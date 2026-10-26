@@ -66,9 +66,6 @@ impl SessionAdapter for BitfinexAdapter {
             let _ownership = handle;
             run.await
         });
-        Ok(ProviderRun {
-            future,
-            abort_guards: Vec::new(),
-        })
+        Ok(ProviderRun::Future(future))
     }
 }

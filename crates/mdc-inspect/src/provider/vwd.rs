@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mdc_core::{MdcError, Owned};
+use mdc_core::Owned;
 use mdc_providers::vwd::{VwdConfig, VwdConnector, VwdCredentials, VwdSymbol};
 use mdc_sinks::loss_intolerant::LossIntolerantSender;
 use tokio_util::sync::CancellationToken;
@@ -11,7 +11,7 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{AbortOnDropHandle, ProviderRun, SessionAdapter};
+use crate::provider::{ProviderRun, SessionAdapter};
 
 const ACCOUNT_PATH: &str = "MDC_INSPECT_VWD_ACCOUNT_PATH";
 const USERNAME: &str = "MDC_INSPECT_VWD_USERNAME";
@@ -127,15 +127,6 @@ impl SessionAdapter for VwdAdapter {
             .build()
             .map_err(|_| Error::Config("VWD configuration is invalid".to_string()))?;
         let (handle, join) = connector.run(Owned::new(sink), session_token);
-        let mut owned = AbortOnDropHandle::new(join);
-        Ok(ProviderRun {
-            future: Box::pin(async move {
-                let _handle = handle;
-                (&mut owned)
-                    .await
-                    .map_err(|_| MdcError::Protocol("VWD provider task failed".to_string()))?
-            }),
-            abort_guards: Vec::new(),
-        })
+        Ok(ProviderRun::spawned(join, handle))
     }
 }

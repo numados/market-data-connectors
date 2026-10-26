@@ -5,12 +5,13 @@
 //! state ([`AppState::Stopping`]) observed through a concurrent select arm,
 //! and a second `Ctrl-C` while stopping forces task abort (requirement 152).
 
+use std::io;
 use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tokio_util::sync::CancellationToken;
 
 use crate::action::{Action, map_event};
@@ -19,7 +20,7 @@ use crate::diagnostics::{DiagnosticsRing, DiagnosticsSnapshot};
 use crate::display::{DisplaySnapshot, DisplayStatus, UiState};
 use crate::error::Error;
 use crate::provider::{ProviderKind, SessionAdapter, SessionBounds};
-use crate::session::{SessionOutcome, run_session};
+use crate::session::{SessionOutcome, run_session_controlled};
 use crate::setup::{SetupAction, SetupState};
 
 /// Builds the adapter for a provider kind; injectable in tests.
@@ -58,6 +59,8 @@ pub struct App {
     display: Option<watch::Receiver<Arc<DisplaySnapshot>>>,
     session: Option<JoinHandle<SessionOutcome>>,
     session_token: Option<CancellationToken>,
+    force_stop: Option<CancellationToken>,
+    force_stop_requested: bool,
     diagnostics: Arc<Mutex<DiagnosticsRing>>,
     last_outcome: Option<SessionOutcome>,
     exit_requested: bool,
@@ -75,6 +78,8 @@ impl App {
             display: None,
             session: None,
             session_token: None,
+            force_stop: None,
+            force_stop_requested: false,
             diagnostics,
             last_outcome: None,
             exit_requested: false,
@@ -129,6 +134,7 @@ impl App {
         adapter.validate(&config)?;
         let bounds: SessionBounds = config.provider.session_bounds();
         let session_token = self.root.child_token();
+        let force_stop = CancellationToken::new();
         let (display_tx, display_rx) = watch::channel(Arc::new(DisplaySnapshot {
             provider: config.provider.label(),
             session: DisplayStatus::Loading,
@@ -137,24 +143,33 @@ impl App {
             alerts: Default::default(),
             alerts_evicted: 0,
         }));
-        let handle = tokio::spawn(run_session(
+        let handle = tokio::spawn(run_session_controlled(
             adapter,
             config,
             bounds,
             CHANNEL_CAPACITY,
             session_token.clone(),
+            force_stop.clone(),
             display_tx,
         ));
         self.display = Some(display_rx);
         self.session = Some(handle);
         self.session_token = Some(session_token);
+        self.force_stop = Some(force_stop);
+        self.force_stop_requested = false;
         self.state = AppState::Running;
         Ok(())
     }
 
-    /// Feeds a raw input event: text-entry keys go to the setup screen while
-    /// it is active; other states use the action mapping.
+    /// Feeds a raw input event. Global control and help actions are handled
+    /// before setup text entry; native symbol characters keep their text
+    /// semantics while the setup field owns ordinary input.
     pub fn handle_key_event(&mut self, event: &crossterm::event::Event, factory: &AdapterFactory) {
+        let mapped = map_event(event);
+        if let Some(action @ (Action::ForceQuit | Action::ToggleHelp)) = mapped {
+            self.handle_action(action, factory);
+            return;
+        }
         if self.state == AppState::Setup && !self.help_open {
             if let crossterm::event::Event::Key(key) = event {
                 if matches!(self.setup.handle_key(key), SetupAction::Start) {
@@ -163,7 +178,7 @@ impl App {
                 return;
             }
         }
-        if let Some(action) = map_event(event) {
+        if let Some(action) = mapped {
             self.handle_action(action, factory);
         }
     }
@@ -172,23 +187,32 @@ impl App {
     pub fn handle_action(&mut self, action: Action, factory: &AdapterFactory) {
         match action {
             Action::ForceQuit => {
-                // Quit from every interactive state; while a session is
-                // stopping, force task abort (requirement 152).
-                if let Some(handle) = self.session.as_ref() {
-                    handle.abort();
+                // The first interrupt starts cooperative teardown. A repeat
+                // cancels the force token; the session still owns and awaits
+                // the provider task before the application exits.
+                if self.session.is_some() {
+                    if self.state == AppState::Stopping {
+                        if let Some(token) = self.force_stop.as_ref() {
+                            token.cancel();
+                        }
+                        self.force_stop_requested = true;
+                    } else {
+                        if let Some(token) = self.session_token.as_ref() {
+                            token.cancel();
+                        }
+                        self.state = AppState::Stopping;
+                    }
+                    self.root.cancel();
+                    self.exit_requested = true;
+                } else {
+                    self.root.cancel();
+                    self.exit_requested = true;
+                    self.state = AppState::Exiting;
                 }
-                if let Some(token) = self.session_token.as_ref() {
-                    token.cancel();
-                }
-                self.root.cancel();
-                self.exit_requested = true;
-                self.state = AppState::Exiting;
             }
             Action::Quit => match self.state {
                 AppState::Running | AppState::Stopping => {
-                    if let Some(token) = self.session_token.as_ref() {
-                        token.cancel();
-                    }
+                    self.root.cancel();
                     self.exit_requested = true;
                     self.state = AppState::Stopping;
                 }
@@ -260,6 +284,8 @@ impl App {
     pub fn on_session_finished(&mut self, outcome: SessionOutcome) {
         self.session = None;
         self.session_token = None;
+        self.force_stop = None;
+        self.force_stop_requested = false;
         self.last_outcome = Some(outcome);
         if self.exit_requested {
             self.state = AppState::Exiting;
@@ -334,38 +360,116 @@ impl App {
     pub fn last_outcome(&self) -> Option<&SessionOutcome> {
         self.last_outcome.as_ref()
     }
+
+    async fn reap_session(&mut self) {
+        let Some(handle) = self.session.take() else {
+            return;
+        };
+        let outcome = session_outcome(handle.await);
+        self.on_session_finished(outcome);
+    }
+
+    async fn teardown(&mut self) {
+        self.root.cancel();
+        if self.force_stop_requested {
+            if let Some(token) = self.force_stop.as_ref() {
+                token.cancel();
+            }
+        }
+        self.reap_session().await;
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.root.cancel();
+        if let Some(token) = self.session_token.as_ref() {
+            token.cancel();
+        }
+        if let Some(token) = self.force_stop.as_ref() {
+            token.cancel();
+        }
+        if let Some(handle) = self.session.as_ref() {
+            handle.abort();
+        }
+    }
+}
+
+fn session_outcome(result: Result<SessionOutcome, tokio::task::JoinError>) -> SessionOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(join_error) if join_error.is_panic() => SessionOutcome {
+            status: DisplayStatus::Failed,
+            failure: Some("session task panicked".to_string()),
+        },
+        Err(_) => SessionOutcome {
+            status: DisplayStatus::Failed,
+            failure: Some("session task cancelled".to_string()),
+        },
+    }
 }
 
 /// Runs the interactive loop until exit. `factory` builds provider adapters;
 /// `direct` starts a session immediately (CLI direct-start mode).
 pub async fn run(
-    mut app: App,
-    mut terminal: ratatui::Terminal<impl ratatui::backend::Backend>,
+    app: App,
+    terminal: ratatui::Terminal<impl ratatui::backend::Backend>,
     direct: Option<SessionConfig>,
     factory: &AdapterFactory,
 ) -> Result<ExitOutcome, Error> {
-    if let Some(config) = direct {
-        app.start_session(config, factory)?;
-    }
-    let mut input = crossterm::event::EventStream::new();
-    let mut ticker = interval(RENDER_CADENCE);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
+    let input = crossterm::event::EventStream::new();
+    run_with_input(app, terminal, direct, factory, input, |terminal, app| {
         let snapshot = app.snapshot();
         let diagnostics = app.diagnostics_snapshot();
-        terminal
-            .draw(|frame| {
-                if app.state() == &AppState::Setup {
-                    crate::view::draw_setup(frame, app.setup());
-                } else {
-                    crate::view::draw_main(frame, &snapshot, app.ui(), &diagnostics);
-                }
-                if app.help_open() {
-                    crate::view::draw_help(frame);
-                }
-            })
-            .map_err(|e| Error::Terminal(e.to_string()))?;
+        terminal.draw(|frame| {
+            if app.state() == &AppState::Setup {
+                crate::view::draw_setup(frame, app.setup());
+            } else {
+                crate::view::draw_main(frame, &snapshot, app.ui(), &diagnostics);
+            }
+            if app.help_open() {
+                crate::view::draw_help(frame);
+            }
+        })?;
+        Ok(())
+    })
+    .await
+}
+
+/// Runs the loop with injectable input and rendering seams. The production
+/// entry point supplies Crossterm's event stream and the terminal renderer;
+/// tests can fail either boundary without activating a real terminal.
+pub(crate) async fn run_with_input<B, S, R>(
+    mut app: App,
+    mut terminal: ratatui::Terminal<B>,
+    direct: Option<SessionConfig>,
+    factory: &AdapterFactory,
+    mut input: S,
+    mut render: R,
+) -> Result<ExitOutcome, Error>
+where
+    B: ratatui::backend::Backend,
+    S: futures_util::Stream<Item = io::Result<crossterm::event::Event>> + Unpin,
+    R: FnMut(&mut ratatui::Terminal<B>, &App) -> io::Result<()>,
+{
+    if let Some(config) = direct {
+        if let Err(error) = app.start_session(config, factory) {
+            app.teardown().await;
+            return Err(error);
+        }
+    }
+
+    let mut loop_error = None;
+    if let Err(error) = render(&mut terminal, &app) {
+        loop_error = Some(Error::Terminal(error.to_string()));
+    }
+
+    let mut ticker = interval_at(Instant::now() + RENDER_CADENCE, RENDER_CADENCE);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    while loop_error.is_none() {
+        if app.state() == &AppState::Exiting && app.session.is_none() {
+            break;
+        }
 
         let joined = async {
             match app.session.as_mut() {
@@ -379,24 +483,15 @@ pub async fn run(
 
         tokio::select! {
             _ = ticker.tick() => {
-                // Render cadence tick: loop back to draw.
+                if let Err(error) = render(&mut terminal, &app) {
+                    loop_error = Some(Error::Terminal(error.to_string()));
+                }
             }
             result = joined => {
                 if let Some(result) = result {
-                    let outcome = match result {
-                        Ok(outcome) => outcome,
-                        Err(join_error) if join_error.is_panic() => SessionOutcome {
-                            status: DisplayStatus::Failed,
-                            failure: Some("session task panicked".to_string()),
-                        },
-                        Err(_) => SessionOutcome {
-                            status: DisplayStatus::Failed,
-                            failure: Some("session task cancelled".to_string()),
-                        },
-                    };
-                    app.on_session_finished(outcome);
+                    app.on_session_finished(session_outcome(result));
                     if app.exit_requested() {
-                        return Ok(ExitOutcome { session: app.last_outcome().cloned() });
+                        break;
                     }
                 }
             }
@@ -404,118 +499,30 @@ pub async fn run(
                 match input_event {
                     Some(Ok(event)) => {
                         app.handle_key_event(&event, factory);
-                        if app.state() == &AppState::Exiting {
-                            return Ok(ExitOutcome { session: app.last_outcome().cloned() });
+                        if app.state() == &AppState::Exiting && app.session.is_none() {
+                            break;
                         }
                     }
-                    Some(Err(error)) => return Err(Error::Terminal(error.to_string())),
-                    None => return Err(Error::Terminal("input stream ended".to_string())),
+                    Some(Err(error)) => {
+                        loop_error = Some(Error::Terminal(error.to_string()));
+                    }
+                    None => {
+                        loop_error = Some(Error::Terminal("input stream ended".to_string()));
+                    }
                 }
             }
         }
+    }
+
+    app.teardown().await;
+    if let Some(error) = loop_error {
+        Err(error)
+    } else {
+        Ok(ExitOutcome {
+            session: app.last_outcome().cloned(),
+        })
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use crate::provider::ProviderRun;
-
-    fn factory_unavailable() -> Box<AdapterFactory> {
-        Box::new(|kind: ProviderKind| Err(Error::NotYetImplemented(kind.label().to_string())))
-    }
-
-    fn app() -> App {
-        App::new(Arc::new(Mutex::new(DiagnosticsRing::new())))
-    }
-
-    #[test]
-    fn starts_on_setup_screen() {
-        let app = app();
-        assert_eq!(app.state(), &AppState::Setup);
-        assert!(app.snapshot().session == DisplayStatus::Empty);
-    }
-
-    #[test]
-    fn start_without_adapter_stays_in_setup_with_error() {
-        let mut app = app();
-        let factory = factory_unavailable();
-        app.handle_key_event(
-            &crossterm::event::Event::Key(crate::setup::key_for_test('B')),
-            &factory,
-        );
-        // Type a symbol and add it, then start.
-        for c in "BTCUSDT".chars() {
-            app.handle_key_event(
-                &crossterm::event::Event::Key(crate::setup::key_for_test(c)),
-                &factory,
-            );
-        }
-        app.handle_key_event(
-            &crossterm::event::Event::Key(crate::setup::key_for_test('\n')),
-            &factory,
-        );
-        app.handle_action(Action::Start, &factory);
-        assert_eq!(
-            app.state(),
-            &AppState::Setup,
-            "NotYetImplemented keeps setup"
-        );
-    }
-
-    #[test]
-    fn quit_from_setup_exits_immediately() {
-        let mut app = app();
-        let factory = factory_unavailable();
-        app.handle_action(Action::Quit, &factory);
-        assert_eq!(app.state(), &AppState::Exiting);
-    }
-
-    #[test]
-    fn configure_and_help_and_focus_transitions() {
-        let mut app = app();
-        let factory = factory_unavailable();
-        app.handle_action(Action::ToggleHelp, &factory);
-        assert!(app.help_open());
-        app.handle_action(Action::ToggleHelp, &factory);
-        assert!(!app.help_open());
-        app.handle_action(Action::Configure, &factory);
-        assert_eq!(app.state(), &AppState::Setup);
-        app.handle_action(Action::FocusNext, &factory);
-        assert_eq!(app.ui().focus, crate::display::Focus::Book);
-        app.handle_action(Action::FocusPrev, &factory);
-        assert_eq!(app.ui().focus, crate::display::Focus::Symbols);
-    }
-
-    #[test]
-    fn scrolling_is_capped_at_zero() {
-        let mut app = app();
-        let factory = factory_unavailable();
-        app.handle_action(Action::FocusNext, &factory);
-        app.handle_action(Action::ScrollUp, &factory);
-        assert_eq!(app.ui().book_scroll, 0);
-        app.handle_action(Action::PageDown, &factory);
-        assert_eq!(app.ui().book_scroll, 10);
-    }
-
-    #[test]
-    fn adapter_trait_objects_are_object_safe_enough_for_factories() {
-        // Compile-time shape check: a factory returns adapters.
-        fn make() -> Result<Arc<dyn SessionAdapter>, Error> {
-            struct NeverAdapter;
-            impl SessionAdapter for NeverAdapter {
-                fn start(
-                    &self,
-                    _config: &SessionConfig,
-                    _sink: mdc_sinks::loss_intolerant::LossIntolerantSender,
-                    _token: CancellationToken,
-                ) -> Result<ProviderRun, Error> {
-                    Err(Error::NotYetImplemented("never".to_string()))
-                }
-            }
-            Ok(Arc::new(NeverAdapter))
-        }
-        assert!(make().is_ok());
-    }
-}
+mod tests;

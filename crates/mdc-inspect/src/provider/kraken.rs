@@ -75,9 +75,6 @@ impl SessionAdapter for KrakenAdapter {
             let _ownership = handle;
             connector.run(session_token).await
         });
-        Ok(ProviderRun {
-            future,
-            abort_guards: Vec::new(),
-        })
+        Ok(ProviderRun::Future(future))
     }
 }

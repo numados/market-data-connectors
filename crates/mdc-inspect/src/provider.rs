@@ -359,15 +359,33 @@ pub type ProviderFuture = Pin<Box<dyn Future<Output = Result<(), MdcError>> + Se
 
 /// A started provider session returned by an adapter.
 ///
-/// Owns the provider run future and any teardown guards. Dropping or
-/// aborting the future must terminate the provider; spawned `JoinHandle`s
-/// must be wrapped in [`AbortOnDropHandle`] guards so no provider task is
-/// ever detached.
-pub struct ProviderRun {
-    /// Owned provider run future.
-    pub future: ProviderFuture,
-    /// Abort-on-drop ownership of spawned provider tasks.
-    pub abort_guards: Vec<AbortOnDropHandle<()>>,
+/// WebSocket adapters return an unspawned future and the session normalizes it
+/// into one owned task. Polling adapters already spawn their connector task;
+/// those adapters return its join handle directly together with the connector
+/// control handle that must remain alive until the task completes.
+pub enum ProviderRun {
+    /// An unspawned connector future owned by the session.
+    Future(ProviderFuture),
+    /// A connector task that was spawned by the provider adapter.
+    Spawned {
+        /// The actual provider task, including abort-on-drop ownership.
+        task: AbortOnDropHandle<Result<(), MdcError>>,
+        /// Connector control state retained for the task lifetime.
+        ownership: Box<dyn Send>,
+    },
+}
+
+impl ProviderRun {
+    /// Wraps an already-spawned provider task and retains its control handle.
+    pub fn spawned<T: Send + 'static>(
+        task: tokio::task::JoinHandle<Result<(), MdcError>>,
+        ownership: T,
+    ) -> Self {
+        Self::Spawned {
+            task: AbortOnDropHandle::new(task),
+            ownership: Box::new(ownership),
+        }
+    }
 }
 
 /// Wrapper around a [`tokio::task::JoinHandle`] that aborts the task on
@@ -420,9 +438,9 @@ impl<T> std::fmt::Debug for AbortOnDropHandle<T> {
 /// connectors are integrated (PRD 31 §3.10 requirement 148).
 ///
 /// Implementations normalize the providers' three lifecycle styles into one
-/// owned run future: builder-owned-sink connectors with `run(cancel)`,
-/// sink-taking connectors returning an unspawned future, and sink-taking
-/// connectors returning an already spawned `JoinHandle`.
+/// owned run: builder-owned-sink connectors with `run(cancel)`, sink-taking
+/// connectors returning an unspawned future, and sink-taking connectors
+/// returning an already spawned `JoinHandle`.
 pub trait SessionAdapter: Send + Sync + 'static {
     /// Performs offline pre-start validation. Failures keep the setup screen active.
     fn validate(&self, config: &SessionConfig) -> Result<(), Error> {
@@ -433,8 +451,8 @@ pub trait SessionAdapter: Send + Sync + 'static {
     ///
     /// Receives the validated session configuration, the loss-intolerant
     /// sender the provider must feed, and the session child token. Returns
-    /// an owned run future plus teardown guards, or an actionable error
-    /// before any provider network I/O when configuration is invalid.
+    /// an owned run or an actionable error before any provider network I/O
+    /// when configuration is invalid.
     fn start(
         &self,
         config: &SessionConfig,
@@ -511,251 +529,4 @@ pub mod kraken;
 pub mod lmax;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    fn parse(name: &str) -> Result<ProviderKind, ParseProviderError> {
-        ProviderKind::parse(name)
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn parses_compiled_provider_case_insensitively() {
-        assert_eq!(parse("binance"), Ok(ProviderKind::Binance));
-        assert_eq!(parse(" BinAnCE "), Ok(ProviderKind::Binance));
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn binance_bounds_come_from_capabilities() {
-        let bounds = ProviderKind::Binance.session_bounds();
-        assert_eq!(bounds.max_symbols, 25);
-        assert_eq!(bounds.projector_depth, 1000);
-        assert_eq!(bounds.affected_connection, 1);
-        assert!(ProviderKind::Binance.capabilities().is_some());
-    }
-
-    #[test]
-    fn unknown_provider_names_every_compiled_entry() {
-        let error = parse("doesnotexist").unwrap_err();
-        let ParseProviderError::Unknown { available, .. } = &error else {
-            panic!("expected unknown-provider error, got {error:?}");
-        };
-        if let Some(kind) = ProviderKind::ALL.first() {
-            assert!(available.contains(kind.as_str()));
-        }
-    }
-
-    #[cfg(not(feature = "kraken"))]
-    #[test]
-    fn known_uncompiled_provider_names_the_feature() {
-        let error = parse("kraken").unwrap_err();
-        let ParseProviderError::NotCompiled { feature, .. } = &error else {
-            panic!("expected not-compiled error, got {error:?}");
-        };
-        assert_eq!(feature, "kraken");
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod remaining_bounds {
-    use super::*;
-    #[cfg(feature = "kraken")]
-    #[test]
-    fn kraken_bounds_and_capabilities() {
-        let kind = ProviderKind::Kraken;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 300,
-                projector_depth: 1000,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "coinbase")]
-    #[test]
-    fn coinbase_bounds_and_capabilities() {
-        let kind = ProviderKind::Coinbase;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 1000,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "bitfinex")]
-    #[test]
-    fn bitfinex_bounds_and_capabilities() {
-        let kind = ProviderKind::Bitfinex;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 12,
-                projector_depth: 250,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "gateio")]
-    #[test]
-    fn gateio_bounds_and_capabilities() {
-        let kind = ProviderKind::Gateio;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 50,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "bitstamp")]
-    #[test]
-    fn bitstamp_bounds_and_capabilities() {
-        let kind = ProviderKind::Bitstamp;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 100,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "huobi")]
-    #[test]
-    fn huobi_bounds_and_capabilities() {
-        let kind = ProviderKind::Huobi;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 150,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "coinbase-advanced")]
-    #[test]
-    fn coinbase_advanced_bounds_and_capabilities() {
-        let kind = ProviderKind::CoinbaseAdvanced;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 100,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_none());
-    }
-    #[cfg(feature = "lmax")]
-    #[test]
-    fn lmax_bounds_and_capabilities() {
-        let kind = ProviderKind::Lmax;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 26,
-                projector_depth: 20,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "frankfurter")]
-    #[test]
-    fn frankfurter_bounds_and_capabilities() {
-        let kind = ProviderKind::Frankfurter;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 100,
-                projector_depth: 1,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_some());
-        assert_eq!(
-            kind.session_bounds().max_symbols,
-            kind.capabilities()
-                .unwrap()
-                .bounds
-                .max_symbols_per_connection
-        );
-    }
-    #[cfg(feature = "vwd")]
-    #[test]
-    fn vwd_bounds_and_capabilities() {
-        let kind = ProviderKind::Vwd;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 1,
-                affected_connection: 1
-            }
-        );
-        assert!(kind.capabilities().is_none());
-    }
-}
+mod tests;
