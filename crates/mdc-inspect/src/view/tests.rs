@@ -162,6 +162,9 @@ fn renders_failure_line() {
     let text = render(100, 30, &snap, &empty_ui(), &empty_diagnostics());
     assert!(text.contains("failure:"), "{text}");
     assert!(text.contains("capacity exceeded"), "{text}");
+    assert!(text.contains("c: configure"), "{text}");
+    assert!(text.contains("Enter: start"), "{text}");
+    assert!(!text.contains("s: stop"), "{text}");
 }
 
 #[test]

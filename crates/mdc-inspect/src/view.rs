@@ -480,7 +480,9 @@ const fn focus_label(focus: Focus) -> &'static str {
 fn draw_hints(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
     let hints = match snapshot.session {
         DisplayStatus::Empty => "Enter: start | Tab: focus | ?: help | q: quit | Ctrl-C: quit",
-        DisplayStatus::Stopped => "c: configure | Enter: start | q: quit | Ctrl-C: quit",
+        DisplayStatus::Stopped | DisplayStatus::Failed => {
+            "c: configure | Enter: start | q: quit | Ctrl-C: quit"
+        }
         _ => "s: stop | Tab: focus | Arrows: scroll | ?: help | q: quit | Ctrl-C: quit",
     };
     frame.render_widget(Paragraph::new(hints), area);
