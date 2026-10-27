@@ -10,6 +10,9 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 use super::Reducer;
+
+#[path = "tests/projection_failures.rs"]
+mod projection_failures;
 use crate::config::SessionConfig;
 use crate::display::DisplayStatus;
 use crate::provider::{ProviderKind, SessionBounds};

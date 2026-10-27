@@ -8,12 +8,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mdc_inspect::config::{CHANNEL_CAPACITY, SessionConfig};
-use mdc_inspect::display::{DisplaySnapshot, DisplayStatus};
+use mdc_inspect::diagnostics::DiagnosticsSnapshot;
+use mdc_inspect::display::{DisplaySnapshot, DisplayStatus, UiState};
 use mdc_inspect::provider::ProviderKind;
 use mdc_inspect::provider::coinbase::CoinbaseAdapter;
 use mdc_inspect::reducer::Reducer;
 use mdc_inspect::session::{SessionOutcome, run_session};
 use mdc_testkit::{MockWsServer, WsAction};
+use ratatui::{Terminal, backend::TestBackend};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -103,6 +105,73 @@ impl TestSession {
         assert_eq!(outcome.status, DisplayStatus::Stopped);
         assert!(outcome.failure.is_none());
     }
+}
+
+#[tokio::test]
+async fn oversized_snapshot_stays_unavailable_until_provider_recovery() {
+    let cap = ProviderKind::Coinbase.session_bounds().projector_depth;
+    let mut session = TestSession::start(snapshot_frame(cap + 1)).await;
+    let failed = session
+        .observe(|snapshot| {
+            snapshot
+                .alerts
+                .iter()
+                .any(|alert| alert.summary.starts_with("resync completed"))
+        })
+        .await;
+    let symbol = failed.symbols.first().unwrap();
+    assert_eq!(symbol.status, DisplayStatus::Unavailable);
+    assert_eq!(symbol.unavailability.as_deref(), Some("ExceededMaxDepth"));
+    assert!(symbol.bids.is_empty() && symbol.asks.is_empty() && symbol.quote.is_none());
+    let mut terminal = Terminal::new(TestBackend::new(180, 40)).unwrap();
+    terminal
+        .draw(|frame| {
+            mdc_inspect::view::draw_main(
+                frame,
+                &failed,
+                &UiState::new(),
+                &DiagnosticsSnapshot::default(),
+            )
+        })
+        .unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("reason: ExceededMaxDepth"), "{text}");
+
+    for sequence in [90, 4000] {
+        session.ws.broadcast_text(format!(r#"{{"type":"heartbeat","sequence":{sequence},"last_trade_id":10,"product_id":"BTC-USD","time":"2024-01-01T00:00:00Z"}}"#)).unwrap();
+    }
+    tokio::time::timeout(WAIT_BOUND, session.ws.wait_for_client_messages(3))
+        .await
+        .expect("native unsubscribe and resubscribe");
+    session.ws.broadcast_text(snapshot_frame(cap)).unwrap();
+    let recovered = session
+        .observe(|snapshot| {
+            snapshot
+                .symbols
+                .first()
+                .is_some_and(|symbol| symbol.status == DisplayStatus::InSync)
+        })
+        .await;
+    let symbol = recovered.symbols.first().unwrap();
+    assert_eq!(symbol.bids.len(), cap);
+    assert_eq!(symbol.asks.len(), cap);
+    assert!(symbol.unavailability.is_none());
+    assert!(!symbol.quote.as_ref().unwrap().historical);
+    assert_eq!(
+        symbol.quote.as_ref().unwrap().quote.bid,
+        1_000_000_i64.into()
+    );
+    assert_eq!(
+        symbol.quote.as_ref().unwrap().quote.ask,
+        1_000_001_i64.into()
+    );
+    session.stop().await;
 }
 
 #[tokio::test]

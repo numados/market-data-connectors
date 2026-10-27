@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 
 use mdc_core::{IntegrityAlert, MarketDataKind, MarketEvent, Symbol, SymbolTag, UnixNanos};
 use mdc_sinks::loss_intolerant::DeliveryFault;
-use mdc_sinks::top_of_book::{QuoteProjection, TopOfBookProjector};
+use mdc_sinks::top_of_book::{QuoteProjection, TopOfBookProjector, UnavailableReason};
 
 use crate::config::{ALERT_HISTORY, SessionConfig};
 use crate::display::{
@@ -40,7 +40,16 @@ struct SymbolState {
     symbol: Symbol,
     status: DisplayStatus,
     data: SymbolData,
-    unavailability: Option<String>,
+    unavailability: Option<UnavailableReason>,
+}
+
+impl SymbolState {
+    fn unavailability_message(&self) -> Option<String> {
+        self.unavailability.as_ref().map(|reason| match reason {
+            UnavailableReason::IntegrityAlert(summary) => summary.clone(),
+            reason => format!("{reason:?}"),
+        })
+    }
 }
 
 /// Ordered reducer over the loss-intolerant stream.
@@ -228,7 +237,7 @@ impl Reducer {
                     rate,
                     bids,
                     asks,
-                    unavailability: state.unavailability.clone(),
+                    unavailability: state.unavailability_message(),
                 }
             })
             .collect();
@@ -266,23 +275,12 @@ impl Reducer {
                 state.unavailability = None;
             }
             IntegrityAlert::ResyncCompleted { .. } => {
-                // In sync only when the projector releases a valid candidate;
-                // an invalid or one-sided candidate is unavailable, and no
-                // projection keeps awaiting (candidate still buffered).
-                match projection {
-                    Some(QuoteProjection::Available { .. }) => {
-                        state.status = DisplayStatus::InSync;
-                        state.unavailability = None;
-                    }
-                    Some(QuoteProjection::Unavailable { ref reason, .. }) => {
-                        state.status = DisplayStatus::Unavailable;
-                        state.unavailability = Some(format!("{reason:?}"));
-                    }
-                    None => {
-                        state.status = DisplayStatus::AwaitingSnapshot;
-                        state.unavailability = None;
-                    }
+                if projection.is_none() {
+                    state.status = DisplayStatus::AwaitingSnapshot;
+                    state.unavailability = None;
                 }
+                self.apply_projection(index, projection);
+                return;
             }
             IntegrityAlert::ConnectionLost {
                 reason: mdc_core::DisconnectKind::Paused,
@@ -292,7 +290,8 @@ impl Reducer {
             }
             other => {
                 state.status = DisplayStatus::Unavailable;
-                state.unavailability = Some(alert_summary(other));
+                state.unavailability =
+                    Some(UnavailableReason::IntegrityAlert(alert_summary(other)));
             }
         }
         self.retain_quote(index, projection);
@@ -340,7 +339,7 @@ impl Reducer {
             }
             _ => {
                 state.status = DisplayStatus::Unavailable;
-                state.unavailability = Some(summary.clone());
+                state.unavailability = Some(UnavailableReason::IntegrityAlert(summary.clone()));
                 if let Some(rate) = retained {
                     rate.diagnostic = Some(summary);
                 }
@@ -362,7 +361,7 @@ impl Reducer {
             }
             SymbolData::Book { .. } => None,
         }
-        .or_else(|| state.unavailability.clone());
+        .or_else(|| state.unavailability_message());
         let SymbolData::Rate { retained } = &mut state.data else {
             return;
         };
@@ -396,7 +395,19 @@ impl Reducer {
             }
             Some(QuoteProjection::Unavailable { ref reason, .. }) => {
                 state.status = DisplayStatus::Unavailable;
-                state.unavailability = Some(format!("{reason:?}"));
+                // Completion cannot make an invalid candidate usable. Keep its
+                // specific failure instead of replacing it with a generic state.
+                let preserve_cause = matches!(reason, UnavailableReason::NotSynchronized)
+                    && state.unavailability.as_ref().is_some_and(|previous| {
+                        !matches!(
+                            previous,
+                            UnavailableReason::NotSynchronized
+                                | UnavailableReason::IntegrityAlert(_)
+                        )
+                    });
+                if !preserve_cause {
+                    state.unavailability = Some(reason.clone());
+                }
             }
             None => {}
         }
