@@ -386,25 +386,20 @@ fn draw_book(
 ) {
     let items: Vec<ListItem<'_>> = match symbol {
         None => vec![ListItem::new("no symbol selected")],
-        Some(symbol) => {
-            let mut items = Vec::new();
-            for level in symbol.bids.iter() {
-                items.push(ListItem::new(format!(
-                    "bid  {:>14} x {}",
-                    level.price, level.size
-                )));
-            }
-            for level in symbol.asks.iter() {
-                items.push(ListItem::new(format!(
-                    "ask  {:>14} x {}",
-                    level.price, level.size
-                )));
-            }
-            if items.is_empty() {
-                items.push(ListItem::new("book empty"));
-            }
-            items
+        Some(symbol) if symbol.bids.is_empty() && symbol.asks.is_empty() => {
+            vec![ListItem::new("book empty")]
         }
+        Some(symbol) => symbol
+            .bids
+            .iter()
+            .map(|level| ("bid", level))
+            .chain(symbol.asks.iter().map(|level| ("ask", level)))
+            .skip(ui.book_scroll)
+            .take(usize::from(area.height.saturating_sub(2)))
+            .map(|(side, level)| {
+                ListItem::new(format!("{side}  {:>14} x {}", level.price, level.size))
+            })
+            .collect(),
     };
     let historical = matches!(
         snapshot.session,
@@ -419,7 +414,7 @@ fn draw_book(
     } else {
         title
     };
-    let list = List::new(items.into_iter().skip(ui.book_scroll))
+    let list = List::new(items)
         .style(if historical {
             Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else {

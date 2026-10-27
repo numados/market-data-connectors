@@ -37,6 +37,32 @@ fn coinbase_header_identifies_declared_depth() {
     assert!(text.contains("declared max depth: 1000"), "{text}");
 }
 
+#[test]
+fn deep_book_scroll_crosses_bid_ask_boundary() {
+    let mut symbol = view(Symbol::from("BTC-USD"), DisplayStatus::InSync, None);
+    symbol.bids = (0..25_000)
+        .map(|index| LevelView {
+            price: Decimal::from(1_000_000 - index),
+            size: Decimal::ONE,
+        })
+        .collect();
+    symbol.asks = (0..25_000)
+        .map(|index| LevelView {
+            price: Decimal::from(1_000_001 + index),
+            size: Decimal::TWO,
+        })
+        .collect();
+    let snap = snapshot(DisplayStatus::InSync, vec![symbol]);
+    let mut ui = UiState::new();
+    ui.book_scroll = 24_998;
+    let text = render(180, 40, &snap, &ui, &empty_diagnostics());
+    assert!(text.contains("975002"), "{text}");
+    assert!(text.contains("975001"), "{text}");
+    assert!(text.contains("1000001"), "{text}");
+    assert!(!text.contains("1000000"), "{text}");
+    assert!(!text.contains("1025000"), "{text}");
+}
+
 fn view(symbol: Symbol, status: DisplayStatus, quote: Option<DisplayedQuote>) -> SymbolDisplay {
     SymbolDisplay {
         symbol,
