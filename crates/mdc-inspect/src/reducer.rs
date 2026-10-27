@@ -180,8 +180,11 @@ impl Reducer {
             .symbols
             .iter()
             .map(|state| {
-                let historical = state.status != DisplayStatus::InSync
-                    || matches!(self.session, DisplayStatus::Stopped | DisplayStatus::Failed);
+                let status = match self.session {
+                    DisplayStatus::Stopped | DisplayStatus::Failed => self.session,
+                    _ => state.status,
+                };
+                let historical = status != DisplayStatus::InSync;
                 let (quote, rate, bids, asks) = match &state.data {
                     SymbolData::Book {
                         projector,
@@ -223,7 +226,7 @@ impl Reducer {
                 };
                 SymbolDisplay {
                     symbol: state.symbol.clone(),
-                    status: state.status,
+                    status,
                     quote,
                     rate,
                     bids,

@@ -176,7 +176,8 @@ async fn reduces_events_in_order_and_reports_unexpected_eof() {
     let snapshot = display.borrow().clone();
     assert_eq!(snapshot.symbols.len(), 1);
     assert_eq!(snapshot.alerts.len(), 1);
-    assert_eq!(snapshot.symbols[0].status, DisplayStatus::InSync);
+    assert_eq!(snapshot.symbols[0].status, DisplayStatus::Failed);
+    assert!(snapshot.symbols[0].quote.as_ref().unwrap().historical);
 }
 
 #[tokio::test(start_paused = true)]

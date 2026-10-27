@@ -35,6 +35,31 @@ fn config(symbols: &[&str]) -> SessionConfig {
     SessionConfig::new(ProviderKind::Test, &raw).expect("valid config")
 }
 
+#[test]
+fn terminal_sessions_override_retained_symbol_status() {
+    for terminal_status in [DisplayStatus::Stopped, DisplayStatus::Failed] {
+        let mut reducer = Reducer::new(&config(&["BTCUSDT"]), bounds(100));
+        reducer.apply_event(&event("BTCUSDT", balanced_snapshot(), 1));
+        reducer.apply_event(&event(
+            "BTCUSDT",
+            MarketDataKind::IntegrityAlert(IntegrityAlert::ResyncCompleted {
+                last_update_id: Some(1),
+            }),
+            2,
+        ));
+        assert_eq!(reducer.snapshot().symbols[0].status, DisplayStatus::InSync);
+        match terminal_status {
+            DisplayStatus::Stopped => reducer.apply_eof(true),
+            DisplayStatus::Failed => reducer.apply_session_failure("provider failed".into()),
+            _ => unreachable!("terminal test case"),
+        }
+        let snapshot = reducer.snapshot();
+        let symbol = &snapshot.symbols[0];
+        assert_eq!(symbol.status, terminal_status);
+        assert!(symbol.quote.as_ref().expect("retained quote").historical);
+    }
+}
+
 fn event(symbol: &str, kind: MarketDataKind, ordinal: u64) -> MarketEvent<MarketDataKind> {
     MarketEvent {
         exchange_ts: Some(UnixNanos(1_000)),

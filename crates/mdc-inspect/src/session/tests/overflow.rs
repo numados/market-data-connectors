@@ -74,13 +74,13 @@ fn levels(symbol: &crate::display::SymbolDisplay, bids: bool) -> Vec<(Decimal, D
         .collect()
 }
 
-fn assert_prefix_display(snapshot: &DisplaySnapshot, historical: bool) {
+fn assert_prefix_display(snapshot: &DisplaySnapshot, expected_status: DisplayStatus) {
     assert_eq!(snapshot.symbols.len(), 1);
     let symbol = &snapshot.symbols[0];
     assert_eq!(symbol.symbol.as_str(), "BTCUSDT");
-    assert_eq!(symbol.status, DisplayStatus::InSync);
+    assert_eq!(symbol.status, expected_status);
     let quote = symbol.quote.as_ref().expect("accepted prefix quote");
-    assert_eq!(quote.historical, historical);
+    assert_eq!(quote.historical, expected_status != DisplayStatus::InSync);
     assert_eq!(quote.quote.bid, Decimal::from(10));
     assert_eq!(quote.quote.ask, Decimal::from(20));
     assert_eq!(quote.quote.bid_size, Decimal::from(3));
@@ -132,7 +132,7 @@ async fn channel_preserves_exact_prefix_then_one_fault_and_eof() {
     assert_eq!(prefix.session, DisplayStatus::InSync);
     assert_eq!(prefix.alerts.len(), 1);
     assert_eq!(prefix.alerts[0].summary, "resync completed (aligned to 2)");
-    assert_prefix_display(&prefix, false);
+    assert_prefix_display(&prefix, DisplayStatus::InSync);
 
     let fault = stream.recv().await.expect("terminal fault");
     let fault = fault.expect_err("fault slot must contain no success event");
@@ -153,7 +153,7 @@ async fn channel_preserves_exact_prefix_then_one_fault_and_eof() {
         final_snapshot.failure.as_deref(),
         Some("loss-intolerant channel capacity exceeded (max 3 events)")
     );
-    assert_prefix_display(&final_snapshot, true);
+    assert_prefix_display(&final_snapshot, DisplayStatus::Failed);
     drop(sender);
 }
 
@@ -267,5 +267,5 @@ async fn run_session_reduces_only_prefix_and_reaps_cancelled_producer() {
         snapshot.alerts[0].summary,
         "resync completed (aligned to 2)"
     );
-    assert_prefix_display(&snapshot, true);
+    assert_prefix_display(&snapshot, DisplayStatus::Failed);
 }
