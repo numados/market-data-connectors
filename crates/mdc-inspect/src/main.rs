@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
-use mdc_inspect::app::{App, ExitOutcome, run};
+use mdc_inspect::app::{self, App, ExitOutcome};
 use mdc_inspect::cli::{Cli, StartupMode};
 use mdc_inspect::config::SessionConfig;
 use mdc_inspect::diagnostics::{DiagnosticsRing, DiagnosticsSubscriber};
@@ -71,12 +71,12 @@ async fn run_tui(
     ring: Arc<Mutex<DiagnosticsRing>>,
     factory: &mdc_inspect::app::AdapterFactory,
 ) -> Result<ExitOutcome, Error> {
-    let mut guard = TerminalGuard::activate(Box::new(CrosstermLifecycle))?;
+    let guard = TerminalGuard::activate(Box::new(CrosstermLifecycle))?;
     let terminal = ratatui_terminal()?;
-    let app = App::new(ring);
-    let outcome = run(app, terminal, direct, factory).await;
-    guard.restore();
-    outcome
+    let application = App::new(ring);
+    guard
+        .run(app::run(application, terminal, direct, factory))
+        .await
 }
 
 fn exit_code_for(outcome: ExitOutcome) -> ExitCode {

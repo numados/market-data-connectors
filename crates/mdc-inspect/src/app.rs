@@ -552,4 +552,6 @@ where
 #[cfg(test)]
 mod behavior_tests;
 #[cfg(test)]
+mod terminal_lifecycle_tests;
+#[cfg(test)]
 mod tests;

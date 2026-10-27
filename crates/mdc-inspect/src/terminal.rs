@@ -128,6 +128,13 @@ impl TerminalGuard {
         self.completed = 0;
     }
 
+    /// Runs an operation while the terminal is active, then restores it.
+    pub async fn run<F: std::future::Future>(mut self, operation: F) -> F::Output {
+        let output = operation.await;
+        self.restore();
+        output
+    }
+
     /// Whether restoration already happened.
     pub fn is_restored(&self) -> bool {
         self.restored
