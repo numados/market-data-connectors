@@ -8,7 +8,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mdc_core::Symbol;
 use mdc_testkit::{MockRest, MockWsServer, WsAction};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -88,7 +87,7 @@ async fn spawn_session_with(
 }
 
 async fn wait_for_status(
-    rx: &watch::Receiver<Arc<crate::display::DisplaySnapshot>>,
+    rx: &mut watch::Receiver<Arc<crate::display::DisplaySnapshot>>,
     status: DisplayStatus,
 ) -> Arc<crate::display::DisplaySnapshot> {
     wait_until(rx, |snapshot| {
@@ -98,16 +97,17 @@ async fn wait_for_status(
 }
 
 async fn wait_until(
-    rx: &watch::Receiver<Arc<crate::display::DisplaySnapshot>>,
+    rx: &mut watch::Receiver<Arc<crate::display::DisplaySnapshot>>,
     predicate: impl Fn(&crate::display::DisplaySnapshot) -> bool,
 ) -> Arc<crate::display::DisplaySnapshot> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let snapshot = rx.borrow().clone();
+        let snapshot = rx.borrow_and_update().clone();
         if predicate(&snapshot) {
             return snapshot;
         }
-        if tokio::time::Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
             panic!(
                 "timed out; last session={:?}, symbols={:?}, alerts={:?}",
                 snapshot.session,
@@ -123,7 +123,24 @@ async fn wait_until(
                     .collect::<Vec<_>>(),
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        match tokio::time::timeout(remaining, rx.changed()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("display channel closed while waiting: {error}"),
+            Err(_) => panic!(
+                "timed out; last session={:?}, symbols={:?}, alerts={:?}",
+                snapshot.session,
+                snapshot
+                    .symbols
+                    .iter()
+                    .map(|s| (s.symbol.as_str(), s.status, s.unavailability.clone()))
+                    .collect::<Vec<_>>(),
+                snapshot
+                    .alerts
+                    .iter()
+                    .map(|a| a.summary.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        }
     }
 }
 
@@ -133,66 +150,177 @@ fn depth_response(last_update_id: u64, bid: &str, ask: &str) -> String {
     )
 }
 
+fn depth_response_levels(last_update_id: u64, bids: &str, asks: &str) -> String {
+    format!(r#"{{"lastUpdateId":{last_update_id},"bids":[{bids}],"asks":[{asks}]}}"#)
+}
+
 fn depth_delta(first: u64, final_seq: u64, bid: &str, ask: &str) -> String {
+    depth_delta_with_sizes(first, final_seq, bid, "1.5", ask, "2.5")
+}
+
+fn depth_delta_with_sizes(
+    first: u64,
+    final_seq: u64,
+    bid: &str,
+    bid_size: &str,
+    ask: &str,
+    ask_size: &str,
+) -> String {
     format!(
-        r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":{first},"u":{final_seq},"b":[["{bid}","1.5"]],"a":[["{ask}","2.5"]]}}}}"#
+        r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":{first},"u":{final_seq},"b":[["{bid}","{bid_size}"]],"a":[["{ask}","{ask_size}"]]}}}}"#
     )
 }
 
 #[tokio::test]
-async fn gap_resync_recovery_flows_to_display() {
+async fn gap_window_is_unavailable_until_delayed_recovery_snapshot() {
     let ws = MockWsServer::spawn().await.unwrap();
     let rest = MockRest::start().await;
 
-    // First snapshot (bridges d1), then the post-gap fast re-snapshot.
-    let first = depth_response(100, "25000.00", "25001.00");
-    let second = depth_response(122, "26000.00", "26001.00");
-    let mock_once = Mock::given(method("GET"))
+    let first = depth_response_levels(
+        100,
+        r#"["25000.00","1.0"],["24999.00","2.0"]"#,
+        r#"["25001.00","2.0"],["25002.00","3.0"]"#,
+    );
+    let second = depth_response_levels(
+        122,
+        r#"["26000.00","1.0"],["25999.00","2.0"]"#,
+        r#"["26001.00","2.0"],["26002.00","3.0"]"#,
+    );
+    Mock::given(method("GET"))
         .and(path("/api/v3/depth"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(first, "application/json"))
-        .up_to_n_times(1);
-    mock_once.mount(rest.inner()).await;
-    let mock_recurring = Mock::given(method("GET"))
+        .up_to_n_times(1)
+        .mount(rest.inner())
+        .await;
+    Mock::given(method("GET"))
         .and(path("/api/v3/depth"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(second, "application/json"));
-    mock_recurring.mount(rest.inner()).await;
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(350))
+                .set_body_raw(second, "application/json"),
+        )
+        .mount(rest.inner())
+        .await;
 
-    // d1 bridges snapshot 100; d2 contiguous; d3 gaps (expected 111).
-    let d1 = depth_delta(95, 105, "25000.10", "25001.10");
-    let d2 = depth_delta(106, 110, "25000.20", "25001.20");
-    let d3 = depth_delta(120, 125, "26000.10", "26001.10");
-    ws.push_script(vec![
-        WsAction::SendText(d1),
-        WsAction::Sleep(Duration::from_millis(50)),
-        WsAction::SendText(d2),
-        WsAction::Sleep(Duration::from_millis(50)),
-        WsAction::SendText(d3),
-    ]);
+    ws.push_script(Vec::new());
+    let (mut rx, handle, root) = spawn_session_with(
+        &ws,
+        &rest,
+        crate::config::CHANNEL_CAPACITY,
+        Duration::from_millis(250),
+    )
+    .await;
+    ws.wait_for_handshakes(1).await;
+    let initial = wait_for_status(&mut rx, DisplayStatus::InSync).await;
+    assert_eq!(
+        initial.symbols[0]
+            .quote
+            .as_ref()
+            .unwrap()
+            .quote
+            .bid
+            .to_string(),
+        "25000.00"
+    );
 
-    let (rx, handle, root) = spawn_session(&ws, &rest, crate::config::CHANNEL_CAPACITY).await;
+    assert_eq!(
+        ws.broadcast_text(depth_delta(101, 105, "25000.10", "25001.10"))
+            .unwrap(),
+        1
+    );
+    ws.sync_barrier().await;
+    assert_eq!(
+        ws.broadcast_text(depth_delta_with_sizes(
+            106, 110, "24999.00", "3.0", "25002.00", "4.0",
+        ))
+        .unwrap(),
+        1
+    );
+    ws.sync_barrier().await;
+    assert_eq!(
+        ws.broadcast_text(depth_delta(120, 125, "26000.10", "26001.10"))
+            .unwrap(),
+        1
+    );
 
-    // The gap appears in the retained alert ring; recovery follows.
-    wait_until(&rx, |snapshot| {
-        snapshot
-            .alerts
-            .iter()
-            .any(|record| record.summary.contains("gap detected"))
+    // The request barrier proves that the delayed recovery response is in flight.
+    rest.wait_for_requests(2).await;
+    let gap_window = wait_until(&mut rx, |snapshot| {
+        snapshot.symbols.iter().any(|symbol| {
+            matches!(
+                symbol.status,
+                DisplayStatus::AwaitingSnapshot | DisplayStatus::Unavailable
+            )
+        })
     })
     .await;
-    // Recovery: resync completes and the display returns to InSync with
-    // values from the post-gap snapshot and deltas.
-    let recovered = wait_for_status(&rx, DisplayStatus::InSync).await;
+    let gap_symbol = &gap_window.symbols[0];
+    assert!(matches!(
+        gap_symbol.status,
+        DisplayStatus::AwaitingSnapshot | DisplayStatus::Unavailable
+    ));
+    let historical = gap_symbol.quote.as_ref().expect("retained pre-gap quote");
+    assert!(historical.historical);
+    assert_eq!(historical.quote.bid.to_string(), "25000.10");
+    assert_eq!(historical.quote.ask.to_string(), "25001.00");
+    assert_eq!(
+        gap_symbol
+            .bids
+            .iter()
+            .map(|level| (level.price.to_string(), level.size.to_string()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("25000.10".to_string(), "1.5".to_string()),
+            ("25000.00".to_string(), "1.0".to_string()),
+            ("24999.00".to_string(), "3.0".to_string()),
+        ]
+    );
+    assert_eq!(
+        gap_symbol
+            .asks
+            .iter()
+            .map(|level| (level.price.to_string(), level.size.to_string()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("25001.00".to_string(), "2.0".to_string()),
+            ("25001.10".to_string(), "2.5".to_string()),
+            ("25002.00".to_string(), "4.0".to_string()),
+        ]
+    );
 
+    let recovered = wait_for_status(&mut rx, DisplayStatus::InSync).await;
     let symbol = &recovered.symbols[0];
-    assert_eq!(symbol.symbol, Symbol::from("BTCUSDT"));
     let quote = symbol.quote.as_ref().expect("recovered quote");
     assert!(!quote.historical);
-    // The recovery delta raises the best bid above the snapshot's bid while
-    // the snapshot's ask level remains best (deltas only touch named levels).
     assert_eq!(quote.quote.bid.to_string(), "26000.10");
     assert_eq!(quote.quote.ask.to_string(), "26001.00");
+    assert_eq!(quote.quote.bid_size.to_string(), "1.5");
+    assert_eq!(quote.quote.ask_size.to_string(), "2.0");
+    assert_eq!(
+        symbol
+            .bids
+            .iter()
+            .map(|level| (level.price.to_string(), level.size.to_string()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("26000.10".to_string(), "1.5".to_string()),
+            ("26000.00".to_string(), "1.0".to_string()),
+            ("25999.00".to_string(), "2.0".to_string()),
+        ]
+    );
+    assert_eq!(
+        symbol
+            .asks
+            .iter()
+            .map(|level| (level.price.to_string(), level.size.to_string()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("26001.00".to_string(), "2.0".to_string()),
+            ("26001.10".to_string(), "2.5".to_string()),
+            ("26002.00".to_string(), "3.0".to_string()),
+        ]
+    );
 
-    // Alert history retains gap and recovery ordering.
     let summaries: Vec<String> = recovered
         .alerts
         .iter()
@@ -200,19 +328,17 @@ async fn gap_resync_recovery_flows_to_display() {
         .collect();
     let gap_position = summaries
         .iter()
-        .rposition(|summary| summary.contains("gap detected"))
+        .position(|summary| summary.contains("gap detected"))
         .expect("gap alert retained");
-    let started_position = summaries
-        .iter()
-        .rposition(|summary| summary.contains("resync started"))
-        .expect("resync started retained");
-    let completed_position = summaries
-        .iter()
-        .rposition(|summary| summary.contains("resync completed"))
-        .expect("resync completed retained");
-    assert!(gap_position < started_position && started_position < completed_position);
+    assert_eq!(
+        summaries.get(gap_position + 1).map(String::as_str),
+        Some("resync started")
+    );
+    assert_eq!(
+        summaries.get(gap_position + 2).map(String::as_str),
+        Some("resync completed (aligned to 122)")
+    );
 
-    // Operator stop cancels, drains, and reaps within the bound.
     root.cancel();
     let outcome = tokio::time::timeout(Duration::from_secs(10), handle)
         .await
@@ -246,20 +372,11 @@ async fn direct_burst_overflow_fails_visibly() {
     }
     ws.push_script(script);
 
-    let (rx, handle, root) = spawn_session(&ws, &rest, 2).await;
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    let failed = loop {
-        let snapshot = rx.borrow().clone();
-        if snapshot.session == DisplayStatus::Failed {
-            break snapshot;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for visible failure"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
+    let (mut rx, handle, root) = spawn_session(&ws, &rest, 2).await;
+    let failed = wait_until(&mut rx, |snapshot| {
+        snapshot.session == DisplayStatus::Failed
+    })
+    .await;
     assert!(
         failed
             .failure
@@ -291,22 +408,15 @@ async fn explicit_cancellation_reaps_session_and_stream() {
 
     ws.push_script(vec![WsAction::Sleep(Duration::from_millis(60))]);
 
-    let (rx, handle, root) = spawn_session(&ws, &rest, crate::config::CHANNEL_CAPACITY).await;
+    let (mut rx, handle, root) = spawn_session(&ws, &rest, crate::config::CHANNEL_CAPACITY).await;
 
-    // Wait until the connector actually connected before cancelling.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let snapshot = rx.borrow().clone();
-        if snapshot
+    wait_until(&mut rx, |snapshot| {
+        snapshot
             .symbols
             .iter()
-            .any(|s| s.status != DisplayStatus::Loading)
-        {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "no progress");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+            .any(|symbol| symbol.status != DisplayStatus::Loading)
+    })
+    .await;
 
     root.cancel();
     let outcome = tokio::time::timeout(Duration::from_secs(10), handle)

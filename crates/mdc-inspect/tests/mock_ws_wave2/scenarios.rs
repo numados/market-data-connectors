@@ -32,6 +32,7 @@ async fn bitstamp_invalid_delta_recovers_from_fresh_rest_snapshot() {
         &["btcusd"],
     );
     let initial = wait_for_status(&rx, DisplayStatus::InSync).await;
+    subscriptions::bitstamp(&ws).await;
     assert_current(
         &initial,
         "btcusd",
@@ -93,6 +94,7 @@ async fn bitstamp_invalid_delta_recovers_from_fresh_rest_snapshot() {
     assert_eq!(symbol(&recovered, "btcusd").asks.len(), 1);
     assert_recovery_order(&recovered, "btcusd", "source error (Parse)");
     assert_eq!(rest.inner().received_requests().await.unwrap().len(), 2);
+    subscriptions::bitstamp(&ws).await;
     stop_session(root, handle, &rx).await;
 }
 
@@ -119,6 +121,7 @@ async fn huobi_gzip_prev_sequence_gap_is_visible_and_recovers() {
         .unwrap();
     wait_for_client_message(&ws, 0, |message| message.contains("\"pong\":1700000000000")).await;
     let initial = wait_for_status(&rx, DisplayStatus::InSync).await;
+    subscriptions::huobi(&ws).await;
     assert_current(&initial, "btcusdt", "26000.1", "26000.2", "0.5", "0.3");
 
     ws.broadcast_binary(huobi_frame(
@@ -176,6 +179,7 @@ async fn huobi_gzip_prev_sequence_gap_is_visible_and_recovers() {
     .await;
     assert_current(&recovered, "btcusdt", "26000.1", "26000.2", "0.5", "0.3");
     assert_recovery_order(&recovered, "btcusdt", gap_summary);
+    subscriptions::huobi(&ws).await;
     stop_session(root, handle, &rx).await;
 }
 
@@ -203,6 +207,7 @@ async fn coinbase_advanced_connection_gap_invalidates_all_products_and_recovers(
         &["BTC-USD", "ETH-USD"],
     );
     let initial = wait_for_status(&rx, DisplayStatus::InSync).await;
+    subscriptions::coinbase_advanced(&ws, false).await;
     for name in ["BTC-USD", "ETH-USD"] {
         assert_current(
             &initial,
@@ -241,6 +246,7 @@ async fn coinbase_advanced_connection_gap_invalidates_all_products_and_recovers(
         message.contains("\"type\":\"subscribe\"") && message.contains("\"channel\":\"level2\"")
     })
     .await;
+    subscriptions::coinbase_advanced(&ws, true).await;
 
     // An update while awaiting snapshots cannot make the old book current again.
     ws.broadcast_text(
@@ -317,6 +323,7 @@ async fn lmax_transport_loss_marks_prior_quote_historical_until_fresh_snapshot()
         &["btc-usd"],
     );
     let initial = wait_for_status(&rx, DisplayStatus::InSync).await;
+    subscriptions::lmax(&ws).await;
     assert_current(
         &initial, "btc-usd", "50000.00", "50001.00", "1.5000", "0.7500",
     );
@@ -343,6 +350,7 @@ async fn lmax_transport_loss_marks_prior_quote_historical_until_fresh_snapshot()
     })
     .await;
     assert_eq!(ws.connection_count(), 2);
+    subscriptions::lmax(&ws).await;
     let awaiting = wait_for_status(&rx, DisplayStatus::AwaitingSnapshot).await;
     assert_invalidated(&awaiting);
     ws.broadcast_text(snapshot).unwrap();

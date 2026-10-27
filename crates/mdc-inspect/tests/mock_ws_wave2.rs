@@ -23,6 +23,11 @@ use wiremock::{Mock, ResponseTemplate};
 const WAIT_BOUND: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+#[path = "mock_ws_wave2/subscriptions.rs"]
+mod subscriptions;
+#[path = "mock_ws_wave1/wire_frames.rs"]
+mod wire_frames;
+
 fn spawn_session(
     adapter: impl SessionAdapter,
     provider: ProviderKind,

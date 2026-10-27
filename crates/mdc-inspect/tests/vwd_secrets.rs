@@ -5,11 +5,50 @@
 use std::collections::HashMap;
 
 use mdc_inspect::config::SessionConfig;
+use mdc_inspect::diagnostics::DiagnosticsSubscriber;
+use mdc_inspect::display::{DisplaySnapshot, DisplayStatus};
 use mdc_inspect::provider::vwd::{EnvLookup, VwdAdapter};
 use mdc_inspect::provider::{ProviderKind, SessionAdapter};
 use mdc_sinks::loss_intolerant::loss_intolerant_channel;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+
+const ACCOUNT_MARKER: &str = "synthetic-account-marker";
+const USER_MARKER: &str = "synthetic-user-marker";
+const PASSWORD_MARKER: &str = "synthetic-password-marker";
+
+fn assert_no_markers(surface: &str) {
+    assert!(
+        !surface.contains(ACCOUNT_MARKER),
+        "account marker was exposed"
+    );
+    assert!(
+        !surface.contains(USER_MARKER),
+        "username marker was exposed"
+    );
+    assert!(
+        !surface.contains(PASSWORD_MARKER),
+        "password marker was exposed"
+    );
+}
+
+fn diagnostics_surface() -> String {
+    let (ring, subscriber) = DiagnosticsSubscriber::new();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(
+            provider = "VWD/Infront",
+            account_path = ACCOUNT_MARKER,
+            username = USER_MARKER,
+            password = PASSWORD_MARKER,
+            "credential redaction"
+        );
+    });
+    let snapshot = ring
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .snapshot();
+    format!("{snapshot:?}")
+}
 
 #[derive(Clone)]
 struct Env(HashMap<String, String>);
@@ -21,6 +60,37 @@ impl EnvLookup for Env {
 
 fn config() -> SessionConfig {
     SessionConfig::new(ProviderKind::Vwd, &["EURUSD".to_string()]).expect("valid pair")
+}
+
+#[test]
+fn valid_credentials_are_absent_from_existing_formatted_surfaces() {
+    let adapter = VwdAdapter::with_env(
+        Env(HashMap::from([
+            ("MDC_INSPECT_VWD_ACCOUNT_PATH".into(), ACCOUNT_MARKER.into()),
+            ("MDC_INSPECT_VWD_USERNAME".into(), USER_MARKER.into()),
+            ("MDC_INSPECT_VWD_PASSWORD".into(), PASSWORD_MARKER.into()),
+        ])),
+        Url::parse("http://127.0.0.1:1").expect("url"),
+    );
+    let config = config();
+    adapter.validate(&config).expect("valid credentials");
+    let display = DisplaySnapshot {
+        provider: "VWD/Infront",
+        presentation: Default::default(),
+        session: DisplayStatus::Empty,
+        failure: None,
+        symbols: Vec::new(),
+        alerts: Default::default(),
+        alerts_evicted: 0,
+    };
+    for surface in [
+        format!("{adapter:?}"),
+        format!("{config:?}"),
+        format!("{display:?}"),
+        diagnostics_surface(),
+    ] {
+        assert_no_markers(&surface);
+    }
 }
 
 #[test]

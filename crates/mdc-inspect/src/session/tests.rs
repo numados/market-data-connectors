@@ -394,3 +394,5 @@ async fn burst_headroom_with_full_symbol_configuration() {
     );
     assert!(snapshot.alerts.is_empty());
 }
+
+mod overflow;

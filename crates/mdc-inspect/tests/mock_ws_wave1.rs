@@ -21,11 +21,20 @@ use tokio_util::sync::CancellationToken;
 
 const WAIT_BOUND: Duration = Duration::from_secs(10);
 
+#[path = "mock_ws_wave1/subscriptions.rs"]
+mod subscriptions;
+#[path = "mock_ws_wave1/wire_frames.rs"]
+mod wire_frames;
+
 fn fixture(venue: &str, name: &str) -> String {
     load_fixture(format!(
         "crates/mdc-providers/tests/fixtures/{venue}/{name}.json"
     ))
     .expect("venue fixture")
+}
+
+fn gateio_fixture(name: &str) -> String {
+    fixture("gateio", name).replace("ob.BTC_USDT.400", "ob.BTC_USDT.50")
 }
 
 async fn spawn_session(
@@ -219,6 +228,7 @@ async fn kraken_checksum_mismatch_recovers_to_display() {
         ["45283.5", "45285.2", "0.20000000", "0.00100000"],
     )
     .await;
+    subscriptions::kraken(&ws, false).await;
 
     let bad_update = update.replace("\"checksum\": 38355977", "\"checksum\": 999999999");
     assert_ne!(bad_update, update, "checksum fault must change the fixture");
@@ -235,6 +245,7 @@ async fn kraken_checksum_mismatch_recovers_to_display() {
     )
     .await;
     assert_recovered(&recovered, fault);
+    subscriptions::kraken(&ws, true).await;
     stop_session(root, handle, &rest).await;
 }
 
@@ -260,6 +271,7 @@ async fn coinbase_heartbeat_sequence_jump_recovers_to_display() {
         ["10101.80000000", "10103.00", "0.162567", "2.50000000"],
     )
     .await;
+    subscriptions::coinbase(&ws, false).await;
 
     ws.broadcast_text(
         r#"{"type":"heartbeat","sequence":4000,"last_trade_id":10,"product_id":"BTC-USD","time":"2014-11-07T08:19:29.464459Z"}"#,
@@ -279,6 +291,7 @@ async fn coinbase_heartbeat_sequence_jump_recovers_to_display() {
     )
     .await;
     assert_recovered(&recovered, fault);
+    subscriptions::coinbase(&ws, true).await;
     stop_session(root, handle, &rest).await;
 }
 
@@ -301,6 +314,7 @@ async fn bitfinex_checksum_mismatch_recovers_to_display() {
         spawn_session(&ws, Arc::new(adapter), ProviderKind::Bitfinex, "tBTCUSD").await;
 
     wait_for_quote(&mut rx, "tBTCUSD", ["41698", "41699", "0.61", "0.5"]).await;
+    subscriptions::bitfinex(&ws, false).await;
     ws.broadcast_text(r#"[266343, "cs", 999999999, 1614604253634]"#)
         .unwrap();
     let fault = "checksum mismatch (expected 999999999,";
@@ -313,6 +327,7 @@ async fn bitfinex_checksum_mismatch_recovers_to_display() {
     ws.broadcast_text(snapshot).unwrap();
     let recovered = wait_for_quote(&mut rx, "tBTCUSD", ["41698", "41699", "0.71", "0.5"]).await;
     assert_recovered(&recovered, fault);
+    subscriptions::bitfinex(&ws, true).await;
     stop_session(root, handle, &rest).await;
 }
 
@@ -322,9 +337,9 @@ async fn gateio_sequence_gap_recovers_to_display() {
     let rest = MockRest::start().await;
     ws.push_script(vec![
         WsAction::WaitClientMessage,
-        WsAction::SendText(fixture("gateio", "subscribe_ack")),
+        WsAction::SendText(gateio_fixture("subscribe_ack")),
         WsAction::SendText(
-            r#"{"time":1700000000,"channel":"spot.obu","event":"update","result":{"t":1700000000000,"full":true,"s":"ob.BTC_USDT.400","u":100,"b":[["50000","0.1"]],"a":[["50001","0.1"]]}}"#
+            r#"{"time":1700000000,"channel":"spot.obu","event":"update","result":{"t":1700000000000,"full":true,"s":"ob.BTC_USDT.50","u":100,"b":[["50000","0.1"]],"a":[["50001","0.1"]]}}"#
                 .to_string(),
         ),
     ]);
@@ -333,8 +348,9 @@ async fn gateio_sequence_gap_recovers_to_display() {
         spawn_session(&ws, Arc::new(adapter), ProviderKind::Gateio, "BTC_USDT").await;
 
     wait_for_quote(&mut rx, "BTC_USDT", ["50000", "50001", "0.1", "0.1"]).await;
+    subscriptions::gateio(&ws, false).await;
     ws.broadcast_text(
-        r#"{"time":1700000000,"channel":"spot.obu","event":"update","result":{"t":1700000000100,"s":"ob.BTC_USDT.400","U":105,"u":106,"b":[["50000","0.2"]]}}"#,
+        r#"{"time":1700000000,"channel":"spot.obu","event":"update","result":{"t":1700000000100,"s":"ob.BTC_USDT.50","U":105,"u":106,"b":[["50000","0.2"]]}}"#,
     )
     .unwrap();
     let fault = "gap detected (expected 101, received 105)";
@@ -342,10 +358,9 @@ async fn gateio_sequence_gap_recovers_to_display() {
     wait_for_resubscribe(&ws, 1).await;
 
     // The full snapshot re-anchors at 123456; the fixture delta is contiguous.
-    ws.broadcast_text(fixture("gateio", "order_book_snapshot"))
+    ws.broadcast_text(gateio_fixture("order_book_snapshot"))
         .unwrap();
-    ws.broadcast_text(fixture("gateio", "depth_update"))
-        .unwrap();
+    ws.broadcast_text(gateio_fixture("depth_update")).unwrap();
     // Deleting 50000 exposes the existing 49990 bid, not the inserted 49980.
     let recovered = wait_for_quote(&mut rx, "BTC_USDT", ["49990", "50001", "0.5", "0.25"]).await;
     assert_recovered(&recovered, fault);
@@ -355,5 +370,6 @@ async fn gateio_sequence_gap_recovers_to_display() {
             .iter()
             .any(|alert| alert.summary == "resync completed (aligned to 123456)")
     );
+    subscriptions::gateio(&ws, true).await;
     stop_session(root, handle, &rest).await;
 }

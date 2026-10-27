@@ -3,26 +3,103 @@
 #![cfg(all(feature = "frankfurter", feature = "vwd"))]
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use mdc_core::Symbol;
 use mdc_inspect::config::SessionConfig;
-use mdc_inspect::display::{DisplaySnapshot, DisplayStatus};
+use mdc_inspect::diagnostics::{DiagnosticsRing, DiagnosticsSnapshot, DiagnosticsSubscriber};
+use mdc_inspect::display::{DisplaySnapshot, DisplayStatus, UiState};
 use mdc_inspect::provider::ProviderKind;
 use mdc_inspect::provider::frankfurter::FrankfurterAdapter;
 use mdc_inspect::provider::vwd::{EnvLookup, VwdAdapter};
 use mdc_inspect::session::{SessionOutcome, run_session};
+use mdc_inspect::view::draw_main;
 use mdc_testkit::{MockRest, load_fixture};
 use ratatui::{Terminal, backend::TestBackend};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{header_exists, method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, ResponseTemplate};
 
 const RATES: &str = "crates/mdc-providers/tests/fixtures/frankfurter/reference_rates.json";
 const VWD: &str = "crates/mdc-providers/tests/fixtures/vwd/order_book_snapshot.json";
+const ACCOUNT_PATH: &str = "synthetic-account-marker";
+const AUTH_USERNAME: &str = "synthetic-user-marker";
+const AUTH_PASSWORD: &str = "synthetic-password-marker";
+const EXPECTED_AUTHORIZATION: &str =
+    "Basic c3ludGhldGljLXVzZXItbWFya2VyOnN5bnRoZXRpYy1wYXNzd29yZC1tYXJrZXI=";
+
+fn assert_no_credential_markers(label: &str, surfaces: &[(&str, String)]) {
+    for (surface_name, surface) in surfaces {
+        assert!(
+            !surface.contains(ACCOUNT_PATH)
+                && !surface.contains(AUTH_USERNAME)
+                && !surface.contains(AUTH_PASSWORD)
+                && !surface.contains(EXPECTED_AUTHORIZATION),
+            "{label} {surface_name} exposed a credential marker"
+        );
+    }
+}
+
+static DIAGNOSTICS_RING: OnceLock<Arc<Mutex<DiagnosticsRing>>> = OnceLock::new();
+
+fn diagnostics_ring() -> Arc<Mutex<DiagnosticsRing>> {
+    DIAGNOSTICS_RING
+        .get_or_init(|| {
+            let ring = Arc::new(Mutex::new(DiagnosticsRing::new()));
+            let subscriber = DiagnosticsSubscriber::from_ring(Arc::clone(&ring));
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("mock polling diagnostics subscriber must install once");
+            ring
+        })
+        .clone()
+}
+
+fn diagnostics_snapshot(ring: &Arc<Mutex<DiagnosticsRing>>) -> DiagnosticsSnapshot {
+    ring.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .snapshot()
+}
+
+fn diagnostics_surface(ring: &Arc<Mutex<DiagnosticsRing>>) -> String {
+    format!("{:?}", diagnostics_snapshot(ring))
+}
+
+fn assert_actual_vwd_record(snapshot: &DiagnosticsSnapshot) {
+    assert!(
+        snapshot.records.iter().any(|record| {
+            record.target == "mdc_providers::vwd::connection"
+                && record
+                    .fields
+                    .iter()
+                    .any(|(name, value)| name == "venue" && value == "vwd")
+        }),
+        "actual VWD provider diagnostic was not captured: {snapshot:?}"
+    );
+}
+
+fn rendered_main_surface(snapshot: &DisplaySnapshot, ring: &Arc<Mutex<DiagnosticsRing>>) -> String {
+    let diagnostics = diagnostics_snapshot(ring);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).expect("test backend");
+    terminal
+        .draw(|frame| draw_main(frame, snapshot, &UiState::new(), &diagnostics))
+        .expect("render main view");
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    let mut last_y = 0;
+    for (index, cell) in buffer.content.iter().enumerate() {
+        let y = index as u16 / buffer.area.width;
+        if y != last_y {
+            text.push('\n');
+            last_y = y;
+        }
+        text.push_str(cell.symbol());
+    }
+    text
+}
 
 #[derive(Clone)]
 struct TestEnv(HashMap<String, String>);
@@ -78,7 +155,11 @@ async fn wait_for(
     .unwrap_or_else(|error| panic!("polling adapter did not reach {status:?}: {error}"))
 }
 
-async fn stop_session(root: CancellationToken, task: JoinHandle<SessionOutcome>, provider: &str) {
+async fn stop_session(
+    root: CancellationToken,
+    task: JoinHandle<SessionOutcome>,
+    provider: &str,
+) -> SessionOutcome {
     root.cancel();
     assert!(root.is_cancelled());
     let mut task = task;
@@ -93,6 +174,7 @@ async fn stop_session(root: CancellationToken, task: JoinHandle<SessionOutcome>,
         }
     };
     assert_eq!(outcome.status, DisplayStatus::Stopped);
+    outcome
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -196,18 +278,20 @@ async fn frankfurter_reduces_reference_rate_without_book_fields() {
     assert_eq!(trace.first(), Some(&"resync started"));
     assert!(fault < recovery, "{trace:?}");
 
-    stop_session(root, task, "Frankfurter").await;
+    let _ = stop_session(root, task, "Frankfurter").await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn vwd_uses_injected_credentials_and_synthetic_book() {
+async fn vwd_uses_exact_auth_path_and_redacts_all_app_surfaces() {
+    let diagnostics = diagnostics_ring();
     let mock = MockRest::start().await;
     let fixture = load_fixture(VWD).expect("fixture");
     let failing = Arc::new(AtomicBool::new(false));
     let response_state = Arc::clone(&failing);
+    let expected_path = format!("/{ACCOUNT_PATH}/JSON/QUOTE/SNAPQUOTE/EURUSD.XRATE.SPOT~X");
     Mock::given(method("GET"))
-        .and(path("/account/JSON/QUOTE/SNAPQUOTE/EURUSD.XRATE.SPOT~X"))
-        .and(header_exists("authorization"))
+        .and(path(expected_path))
+        .and(header("authorization", EXPECTED_AUTHORIZATION))
         .respond_with(move |_: &wiremock::Request| {
             if response_state.load(Ordering::SeqCst) {
                 ResponseTemplate::new(401)
@@ -218,15 +302,48 @@ async fn vwd_uses_injected_credentials_and_synthetic_book() {
         .mount(mock.inner())
         .await;
     let env = TestEnv(HashMap::from([
-        ("MDC_INSPECT_VWD_ACCOUNT_PATH".into(), "account".into()),
-        ("MDC_INSPECT_VWD_USERNAME".into(), "user".into()),
-        ("MDC_INSPECT_VWD_PASSWORD".into(), "password".into()),
+        ("MDC_INSPECT_VWD_ACCOUNT_PATH".into(), ACCOUNT_PATH.into()),
+        ("MDC_INSPECT_VWD_USERNAME".into(), AUTH_USERNAME.into()),
+        ("MDC_INSPECT_VWD_PASSWORD".into(), AUTH_PASSWORD.into()),
     ]));
     let config = SessionConfig::new(ProviderKind::Vwd, &["EURUSD".into()]).expect("config");
+    let adapter = Arc::new(VwdAdapter::with_env(env, mock.url().expect("url")));
+    let adapter_debug = format!("{adapter:?}");
+    let config_debug = format!("{config:?}");
+
+    let mut invalid_config = config.clone();
+    invalid_config.base = Some(Symbol::from("invalid"));
+    let (error_tx, error_rx) = display("VWD/Infront");
+    let invalid_outcome = run_session(
+        adapter.clone(),
+        invalid_config,
+        ProviderKind::Vwd.session_bounds(),
+        4096,
+        CancellationToken::new(),
+        error_tx,
+    )
+    .await;
+    let invalid_snapshot = { error_rx.borrow().clone() };
+    assert_eq!(invalid_outcome.status, DisplayStatus::Failed);
+    assert_no_credential_markers(
+        "validation error",
+        &[
+            ("adapter debug", adapter_debug.clone()),
+            ("config debug", config_debug.clone()),
+            ("display", format!("{invalid_snapshot:?}")),
+            ("diagnostics", diagnostics_surface(&diagnostics)),
+            (
+                "rendered main",
+                rendered_main_surface(&invalid_snapshot, &diagnostics),
+            ),
+            ("outcome", format!("{invalid_outcome:?}")),
+        ],
+    );
+
     let (tx, mut rx) = display("VWD/Infront");
     let root = CancellationToken::new();
     let task = tokio::spawn(run_session(
-        Arc::new(VwdAdapter::with_env(env, mock.url().expect("url"))),
+        adapter.clone(),
         config,
         ProviderKind::Vwd.session_bounds(),
         4096,
@@ -249,6 +366,19 @@ async fn vwd_uses_injected_credentials_and_synthetic_book() {
     assert!(!initial_quote.historical);
     assert_eq!(initial_symbol.bids.len(), 1);
     assert_eq!(initial_symbol.asks.len(), 1);
+    assert_no_credential_markers(
+        "success",
+        &[
+            ("adapter debug", adapter_debug.clone()),
+            ("config debug", config_debug.clone()),
+            ("display", format!("{initial:?}")),
+            ("diagnostics", diagnostics_surface(&diagnostics)),
+            (
+                "rendered main",
+                rendered_main_surface(&initial, &diagnostics),
+            ),
+        ],
+    );
 
     failing.store(true, Ordering::SeqCst);
     let failed = wait_for(&mut rx, DisplayStatus::Unavailable).await;
@@ -259,6 +389,20 @@ async fn vwd_uses_injected_credentials_and_synthetic_book() {
             .alerts
             .iter()
             .any(|alert| alert.summary == "source error (HttpStatus(401))")
+    );
+    assert_no_credential_markers(
+        "401",
+        &[
+            ("adapter debug", adapter_debug.clone()),
+            ("config debug", config_debug.clone()),
+            ("display", format!("{failed:?}")),
+            ("diagnostics", diagnostics_surface(&diagnostics)),
+            (
+                "rendered main",
+                rendered_main_surface(&failed, &diagnostics),
+            ),
+            ("outcome failure", format!("{:?}", failed.failure)),
+        ],
     );
 
     failing.store(false, Ordering::SeqCst);
@@ -292,12 +436,52 @@ async fn vwd_uses_injected_credentials_and_synthetic_book() {
         .rposition(|summary| *summary == "resync completed")
         .expect("recovery completed");
     assert!(fault < recovery, "{trace:?}");
+    assert_no_credential_markers(
+        "recovery",
+        &[
+            ("adapter debug", adapter_debug.clone()),
+            ("config debug", config_debug.clone()),
+            ("display", format!("{recovered:?}")),
+            ("diagnostics", diagnostics_surface(&diagnostics)),
+            (
+                "rendered main",
+                rendered_main_surface(&recovered, &diagnostics),
+            ),
+        ],
+    );
 
-    stop_session(root, task, "VWD").await;
+    let stop_outcome = stop_session(root, task, "VWD").await;
+    let stopped = { rx.borrow().clone() };
+    let actual_diagnostics = diagnostics_snapshot(&diagnostics);
+    assert_actual_vwd_record(&actual_diagnostics);
+    assert_eq!(stopped.session, DisplayStatus::Stopped);
+    assert!(stopped.symbols[0].quote.as_ref().unwrap().historical);
+    assert_no_credential_markers(
+        "stop",
+        &[
+            ("adapter debug", adapter_debug),
+            ("config debug", config_debug),
+            ("display", format!("{stopped:?}")),
+            ("diagnostics", format!("{actual_diagnostics:?}")),
+            (
+                "rendered main",
+                rendered_main_surface(&stopped, &diagnostics),
+            ),
+            ("outcome", format!("{stop_outcome:?}")),
+        ],
+    );
 }
 
 #[test]
-fn rate_view_does_not_require_a_terminal_book_renderer() {
-    let backend = TestBackend::new(80, 24);
-    let _ = Terminal::new(backend).expect("test backend");
+fn reference_rate_view_has_no_book_fields_before_the_first_poll() {
+    let (_tx, rx) = display(ProviderKind::Frankfurter.label());
+    let mut snapshot = rx.borrow().as_ref().clone();
+    snapshot.presentation = ProviderKind::Frankfurter.presentation();
+    let (diagnostics, _subscriber) = DiagnosticsSubscriber::new();
+    let rendered = rendered_main_surface(&snapshot, &diagnostics);
+    assert!(rendered.contains("Reference rate"));
+    assert!(!rendered.contains("Level 2"));
+    assert!(!rendered.contains("Top of book"));
+    assert!(!rendered.contains("max depth"));
+    assert!(!rendered.contains("unbounded"));
 }
