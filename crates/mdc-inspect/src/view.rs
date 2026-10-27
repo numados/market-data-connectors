@@ -33,6 +33,9 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
         Constraint::Length(3),
     ])
     .split(area);
+    let &[picker_area, input_area, symbols_area, footer_area] = rows.as_ref() else {
+        return;
+    };
 
     let provider = setup
         .selected_provider()
@@ -43,7 +46,7 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
         setup.provider_count()
     ))
     .block(Block::new().borders(Borders::ALL).title("Select provider"));
-    frame.render_widget(picker, rows[0]);
+    frame.render_widget(picker, picker_area);
 
     let input_line = format!(
         "Symbol: {}▏  (Enter adds, Delete removes last)",
@@ -54,7 +57,7 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
             .borders(Borders::ALL)
             .title("Symbols — text entry mode"),
     );
-    frame.render_widget(input, rows[1]);
+    frame.render_widget(input, input_area);
 
     let items: Vec<Line<'_>> = setup
         .symbols()
@@ -66,7 +69,7 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
             .borders(Borders::ALL)
             .title(format!("Configured symbols ({})", setup.symbols().len())),
     );
-    frame.render_widget(list, rows[2]);
+    frame.render_widget(list, symbols_area);
 
     let footer = match (setup.error(), setup.selected_provider()) {
         (Some(error), _) => Line::from(Span::styled(
@@ -90,7 +93,7 @@ pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
         }
         (None, None) => Line::from("no provider compiled; rebuild with --features <provider>"),
     };
-    frame.render_widget(Paragraph::new(footer), rows[3]);
+    frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
 /// Draws the main inspection view.
@@ -126,8 +129,11 @@ pub fn draw_main_at(
         Constraint::Length(1),
     ])
     .split(area);
-    draw_header(frame, rows[0], snapshot);
-    draw_symbol_tabs(frame, rows[1], snapshot, ui);
+    let &[header, tabs, content, hints] = rows.as_ref() else {
+        return;
+    };
+    draw_header(frame, header, snapshot);
+    draw_symbol_tabs(frame, tabs, snapshot, ui);
     let selected = selected_symbol(snapshot, ui);
     let is_rate = snapshot.presentation.mode == DisplayMode::ReferenceRate;
     if area.width < NARROW_WIDTH {
@@ -137,10 +143,13 @@ pub fn draw_main_at(
                 Constraint::Percentage(28),
                 Constraint::Fill(1),
             ])
-            .split(rows[2]);
-            draw_rate(frame, stacked[0], selected, now);
-            draw_alerts(frame, stacked[1], snapshot, ui);
-            draw_diagnostics(frame, stacked[2], diagnostics, ui);
+            .split(content);
+            let &[rate, alerts, diagnostics_area] = stacked.as_ref() else {
+                return;
+            };
+            draw_rate(frame, rate, selected, now);
+            draw_alerts(frame, alerts, snapshot, ui);
+            draw_diagnostics(frame, diagnostics_area, diagnostics, ui);
         } else {
             let stacked = Layout::vertical([
                 Constraint::Length(5),
@@ -148,35 +157,47 @@ pub fn draw_main_at(
                 Constraint::Percentage(30),
                 Constraint::Fill(1),
             ])
-            .split(rows[2]);
-            draw_quote(frame, stacked[0], selected);
-            draw_book(frame, stacked[1], snapshot, selected, ui);
-            draw_alerts(frame, stacked[2], snapshot, ui);
-            draw_diagnostics(frame, stacked[3], diagnostics, ui);
+            .split(content);
+            let &[quote, book, alerts, diagnostics_area] = stacked.as_ref() else {
+                return;
+            };
+            draw_quote(frame, quote, selected);
+            draw_book(frame, book, snapshot, selected, ui);
+            draw_alerts(frame, alerts, snapshot, ui);
+            draw_diagnostics(frame, diagnostics_area, diagnostics, ui);
         }
     } else {
         let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(rows[2]);
+            .split(content);
+        let &[left, right] = columns.as_ref() else {
+            return;
+        };
         if is_rate {
-            draw_rate(frame, columns[0], selected, now);
-            let right = Layout::vertical([Constraint::Percentage(50), Constraint::Fill(1)])
-                .split(columns[1]);
-            draw_alerts(frame, right[0], snapshot, ui);
-            draw_diagnostics(frame, right[1], diagnostics, ui);
+            draw_rate(frame, left, selected, now);
+            let panes =
+                Layout::vertical([Constraint::Percentage(50), Constraint::Fill(1)]).split(right);
+            let &[alerts, diagnostics_area] = panes.as_ref() else {
+                return;
+            };
+            draw_alerts(frame, alerts, snapshot, ui);
+            draw_diagnostics(frame, diagnostics_area, diagnostics, ui);
         } else {
-            draw_book(frame, columns[0], snapshot, selected, ui);
-            let right = Layout::vertical([
+            draw_book(frame, left, snapshot, selected, ui);
+            let panes = Layout::vertical([
                 Constraint::Length(6),
                 Constraint::Percentage(45),
                 Constraint::Fill(1),
             ])
-            .split(columns[1]);
-            draw_quote(frame, right[0], selected);
-            draw_alerts(frame, right[1], snapshot, ui);
-            draw_diagnostics(frame, right[2], diagnostics, ui);
+            .split(right);
+            let &[quote, alerts, diagnostics_area] = panes.as_ref() else {
+                return;
+            };
+            draw_quote(frame, quote, selected);
+            draw_alerts(frame, alerts, snapshot, ui);
+            draw_diagnostics(frame, diagnostics_area, diagnostics, ui);
         }
     }
-    draw_hints(frame, rows[3], snapshot);
+    draw_hints(frame, hints, snapshot);
 }
 
 fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
