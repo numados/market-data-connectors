@@ -108,7 +108,7 @@ impl SessionAdapter for SleepingAdapter {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn render_error_restores_terminal_after_provider_reaping() {
     let provider_dropped = Arc::new(AtomicBool::new(false));
     let factory: Box<AdapterFactory> = {

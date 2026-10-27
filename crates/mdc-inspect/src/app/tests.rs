@@ -248,7 +248,7 @@ fn right_overshoot_then_left_selects_the_first_symbol() {
 }
 
 #[cfg(feature = "binance")]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn input_error_reaps_a_running_session_before_returning() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -310,7 +310,7 @@ async fn input_error_reaps_a_running_session_before_returning() {
 }
 
 #[cfg(feature = "binance")]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn render_error_reaps_a_running_session_before_returning() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
