@@ -1,85 +1,160 @@
 //! Public display-state and rendering coverage for books, native tickers, and rates.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::VecDeque;
-#[cfg(feature = "frankfurter")]
-use std::str::FromStr;
-
-#[cfg(feature = "frankfurter")]
 use mdc_core::{
-    DeliveryStamp, MarketDataKind, MarketEvent, ReferenceRate, RunId, Symbol, UnixNanos, VenueId,
+    BookTicker, DeliveryStamp, MarketDataKind, MarketEvent, PriceLevel, RunId, Symbol, UnixNanos,
+    VenueId,
 };
-#[cfg(feature = "frankfurter")]
-use mdc_inspect::config::SessionConfig;
-use mdc_inspect::display::{DisplaySnapshot, DisplayStatus, UiState};
-#[cfg(feature = "frankfurter")]
-use mdc_inspect::provider::{ProviderKind, SessionBounds};
-#[cfg(feature = "frankfurter")]
-use mdc_inspect::reducer::Reducer;
-#[cfg(feature = "frankfurter")]
+use mdc_inspect::diagnostics::DiagnosticsSnapshot;
+use mdc_inspect::display::{
+    DisplaySnapshot, DisplayStatus, DisplayedQuote, QuoteView, SymbolDisplay, UiState,
+};
+use mdc_inspect::view::draw_main_at;
+use ratatui::{Terminal, backend::TestBackend};
 use rust_decimal::Decimal;
+use std::collections::VecDeque;
+
+#[cfg(any(
+    feature = "binance",
+    feature = "kraken",
+    feature = "coinbase",
+    feature = "bitfinex",
+    feature = "gateio",
+    feature = "bitstamp",
+    feature = "huobi",
+    feature = "coinbase-advanced",
+    feature = "lmax",
+    feature = "vwd"
+))]
+#[path = "display_modes/book.rs"]
+mod book;
 
 #[cfg(feature = "frankfurter")]
-fn rate_event(symbol: &str) -> MarketEvent<MarketDataKind> {
+#[path = "display_modes/rates.rs"]
+mod rates;
+
+fn decimal(value: &str) -> Decimal {
+    value.parse().expect("valid decimal")
+}
+
+fn event(
+    symbol: &str,
+    kind: MarketDataKind,
+    exchange_ts: Option<u64>,
+    received_ts: u64,
+    ordinal: u64,
+) -> MarketEvent<MarketDataKind> {
     MarketEvent {
-        exchange_ts: Some(UnixNanos::from_millis(1_704_067_200_000)),
-        received_ts: UnixNanos::from_secs(1_704_067_200),
-        venue: VenueId::FrankfurterEcb,
+        exchange_ts: exchange_ts.map(UnixNanos),
+        received_ts: UnixNanos(received_ts),
+        venue: VenueId::Binance,
         symbol: Symbol::from(symbol),
         tag: 0,
-        delivery: DeliveryStamp {
-            run: RunId::from_bytes([0; 16]),
-            connection_id: 1,
-            connection_generation: 1,
-            ordinal: 1,
-        },
+        delivery: DeliveryStamp::new(RunId::from_bytes([7; 16]), 1, ordinal),
         source_sequence: None,
-        kind: MarketDataKind::ReferenceRate(ReferenceRate::new(
-            Decimal::from_str("1.089").expect("decimal"),
-        )),
+        kind,
     }
 }
 
-#[cfg(feature = "frankfurter")]
 #[test]
-fn reference_rate_state_keeps_exact_midpoint_and_date() {
-    let config = SessionConfig::new(
-        ProviderKind::Frankfurter,
-        &["EUR".to_string(), "USD".to_string()],
-    )
-    .expect("valid rate config");
-    let mut reducer = Reducer::new(
-        &config,
-        SessionBounds {
-            max_symbols: 100,
-            projector_depth: 1,
-            affected_connection: 1,
-        },
-    );
-    reducer.apply_event(&rate_event("EURUSD"));
-    let symbol = &reducer.snapshot().symbols[0];
-    let rate = symbol.rate.as_ref().expect("rate state");
-    assert_eq!(rate.rate.midpoint.to_string(), "1.089");
-    assert_eq!(
-        rate.rate.observation_date,
-        UnixNanos::from_millis(1_704_067_200_000)
-    );
-    assert!(symbol.quote.is_none());
-    assert!(symbol.bids.is_empty());
-    assert!(symbol.asks.is_empty());
-}
+fn native_ticker_projection_reaches_exact_display_quote() {
+    let symbol = Symbol::from("EURUSD");
+    let mut projector = mdc_sinks::TopOfBookProjector::new_ticker(symbol.clone(), 0);
+    assert!(projector.is_in_sync());
 
-#[test]
-fn display_snapshot_shape_remains_book_compatible() {
+    let projection = projector
+        .handle_event(&event(
+            symbol.as_str(),
+            MarketDataKind::BookTicker(BookTicker::new(
+                PriceLevel::new(decimal("100.123400"), decimal("2.500")),
+                PriceLevel::new(decimal("100.567800"), decimal("3.250")),
+                Some(42),
+            )),
+            Some(2_000),
+            2_005,
+            1,
+        ))
+        .expect("native ticker projection");
+    let mdc_sinks::QuoteProjection::Available {
+        bid,
+        ask,
+        bid_size,
+        ask_size,
+        effective_ts,
+        received_ts,
+        ..
+    } = projection
+    else {
+        panic!("native ticker must project an available quote");
+    };
+    assert_eq!(bid, decimal("100.123400"));
+    assert_eq!(ask, decimal("100.567800"));
+    assert_eq!(bid_size, decimal("2.500"));
+    assert_eq!(ask_size, decimal("3.250"));
+    assert_eq!(effective_ts, UnixNanos(2_000));
+    assert_eq!(received_ts, UnixNanos(2_005));
+
     let snapshot = DisplaySnapshot {
-        provider: "test",
+        provider: "native ticker test",
         presentation: Default::default(),
-        session: DisplayStatus::Loading,
+        session: DisplayStatus::InSync,
         failure: None,
-        symbols: Vec::new(),
+        symbols: vec![SymbolDisplay {
+            symbol,
+            status: DisplayStatus::InSync,
+            quote: Some(DisplayedQuote {
+                quote: QuoteView {
+                    bid,
+                    ask,
+                    bid_size,
+                    ask_size,
+                    spread: ask.checked_sub(bid),
+                    effective_ts,
+                    received_ts,
+                },
+                historical: false,
+            }),
+            rate: None,
+            bids: Vec::new(),
+            asks: Vec::new(),
+            unavailability: None,
+        }],
         alerts: VecDeque::new(),
         alerts_evicted: 0,
     };
-    assert_eq!(snapshot.session, DisplayStatus::Loading);
-    let _ = UiState::new();
+    let text = render(&snapshot, UnixNanos(2_100));
+    assert!(
+        text.contains("bid 100.123400 x 2.500  ask 100.567800 x 3.250  spread 0.444400"),
+        "{text}"
+    );
+}
+
+fn render(snapshot: &DisplaySnapshot, now: UnixNanos) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).expect("test terminal");
+    terminal
+        .draw(|frame| {
+            draw_main_at(
+                frame,
+                snapshot,
+                &UiState::new(),
+                &DiagnosticsSnapshot::default(),
+                now,
+            )
+        })
+        .expect("render display snapshot");
+    buffer_text(terminal.backend().buffer())
+}
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let mut text = String::new();
+    let mut last_y = 0;
+    for (index, cell) in buffer.content.iter().enumerate() {
+        let y = index as u16 / buffer.area.width;
+        if y != last_y {
+            text.push('\n');
+            last_y = y;
+        }
+        text.push_str(cell.symbol());
+    }
+    text
 }
