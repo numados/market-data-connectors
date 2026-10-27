@@ -116,22 +116,25 @@ impl Reducer {
         let Some(&index) = self.lookup.get(&event.symbol) else {
             return;
         };
+        let Some(state) = self.symbols.get_mut(index) else {
+            return;
+        };
         match &event.kind {
             MarketDataKind::ReferenceRate(_) => self.apply_rate(index, event),
             MarketDataKind::IntegrityAlert(alert)
-                if matches!(&self.symbols[index].data, SymbolData::Rate { .. }) =>
+                if matches!(&state.data, SymbolData::Rate { .. }) =>
             {
                 self.apply_rate_alert(index, alert, event);
             }
             MarketDataKind::IntegrityAlert(alert) => {
-                let projection = match &mut self.symbols[index].data {
+                let projection = match &mut state.data {
                     SymbolData::Book { projector, .. } => projector.handle_event(event),
                     SymbolData::Rate { .. } => None,
                 };
                 self.apply_alert(index, alert, event, projection);
             }
             _ => {
-                let projection = match &mut self.symbols[index].data {
+                let projection = match &mut state.data {
                     SymbolData::Book { projector, .. } => projector.handle_event(event),
                     SymbolData::Rate { .. } => None,
                 };
@@ -252,7 +255,9 @@ impl Reducer {
             summary: alert_summary(alert),
             received_ts: event.received_ts,
         });
-        let state = &mut self.symbols[index];
+        let Some(state) = self.symbols.get_mut(index) else {
+            return;
+        };
         match alert {
             IntegrityAlert::ResyncStarted => {
                 state.status = DisplayStatus::AwaitingSnapshot;
@@ -303,7 +308,9 @@ impl Reducer {
             summary: alert_summary(alert),
             received_ts: event.received_ts,
         });
-        let state = &mut self.symbols[index];
+        let Some(state) = self.symbols.get_mut(index) else {
+            return;
+        };
         let summary = alert_summary(alert);
         let SymbolData::Rate { retained } = &mut state.data else {
             return;
@@ -341,7 +348,9 @@ impl Reducer {
     }
 
     fn apply_rate(&mut self, index: usize, event: &MarketEvent<MarketDataKind>) {
-        let state = &mut self.symbols[index];
+        let Some(state) = self.symbols.get_mut(index) else {
+            return;
+        };
         let MarketDataKind::ReferenceRate(rate) = &event.kind else {
             return;
         };
@@ -375,7 +384,9 @@ impl Reducer {
     /// `Unavailable` demotes with its reason, and `None` leaves status
     /// unchanged while a candidate is buffered or an event has no projection.
     fn apply_projection(&mut self, index: usize, projection: Option<QuoteProjection>) {
-        let state = &mut self.symbols[index];
+        let Some(state) = self.symbols.get_mut(index) else {
+            return;
+        };
         match projection {
             Some(QuoteProjection::Available { .. }) => {
                 state.status = DisplayStatus::InSync;
@@ -404,7 +415,10 @@ impl Reducer {
             ..
         }) = projection.as_ref()
         {
-            if let SymbolData::Book { retained, .. } = &mut self.symbols[index].data {
+            let Some(state) = self.symbols.get_mut(index) else {
+                return;
+            };
+            if let SymbolData::Book { retained, .. } = &mut state.data {
                 *retained = Some(QuoteView {
                     bid: *bid,
                     ask: *ask,
