@@ -42,6 +42,58 @@ fn display(symbols: Vec<SymbolDisplay>) -> Arc<DisplaySnapshot> {
 }
 
 #[test]
+fn help_visibility_matches_the_rendering_state() {
+    let mut app = app();
+    let factory = factory();
+    for visible in [true, false] {
+        app.handle_action(Action::ToggleHelp, &factory);
+        assert_eq!(app.help_open(), visible);
+        assert_eq!(app.ui().help_open, visible);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_start_preserves_open_help() {
+    struct IdleAdapter;
+    impl SessionAdapter for IdleAdapter {
+        fn bounds(&self) -> SessionBounds {
+            ProviderKind::Test.session_bounds()
+        }
+
+        fn start(
+            &self,
+            _config: &SessionConfig,
+            sink: mdc_sinks::loss_intolerant::LossIntolerantSender,
+            session_token: CancellationToken,
+        ) -> Result<crate::provider::ProviderRun, Error> {
+            Ok(crate::provider::ProviderRun::Future(Box::pin(async move {
+                let _sink = sink;
+                session_token.cancelled().await;
+                Ok(())
+            })))
+        }
+    }
+
+    let mut app = app();
+    let factory: Box<AdapterFactory> = Box::new(|_| Ok(Arc::new(IdleAdapter)));
+    app.handle_action(Action::FocusNext, &factory);
+    app.handle_action(Action::ToggleHelp, &factory);
+    app.start_session(
+        SessionConfig::new(ProviderKind::Test, &["BTCUSDT".to_string()]).unwrap(),
+        &factory,
+    )
+    .unwrap();
+    let help_stayed_open = app.help_open();
+    app.handle_action(Action::Stop, &factory);
+    app.reap_session().await;
+
+    assert!(help_stayed_open);
+    assert!(app.ui().help_open);
+    assert_eq!(app.ui().focus, crate::display::Focus::Symbols);
+    assert_eq!(app.last_outcome().unwrap().status, DisplayStatus::Stopped);
+}
+
+#[test]
 fn book_scroll_is_bounded_reversible_and_resets_on_symbol_or_data_shrink() {
     let mut app = app();
     let (sender, receiver) = tokio::sync::watch::channel(display(vec![

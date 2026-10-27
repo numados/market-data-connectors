@@ -55,7 +55,6 @@ pub struct App {
     state: AppState,
     setup: SetupState,
     ui: UiState,
-    help_open: bool,
     display: Option<watch::Receiver<Arc<DisplaySnapshot>>>,
     display_sender: Option<watch::Sender<Arc<DisplaySnapshot>>>,
     session: Option<JoinHandle<SessionOutcome>>,
@@ -75,7 +74,6 @@ impl App {
             state: AppState::Setup,
             setup: SetupState::new(),
             ui: UiState::new(),
-            help_open: false,
             display: None,
             display_sender: None,
             session: None,
@@ -167,7 +165,10 @@ impl App {
         self.session_token = Some(session_token);
         self.force_stop = Some(force_stop);
         self.force_stop_requested = false;
-        self.ui = UiState::new();
+        self.ui = UiState {
+            help_open: self.ui.help_open,
+            ..UiState::new()
+        };
         self.state = AppState::Running;
         Ok(())
     }
@@ -181,7 +182,7 @@ impl App {
             self.handle_action(action, factory);
             return;
         }
-        if self.state == AppState::Setup && !self.help_open {
+        if self.state == AppState::Setup && !self.help_open() {
             if let crossterm::event::Event::Key(key) = event {
                 if matches!(self.setup.handle_key(key), SetupAction::Start) {
                     self.handle_action(Action::Start, factory);
@@ -263,7 +264,7 @@ impl App {
                     self.state = AppState::Setup;
                 }
             }
-            Action::ToggleHelp => self.help_open = !self.help_open,
+            Action::ToggleHelp => self.ui.help_open = !self.ui.help_open,
             Action::FocusNext => self.focus_next(),
             Action::FocusPrev => self.focus_prev(),
             Action::NextSymbol => {
@@ -384,7 +385,7 @@ impl App {
 
     /// Whether the help overlay is open.
     pub fn help_open(&self) -> bool {
-        self.help_open
+        self.ui.help_open
     }
 
     /// Whether exit was requested.
