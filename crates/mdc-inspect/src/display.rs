@@ -236,6 +236,24 @@ pub struct DisplaySnapshot {
     pub alerts_evicted: usize,
 }
 
+impl DisplaySnapshot {
+    /// Applies terminal session validity to every retained observation.
+    pub(crate) fn reconcile_terminal(&mut self) {
+        if !matches!(self.session, DisplayStatus::Stopped | DisplayStatus::Failed) {
+            return;
+        }
+        for symbol in &mut self.symbols {
+            symbol.status = self.session;
+            if let Some(quote) = &mut symbol.quote {
+                quote.historical = true;
+            }
+            if let Some(rate) = &mut symbol.rate {
+                rate.historical = true;
+            }
+        }
+    }
+}
+
 /// Which pane owns keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {

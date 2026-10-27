@@ -57,6 +57,7 @@ pub struct App {
     ui: UiState,
     help_open: bool,
     display: Option<watch::Receiver<Arc<DisplaySnapshot>>>,
+    display_sender: Option<watch::Sender<Arc<DisplaySnapshot>>>,
     session: Option<JoinHandle<SessionOutcome>>,
     session_token: Option<CancellationToken>,
     force_stop: Option<CancellationToken>,
@@ -76,6 +77,7 @@ impl App {
             ui: UiState::new(),
             help_open: false,
             display: None,
+            display_sender: None,
             session: None,
             session_token: None,
             force_stop: None,
@@ -157,9 +159,10 @@ impl App {
             CHANNEL_CAPACITY,
             session_token.clone(),
             force_stop.clone(),
-            display_tx,
+            display_tx.clone(),
         ));
         self.display = Some(display_rx);
+        self.display_sender = Some(display_tx);
         self.session = Some(handle);
         self.session_token = Some(session_token);
         self.force_stop = Some(force_stop);
@@ -305,6 +308,14 @@ impl App {
 
     /// Marks the session finished; called by the loop when the join resolves.
     pub fn on_session_finished(&mut self, outcome: SessionOutcome) {
+        if let Some(sender) = &self.display_sender {
+            sender.send_modify(|snapshot| {
+                let snapshot = Arc::make_mut(snapshot);
+                snapshot.session = outcome.status;
+                snapshot.failure = outcome.failure.clone();
+                snapshot.reconcile_terminal();
+            });
+        }
         self.session = None;
         self.session_token = None;
         self.force_stop = None;
@@ -551,6 +562,8 @@ where
 
 #[cfg(test)]
 mod behavior_tests;
+#[cfg(test)]
+mod join_tests;
 #[cfg(test)]
 mod terminal_lifecycle_tests;
 #[cfg(test)]

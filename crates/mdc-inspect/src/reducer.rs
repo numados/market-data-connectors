@@ -180,10 +180,7 @@ impl Reducer {
             .symbols
             .iter()
             .map(|state| {
-                let status = match self.session {
-                    DisplayStatus::Stopped | DisplayStatus::Failed => self.session,
-                    _ => state.status,
-                };
+                let status = state.status;
                 let historical = status != DisplayStatus::InSync;
                 let (quote, rate, bids, asks) = match &state.data {
                     SymbolData::Book {
@@ -235,7 +232,7 @@ impl Reducer {
                 }
             })
             .collect();
-        DisplaySnapshot {
+        let mut snapshot = DisplaySnapshot {
             provider: self.provider_label,
             presentation: self.presentation,
             session: self.session,
@@ -243,7 +240,9 @@ impl Reducer {
             symbols,
             alerts: self.alerts.clone(),
             alerts_evicted: self.alerts_evicted,
-        }
+        };
+        snapshot.reconcile_terminal();
+        snapshot
     }
 
     fn apply_alert(
