@@ -125,6 +125,129 @@ async fn repeated_ctrl_c_forces_then_reaps_the_owned_session() {
 }
 
 #[cfg(feature = "binance")]
+#[tokio::test(flavor = "current_thread")]
+async fn direct_stop_reap_enter_restarts_the_original_configuration() {
+    struct CooperativeAdapter {
+        starts: Arc<Mutex<Vec<SessionConfig>>>,
+    }
+
+    impl SessionAdapter for CooperativeAdapter {
+        fn bounds(&self) -> SessionBounds {
+            SessionBounds {
+                max_symbols: 25,
+                projector_depth: 100,
+                affected_connection: 1,
+            }
+        }
+
+        fn start(
+            &self,
+            config: &SessionConfig,
+            sink: mdc_sinks::loss_intolerant::LossIntolerantSender,
+            session_token: CancellationToken,
+        ) -> Result<ProviderRun, Error> {
+            self.starts.lock().unwrap().push(config.clone());
+            Ok(ProviderRun::Future(Box::pin(async move {
+                let _sink = sink;
+                session_token.cancelled().await;
+                Ok(())
+            })))
+        }
+    }
+
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let factory: Box<AdapterFactory> = {
+        let starts = Arc::clone(&starts);
+        Box::new(move |kind| {
+            assert_eq!(kind, ProviderKind::Binance);
+            Ok(Arc::new(CooperativeAdapter {
+                starts: Arc::clone(&starts),
+            }))
+        })
+    };
+    let config = SessionConfig::new(ProviderKind::Binance, &["BTCUSDT".to_string()]).unwrap();
+    let mut app = app();
+    app.handle_action(Action::FocusNext, &factory);
+    app.handle_action(Action::PageDown, &factory);
+
+    app.start_session(config.clone(), &factory).unwrap();
+    assert_eq!(app.state(), &AppState::Running);
+    assert_eq!(app.ui(), &UiState::new());
+    assert_eq!(app.setup().selected_provider(), Some(ProviderKind::Binance));
+    assert_eq!(app.setup().symbols(), ["BTCUSDT"]);
+    assert!(matches!(
+        app.start_session(config.clone(), &factory),
+        Err(Error::Session(_))
+    ));
+    app.handle_action(Action::Stop, &factory);
+    assert_eq!(app.state(), &AppState::Stopping);
+    assert!(matches!(
+        app.start_session(config.clone(), &factory),
+        Err(Error::Session(_))
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(1), app.reap_session())
+        .await
+        .unwrap();
+    assert_eq!(app.state(), &AppState::Ended);
+
+    app.handle_action(Action::Start, &factory);
+    assert_eq!(app.state(), &AppState::Running);
+    app.handle_action(Action::Stop, &factory);
+    tokio::time::timeout(std::time::Duration::from_secs(1), app.reap_session())
+        .await
+        .unwrap();
+    assert_eq!(app.state(), &AppState::Ended);
+
+    app.handle_action(Action::Start, &factory_unavailable());
+    assert_eq!(app.state(), &AppState::Setup);
+    assert!(app.setup().error().is_some());
+    assert_eq!(starts.lock().unwrap().as_slice(), &[config.clone(), config]);
+}
+
+#[test]
+fn right_overshoot_then_left_selects_the_first_symbol() {
+    use crate::display::{ProviderPresentation, SymbolDisplay};
+
+    let mut app = app();
+    let (_, display) = tokio::sync::watch::channel(Arc::new(DisplaySnapshot {
+        provider: "Binance Spot",
+        presentation: ProviderPresentation::default(),
+        session: DisplayStatus::InSync,
+        failure: None,
+        symbols: vec![
+            SymbolDisplay {
+                symbol: mdc_core::Symbol::from("BTCUSDT"),
+                status: DisplayStatus::InSync,
+                quote: None,
+                rate: None,
+                bids: Vec::new(),
+                asks: Vec::new(),
+                unavailability: None,
+            },
+            SymbolDisplay {
+                symbol: mdc_core::Symbol::from("ETHUSDT"),
+                status: DisplayStatus::InSync,
+                quote: None,
+                rate: None,
+                bids: Vec::new(),
+                asks: Vec::new(),
+                unavailability: None,
+            },
+        ],
+        alerts: Default::default(),
+        alerts_evicted: 0,
+    }));
+    app.display = Some(display);
+    let factory = factory_unavailable();
+
+    app.handle_action(Action::NextSymbol, &factory);
+    app.handle_action(Action::NextSymbol, &factory);
+    app.handle_action(Action::PrevSymbol, &factory);
+
+    assert_eq!(app.ui().selected_symbol, 0);
+}
+
+#[cfg(feature = "binance")]
 #[tokio::test]
 async fn input_error_reaps_a_running_session_before_returning() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -417,14 +540,14 @@ fn configure_and_help_and_focus_transitions() {
 }
 
 #[test]
-fn scrolling_is_capped_at_zero() {
+fn empty_book_cannot_accumulate_scroll_offsets() {
     let mut app = app();
     let factory = factory_unavailable();
     app.handle_action(Action::FocusNext, &factory);
     app.handle_action(Action::ScrollUp, &factory);
     assert_eq!(app.ui().book_scroll, 0);
     app.handle_action(Action::PageDown, &factory);
-    assert_eq!(app.ui().book_scroll, 10);
+    assert_eq!(app.ui().book_scroll, 0);
 }
 
 #[test]

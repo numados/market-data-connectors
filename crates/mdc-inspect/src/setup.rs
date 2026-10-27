@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderKind, SessionBounds};
+use crate::provider::ProviderKind;
 
 /// Outcome of feeding a key to the setup screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,32 +116,30 @@ impl SetupState {
             self.error = Some("no provider features are compiled into this binary".to_string());
             return;
         };
-        let bounds: SessionBounds = provider.session_bounds();
-        let trimmed = self.input.trim().to_string();
-        if trimmed.is_empty() {
-            self.error = Some("symbol must not be empty".to_string());
-            return;
+        let mut raw_entries = self.symbols.clone();
+        raw_entries.push(self.input.clone());
+        match SessionConfig::validated_entries(provider, &raw_entries, false) {
+            Ok(entries) => {
+                self.symbols = entries.into_iter().map(|entry| entry.to_string()).collect();
+                self.input.clear();
+            }
+            Err(error) => self.error = Some(error.to_string()),
         }
-        if trimmed.chars().any(|c| c.is_control()) {
-            self.error = Some("symbol contains control characters".to_string());
+    }
+
+    /// Restores a validated configuration as the selectable draft.
+    pub(crate) fn set_config(&mut self, config: &SessionConfig) {
+        let Some(provider_index) = self
+            .providers
+            .iter()
+            .position(|provider| *provider == config.provider)
+        else {
             return;
-        }
-        if self.symbols.iter().any(|s| s.trim() == trimmed) {
-            self.error = Some(format!("duplicate symbol '{trimmed}'"));
-            return;
-        }
-        let base_entries =
-            usize::from(provider.presentation().mode == crate::display::DisplayMode::ReferenceRate);
-        if self.symbols.len() >= bounds.max_symbols.saturating_add(base_entries) {
-            self.error = Some(format!(
-                "{} accepts at most {} symbols per session",
-                provider.label(),
-                bounds.max_symbols
-            ));
-            return;
-        }
-        self.symbols.push(trimmed);
+        };
+        self.selected_provider = provider_index;
+        self.symbols = config.entries().map(ToString::to_string).collect();
         self.input.clear();
+        self.error = None;
     }
 
     /// Validates the screen into a session configuration.
@@ -238,6 +236,63 @@ mod tests {
         assert_eq!(setup.handle_key(&key(KeyCode::Enter)), SetupAction::None);
         assert_eq!(setup.symbols().len(), 1);
         assert!(setup.error().unwrap().contains("duplicate"));
+    }
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn duplicate_native_symbol_feedback_matches_session_configuration() {
+        let mut setup = SetupState::new();
+        for value in ["BTCUSDT", " BTCUSDT "] {
+            for character in value.chars() {
+                let _ = setup.handle_key(&key_for_test(character));
+            }
+            let _ = setup.handle_key(&key_for_test('\n'));
+        }
+
+        let setup_error = setup.error().expect("duplicate input must show an error");
+        let raw_symbols = vec!["BTCUSDT".to_string(), " BTCUSDT ".to_string()];
+        let config_error = SessionConfig::new(ProviderKind::Binance, &raw_symbols)
+            .expect_err("duplicate native symbols must be rejected");
+        let expected =
+            "invalid configuration: Binance Spot duplicate symbol 'BTCUSDT' after trimming";
+
+        assert_eq!(setup_error, expected);
+        assert_eq!(config_error.to_string(), expected);
+        assert_eq!(setup_error, config_error.to_string());
+    }
+
+    #[cfg(feature = "binance")]
+    #[test]
+    fn set_config_restores_entries_and_clears_transient_setup_state() {
+        let raw = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let config = SessionConfig::new(ProviderKind::Binance, &raw).expect("valid configuration");
+        let mut setup = SetupState::new();
+        for character in "stale".chars() {
+            let _ = setup.handle_key(&key_for_test(character));
+        }
+        setup.note_error("old setup error".to_string());
+
+        setup.set_config(&config);
+
+        assert_eq!(setup.selected_provider(), Some(ProviderKind::Binance));
+        assert_eq!(setup.symbols(), ["BTCUSDT", "ETHUSDT"]);
+        assert!(setup.input().is_empty());
+        assert!(setup.error().is_none());
+    }
+
+    #[test]
+    fn set_config_ignores_an_absent_test_identity() {
+        let mut setup = SetupState::new();
+        let _ = setup.handle_key(&key_for_test('x'));
+        setup.note_error("old setup error".to_string());
+        let config = SessionConfig::new(ProviderKind::Test, &["TEST".to_string()])
+            .expect("test identity configuration");
+
+        setup.set_config(&config);
+
+        assert_eq!(setup.input(), "x");
+        assert!(setup.symbols().is_empty());
+        assert_eq!(setup.error(), Some("old setup error"));
     }
 
     #[cfg(feature = "frankfurter")]

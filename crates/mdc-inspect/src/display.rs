@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use mdc_core::{ProviderCapabilities, Symbol, UnixNanos};
 
+use crate::diagnostics::DiagnosticsSnapshot;
+
 /// Provider-declared presentation semantics, independent of observed events.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DisplayMode {
@@ -277,6 +279,37 @@ impl UiState {
             diagnostics_scroll: 0,
             help_open: false,
         }
+    }
+
+    /// Keeps selection and pane offsets within the currently rendered rows.
+    pub(crate) fn clamp(&mut self, snapshot: &DisplaySnapshot, diagnostics: &DiagnosticsSnapshot) {
+        self.selected_symbol = self
+            .selected_symbol
+            .min(snapshot.symbols.len().saturating_sub(1));
+
+        let book_rows = snapshot
+            .symbols
+            .get(self.selected_symbol)
+            .map(|symbol| symbol.bids.len().saturating_add(symbol.asks.len()))
+            .unwrap_or(0)
+            .max(1);
+        self.book_scroll = self.book_scroll.min(book_rows.saturating_sub(1));
+
+        let alert_rows = list_row_count(snapshot.alerts.len(), snapshot.alerts_evicted);
+        self.alerts_scroll = self.alerts_scroll.min(alert_rows.saturating_sub(1));
+
+        let diagnostic_rows = list_row_count(diagnostics.records.len(), diagnostics.evicted);
+        self.diagnostics_scroll = self
+            .diagnostics_scroll
+            .min(diagnostic_rows.saturating_sub(1));
+    }
+}
+
+fn list_row_count(items: usize, evicted: usize) -> usize {
+    if evicted > 0 {
+        items.saturating_add(1).max(1)
+    } else {
+        items.max(1)
     }
 }
 

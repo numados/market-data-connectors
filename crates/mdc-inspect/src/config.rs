@@ -34,161 +34,182 @@ pub const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
 pub struct SessionConfig {
     /// Selected provider.
     pub provider: ProviderKind,
-    /// Provider-native symbols, in operator order, deduplicated after
-    /// trimming, bounded by the provider adapter.
+    /// Provider-native symbols, in operator order, trimmed and bounded by
+    /// the provider adapter.
     pub symbols: Vec<Symbol>,
     /// Base currency for reference-rate sessions; `symbols` holds the quotes.
     pub base: Option<Symbol>,
 }
 
 impl SessionConfig {
-    /// Validates raw provider-native symbol entries against the provider's
-    /// adapter bounds. Offline: no network, no terminal.
+    /// Validates complete raw provider-native entries before a session starts.
     pub fn new(provider: ProviderKind, raw_symbols: &[String]) -> Result<Self, Error> {
-        let bounds = provider.session_bounds();
-        let mut symbols = Vec::with_capacity(raw_symbols.len());
-        for raw in raw_symbols {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Err(Error::Config(
-                    "symbols must not be empty after trimming".to_string(),
-                ));
-            }
-            if trimmed.chars().any(|c| c.is_control()) {
-                return Err(Error::Config(format!(
-                    "symbol '{trimmed}' contains terminal control characters"
-                )));
-            }
-            let symbol = Symbol::from(trimmed);
-            if symbols.contains(&symbol) {
-                return Err(Error::Config(format!(
-                    "{} duplicate symbol '{trimmed}' after trimming (quotes must be distinct and different from the base)",
-                    provider.label()
-                )));
-            }
-            symbols.push(symbol);
-        }
-        if symbols.is_empty() {
-            return Err(Error::Config(
-                "at least one symbol is required to start a session".to_string(),
-            ));
-        }
-        let base = if provider.presentation().mode == DisplayMode::ReferenceRate {
-            if symbols.len() < 2 {
-                return Err(Error::Config(
-                    "Frankfurter requires one base followed by 1–100 quote currencies (3 uppercase ASCII letters)".to_string(),
-                ));
-            }
-            for code in &symbols {
-                if code.as_str().len() != 3
-                    || !code.as_str().bytes().all(|b| b.is_ascii_uppercase())
-                {
-                    return Err(Error::Config(format!(
-                        "Frankfurter currency '{code}' must be 3 uppercase ASCII letters"
-                    )));
-                }
-            }
-            let mut entries = symbols.into_iter();
-            let base = entries.next();
-            symbols = entries.collect();
-            base
+        let entries = Self::validated_entries(provider, raw_symbols, true)?;
+        let (base, symbols) = if provider.presentation().mode == DisplayMode::ReferenceRate {
+            let mut entries = entries.into_iter();
+            (entries.next(), entries.collect())
         } else {
-            None
+            (None, entries)
         };
-        if provider.presentation().mode == DisplayMode::SyntheticBook {
-            for pair in &symbols {
-                if pair.as_str().len() != 6
-                    || !pair.as_str().bytes().all(|b| b.is_ascii_uppercase())
-                {
-                    return Err(Error::Config(format!(
-                        "VWD pair '{pair}' must be 6 uppercase ASCII letters (for example EURUSD)"
-                    )));
-                }
-            }
-        }
-        if symbols.len() > bounds.max_symbols {
-            return Err(Error::Config(format!(
-                "{} accepts at most {} symbols per session; got {}",
-                provider.label(),
-                bounds.max_symbols,
-                symbols.len()
-            )));
-        }
         Ok(Self {
             provider,
             symbols,
             base,
         })
     }
+
+    /// Validates draft or complete provider-native entries and returns their
+    /// trimmed canonical spelling.
+    pub(crate) fn validated_entries(
+        provider: ProviderKind,
+        raw_symbols: &[String],
+        complete: bool,
+    ) -> Result<Vec<Symbol>, Error> {
+        let bounds = provider.session_bounds();
+        let mode = provider.presentation().mode;
+        if raw_symbols.is_empty() {
+            if complete {
+                return Err(entry_error(
+                    provider,
+                    "symbols",
+                    "<empty>",
+                    "at least one symbol is required (provider-native symbols)",
+                ));
+            }
+            return Ok(Vec::new());
+        }
+
+        let mut entries: Vec<Symbol> = Vec::with_capacity(raw_symbols.len());
+        for (index, raw) in raw_symbols.iter().enumerate() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(entry_error(
+                    provider,
+                    "symbols",
+                    raw,
+                    "symbol must not be empty after trimming",
+                ));
+            }
+            if trimmed.chars().any(char::is_control) {
+                return Err(entry_error(
+                    provider,
+                    "symbols",
+                    trimmed,
+                    "symbol contains terminal control characters",
+                ));
+            }
+
+            let field = match mode {
+                DisplayMode::ReferenceRate if index == 0 => "base",
+                DisplayMode::ReferenceRate => "quote",
+                _ => "symbols",
+            };
+            if mode == DisplayMode::ReferenceRate
+                && (trimmed.len() != 3 || !trimmed.bytes().all(|byte| byte.is_ascii_uppercase()))
+            {
+                return Err(entry_error(
+                    provider,
+                    field,
+                    trimmed,
+                    "expected 3 uppercase ASCII letters",
+                ));
+            }
+            if mode == DisplayMode::SyntheticBook
+                && (trimmed.len() != 6 || !trimmed.bytes().all(|byte| byte.is_ascii_uppercase()))
+            {
+                return Err(entry_error(
+                    provider,
+                    "symbols",
+                    trimmed,
+                    "expected 6 uppercase ASCII letters (for example EURUSD)",
+                ));
+            }
+
+            let symbol = Symbol::from(trimmed);
+            if let Some(existing) = entries.iter().position(|entry| entry == &symbol) {
+                if mode == DisplayMode::ReferenceRate && existing == 0 {
+                    return Err(entry_error(
+                        provider,
+                        "quote",
+                        trimmed,
+                        &format!("must differ from base '{}'", escaped(trimmed)),
+                    ));
+                }
+                if mode == DisplayMode::ReferenceRate {
+                    return Err(Error::Config(format!(
+                        "{} duplicate quote '{}' after trimming (field 'quotes'; quotes must be distinct)",
+                        provider.label(),
+                        escaped(trimmed)
+                    )));
+                }
+                return Err(Error::Config(format!(
+                    "{} duplicate symbol '{}' after trimming",
+                    provider.label(),
+                    escaped(trimmed)
+                )));
+            }
+            entries.push(symbol);
+        }
+
+        if mode == DisplayMode::ReferenceRate {
+            let quote_count = entries.len().saturating_sub(1);
+            if complete && quote_count == 0 {
+                return Err(Error::Config(format!(
+                    "{} field 'quotes' requires 1–{} quote currencies after base; got 0",
+                    provider.label(),
+                    bounds.max_symbols
+                )));
+            }
+            if quote_count > bounds.max_symbols {
+                return Err(Error::Config(format!(
+                    "{} field 'quotes' accepts at most {} quote currencies; got {}",
+                    provider.label(),
+                    bounds.max_symbols,
+                    quote_count
+                )));
+            }
+        } else if entries.len() > bounds.max_symbols {
+            return Err(Error::Config(format!(
+                "{} field 'symbols' accepts at most {} provider-native symbols; got {}",
+                provider.label(),
+                bounds.max_symbols,
+                entries.len()
+            )));
+        }
+        Ok(entries)
+    }
+
+    /// Returns the base before the provider-native symbols.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &Symbol> {
+        self.base.iter().chain(self.symbols.iter())
+    }
+
     /// Revalidates public configuration fields at the adapter boundary.
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        let raw: Vec<String> = self
-            .base
-            .iter()
-            .chain(&self.symbols)
-            .map(ToString::to_string)
-            .collect();
+        let raw: Vec<String> = self.entries().map(ToString::to_string).collect();
         let validated = Self::new(self.provider, &raw)?;
         if validated != *self {
-            return Err(Error::Config(
-                "session base/symbol fields do not match the provider format".to_string(),
-            ));
+            return Err(Error::Config(format!(
+                "{} fields 'base' and 'symbols' do not match the provider format",
+                self.provider.label()
+            )));
         }
         Ok(())
     }
 }
 
-#[cfg(all(test, feature = "binance"))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    fn strings(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn accepts_distinct_symbols_and_preserves_spelling() {
-        let config = SessionConfig::new(ProviderKind::Binance, &strings(&["BTCUSDT", " ETHUSDT "]))
-            .expect("valid configuration");
-        assert_eq!(
-            config.symbols,
-            vec![Symbol::from("BTCUSDT"), Symbol::from("ETHUSDT")]
-        );
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn rejects_empty_symbol_list_and_entries() {
-        let empty = SessionConfig::new(ProviderKind::Binance, &[]);
-        assert!(empty.is_err());
-        let blank = SessionConfig::new(ProviderKind::Binance, &strings(&["  "]));
-        assert!(blank.is_err());
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn rejects_duplicates_after_trimming() {
-        let duplicated =
-            SessionConfig::new(ProviderKind::Binance, &strings(&["BTCUSDT", " BTCUSDT "]));
-        let error = duplicated.expect_err("duplicate symbols must be rejected");
-        assert!(error.to_string().contains("duplicate symbol"));
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn rejects_control_characters() {
-        let controlled = SessionConfig::new(ProviderKind::Binance, &strings(&["BTC\tUSDT"]));
-        assert!(controlled.is_err());
-    }
-
-    #[cfg(feature = "binance")]
-    #[test]
-    fn enforces_provider_symbol_cap() {
-        let many: Vec<String> = (0..26).map(|index| format!("SYM{index}USDT")).collect();
-        let error = SessionConfig::new(ProviderKind::Binance, &many)
-            .expect_err("26 symbols must exceed the Binance cap");
-        assert!(error.to_string().contains("at most 25"));
-    }
+fn escaped(value: &str) -> String {
+    value.chars().flat_map(char::escape_default).collect()
 }
+
+fn entry_error(provider: ProviderKind, field: &str, value: &str, reason: &str) -> Error {
+    Error::Config(format!(
+        "{} field '{field}' rejected value '{}': {reason}",
+        provider.label(),
+        escaped(value)
+    ))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;

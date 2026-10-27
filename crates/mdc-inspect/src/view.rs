@@ -115,6 +115,9 @@ pub fn draw_main_at(
     diagnostics: &DiagnosticsSnapshot,
     now: UnixNanos,
 ) {
+    let mut normalized_ui = ui.clone();
+    normalized_ui.clamp(snapshot, diagnostics);
+    let ui = &normalized_ui;
     let area = frame.area();
     let rows = Layout::vertical([
         Constraint::Length(if area.width < NARROW_WIDTH { 7 } else { 5 }),
@@ -235,19 +238,14 @@ fn draw_symbol_tabs(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapsho
         .iter()
         .map(|symbol| symbol.symbol.as_str())
         .collect();
-    let selected = ui.selected_symbol.min(snapshot.symbols.len() - 1);
     let tabs = Tabs::new(titles)
-        .select(selected)
+        .select(ui.selected_symbol)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
     frame.render_widget(tabs, area);
 }
 
 fn selected_symbol<'a>(snapshot: &'a DisplaySnapshot, ui: &UiState) -> Option<&'a SymbolDisplay> {
-    if snapshot.symbols.is_empty() {
-        return None;
-    }
-    let index = ui.selected_symbol.min(snapshot.symbols.len() - 1);
-    snapshot.symbols.get(index)
+    snapshot.symbols.get(ui.selected_symbol)
 }
 
 fn draw_quote(frame: &mut Frame<'_>, area: Rect, symbol: Option<&SymbolDisplay>) {
@@ -400,8 +398,7 @@ fn draw_book(
     } else {
         title
     };
-    let offset = ui.book_scroll.min(items.len().saturating_sub(1));
-    let list = List::new(items.into_iter().skip(offset))
+    let list = List::new(items.into_iter().skip(ui.book_scroll))
         .style(if historical {
             Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
         } else {
@@ -429,11 +426,12 @@ fn draw_alerts(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot, ui
     if lines.is_empty() {
         lines.push(ListItem::new("no integrity alerts"));
     }
-    let offset = ui.alerts_scroll.min(lines.len().saturating_sub(1));
-    let list =
-        List::new(lines.into_iter().skip(offset)).block(Block::new().borders(Borders::ALL).title(
-            format!("Integrity alerts (focus {})", focus_label(ui.focus)),
-        ));
+    let list = List::new(lines.into_iter().skip(ui.alerts_scroll)).block(
+        Block::new().borders(Borders::ALL).title(format!(
+            "Integrity alerts (focus {})",
+            focus_label(ui.focus)
+        )),
+    );
     frame.render_widget(list, area);
 }
 
@@ -465,8 +463,7 @@ fn draw_diagnostics(
     if lines.is_empty() {
         lines.push(ListItem::new("no diagnostics"));
     }
-    let offset = ui.diagnostics_scroll.min(lines.len().saturating_sub(1));
-    let list = List::new(lines.into_iter().skip(offset)).block(
+    let list = List::new(lines.into_iter().skip(ui.diagnostics_scroll)).block(
         Block::new()
             .borders(Borders::ALL)
             .title(format!("Diagnostics (focus {})", focus_label(ui.focus))),

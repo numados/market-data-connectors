@@ -137,6 +137,7 @@ impl App {
         }
         let adapter = factory(config.provider)?;
         adapter.validate(&config)?;
+        self.setup.set_config(&config);
         let bounds: SessionBounds = adapter.bounds();
         let session_token = self.root.child_token();
         let force_stop = CancellationToken::new();
@@ -163,6 +164,7 @@ impl App {
         self.session_token = Some(session_token);
         self.force_stop = Some(force_stop);
         self.force_stop_requested = false;
+        self.ui = UiState::new();
         self.state = AppState::Running;
         Ok(())
     }
@@ -191,6 +193,8 @@ impl App {
 
     /// Handles one action, advancing the state machine.
     pub fn handle_action(&mut self, action: Action, factory: &AdapterFactory) {
+        let previous_symbol = self.ui.selected_symbol;
+        self.clamp_ui();
         match action {
             Action::ForceQuit => {
                 // The first interrupt starts cooperative teardown. A repeat
@@ -229,14 +233,17 @@ impl App {
                 }
             },
             Action::Start => {
+                let was_ended = self.state == AppState::Ended;
                 if matches!(self.state, AppState::Setup | AppState::Ended) {
-                    match self.setup.start_config() {
-                        Ok(config) => {
-                            if let Err(error) = self.start_session(config, factory) {
-                                self.setup_note_error(error.to_string());
-                            }
+                    let result = self
+                        .setup
+                        .start_config()
+                        .and_then(|config| self.start_session(config, factory));
+                    if let Err(error) = result {
+                        self.setup_note_error(error.to_string());
+                        if was_ended {
+                            self.state = AppState::Setup;
                         }
-                        Err(error) => self.setup_note_error(error.to_string()),
                     }
                 }
             }
@@ -278,6 +285,16 @@ impl App {
                 // Layout recomputes on the next render.
             }
         }
+        self.clamp_ui();
+        if self.ui.selected_symbol != previous_symbol {
+            self.ui.book_scroll = 0;
+        }
+    }
+
+    fn clamp_ui(&mut self) {
+        let snapshot = self.snapshot();
+        let diagnostics = self.diagnostics_snapshot();
+        self.ui.clamp(&snapshot, &diagnostics);
     }
 
     fn setup_note_error(&mut self, message: String) {
@@ -335,10 +352,12 @@ impl App {
     fn scroll_down(&mut self) {
         use crate::display::Focus;
         match self.ui.focus {
-            Focus::Book => self.ui.book_scroll += 1,
-            Focus::Alerts => self.ui.alerts_scroll += 1,
-            Focus::Diagnostics => self.ui.diagnostics_scroll += 1,
-            Focus::Symbols => self.ui.selected_symbol += 1,
+            Focus::Book => self.ui.book_scroll = self.ui.book_scroll.saturating_add(1),
+            Focus::Alerts => self.ui.alerts_scroll = self.ui.alerts_scroll.saturating_add(1),
+            Focus::Diagnostics => {
+                self.ui.diagnostics_scroll = self.ui.diagnostics_scroll.saturating_add(1)
+            }
+            Focus::Symbols => self.ui.selected_symbol = self.ui.selected_symbol.saturating_add(1),
         }
     }
 
@@ -530,5 +549,7 @@ where
     }
 }
 
+#[cfg(test)]
+mod behavior_tests;
 #[cfg(test)]
 mod tests;
