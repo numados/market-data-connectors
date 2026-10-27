@@ -195,14 +195,20 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
                 "capabilities: quotes {:?}; integrity {:?}",
                 capabilities.quote_modes, capabilities.integrity,
             )));
+            let depth = if snapshot.presentation.mode == DisplayMode::ReferenceRate {
+                String::new()
+            } else {
+                format!(
+                    "max depth: {}; ",
+                    capabilities
+                        .bounds
+                        .max_depth
+                        .map_or_else(|| "unbounded".to_string(), |depth| depth.to_string()),
+                )
+            };
             lines.push(Line::from(format!(
-                "max depth: {}; symbols/connection: {}; timestamps: {:?}",
-                capabilities
-                    .bounds
-                    .max_depth
-                    .map_or_else(|| "unbounded".to_string(), |depth| depth.to_string()),
-                capabilities.bounds.max_symbols_per_connection,
-                capabilities.timestamps,
+                "{depth}symbols/connection: {}; timestamps: {:?}",
+                capabilities.bounds.max_symbols_per_connection, capabilities.timestamps,
             )));
         }
         None => lines.push(Line::from("capabilities: unknown")),
