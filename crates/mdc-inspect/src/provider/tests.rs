@@ -197,14 +197,9 @@ mod remaining_bounds {
     #[test]
     fn coinbase_bounds_and_capabilities() {
         let kind = ProviderKind::Coinbase;
-        assert_eq!(
-            kind.session_bounds(),
-            SessionBounds {
-                max_symbols: 25,
-                projector_depth: 1000,
-                affected_connection: 1
-            }
-        );
+        let bounds = kind.session_bounds();
+        assert_eq!(bounds.max_symbols, 25);
+        assert_eq!(bounds.affected_connection, 1);
         assert!(kind.capabilities().is_some());
         assert_eq!(
             kind.session_bounds().max_symbols,

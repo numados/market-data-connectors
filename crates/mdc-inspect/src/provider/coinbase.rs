@@ -19,7 +19,9 @@ pub struct CoinbaseAdapter {
 }
 
 impl CoinbaseAdapter {
-    const REQUESTED_DEPTH: usize = 1000;
+    // The full-depth feed has no subscription depth. Retain complete levels
+    // within a finite local safety cap rather than truncating the book.
+    const MAX_BOOK_DEPTH: usize = 50_000;
 
     /// Bounds and depth owned by the Coinbase Exchange adapter.
     pub(crate) fn session_bounds() -> SessionBounds {
@@ -27,7 +29,7 @@ impl CoinbaseAdapter {
             max_symbols: mdc_providers::coinbase::COINBASE_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REQUESTED_DEPTH,
+            projector_depth: Self::MAX_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

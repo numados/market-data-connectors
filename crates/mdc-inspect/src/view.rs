@@ -223,7 +223,7 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot) {
                 String::new()
             } else {
                 format!(
-                    "max depth: {}; ",
+                    "declared max depth: {}; ",
                     capabilities
                         .bounds
                         .max_depth

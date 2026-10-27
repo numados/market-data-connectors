@@ -27,6 +27,16 @@ fn reference_rate_capabilities_never_render_order_book_depth() {
     assert!(!text.contains("unbounded"), "{text}");
 }
 
+#[cfg(feature = "coinbase")]
+#[test]
+fn coinbase_header_identifies_declared_depth() {
+    let mut snap = snapshot(DisplayStatus::Empty, Vec::new());
+    snap.provider = crate::provider::ProviderKind::Coinbase.label();
+    snap.presentation = crate::provider::ProviderKind::Coinbase.presentation();
+    let text = render(150, 40, &snap, &UiState::new(), &empty_diagnostics());
+    assert!(text.contains("declared max depth: 1000"), "{text}");
+}
+
 fn view(symbol: Symbol, status: DisplayStatus, quote: Option<DisplayedQuote>) -> SymbolDisplay {
     SymbolDisplay {
         symbol,
