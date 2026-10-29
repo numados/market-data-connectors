@@ -16,6 +16,20 @@ use tokio_util::sync::CancellationToken;
 use crate::config::SessionConfig;
 use crate::error::Error;
 
+// Receiver-side budget per book side, not a venue capability or subscription depth.
+// Keep every received level within this bound; larger books fail closed.
+#[cfg(any(
+    feature = "binance",
+    feature = "bitfinex",
+    feature = "coinbase",
+    feature = "bitstamp",
+    feature = "coinbase-advanced",
+    feature = "lmax",
+    feature = "gateio",
+    feature = "huobi",
+))]
+const MAX_RETAINED_BOOK_DEPTH: usize = 50_000;
+
 /// Adapter-supplied session resource bounds (PRD 31 §3.10).
 ///
 /// One owner for the symbol cap, the projector depth, and the channel

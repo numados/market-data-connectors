@@ -10,7 +10,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 
 /// Session adapter for LMAX Digital.
@@ -19,15 +20,13 @@ pub struct LmaxAdapter {
 }
 
 impl LmaxAdapter {
-    const REQUESTED_DEPTH: usize = 20;
-
     /// Bounds and limits owned by the LMAX adapter.
     pub(crate) fn session_bounds() -> SessionBounds {
         SessionBounds {
             max_symbols: mdc_providers::lmax::connector::LMAX_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REQUESTED_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

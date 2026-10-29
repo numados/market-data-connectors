@@ -9,7 +9,9 @@ use url::Url;
 
 use crate::config::SessionConfig;
 use crate::error::Error;
-use crate::provider::{ProviderFuture, ProviderRun, SessionAdapter, SessionBounds};
+use crate::provider::{
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+};
 
 /// Session adapter for Bitfinex.
 pub struct BitfinexAdapter {
@@ -25,7 +27,7 @@ impl BitfinexAdapter {
             max_symbols: mdc_providers::bitfinex::BITFINEX_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REQUESTED_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

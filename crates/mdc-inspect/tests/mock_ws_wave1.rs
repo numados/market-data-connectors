@@ -21,6 +21,10 @@ use tokio_util::sync::CancellationToken;
 
 const WAIT_BOUND: Duration = Duration::from_secs(10);
 
+#[path = "mock_ws_wave1/depth.rs"]
+mod depth;
+#[path = "depth/levels.rs"]
+mod depth_levels;
 #[path = "mock_ws_wave1/subscriptions.rs"]
 mod subscriptions;
 #[path = "mock_ws_wave1/wire_frames.rs"]

@@ -10,7 +10,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 
 /// Session adapter for Huobi/HTX.
@@ -27,7 +28,7 @@ impl HuobiAdapter {
             max_symbols: mdc_providers::huobi::HUOBI_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REQUESTED_DEPTH as usize,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

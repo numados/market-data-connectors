@@ -10,7 +10,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 
 /// Session adapter for Coinbase Exchange.
@@ -19,17 +20,13 @@ pub struct CoinbaseAdapter {
 }
 
 impl CoinbaseAdapter {
-    // The full-depth feed has no subscription depth. Retain complete levels
-    // within a finite local safety cap rather than truncating the book.
-    const MAX_BOOK_DEPTH: usize = 50_000;
-
     /// Bounds and depth owned by the Coinbase Exchange adapter.
     pub(crate) fn session_bounds() -> SessionBounds {
         SessionBounds {
             max_symbols: mdc_providers::coinbase::COINBASE_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::MAX_BOOK_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

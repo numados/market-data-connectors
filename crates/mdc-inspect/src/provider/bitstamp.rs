@@ -10,7 +10,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 
 /// Session adapter for Bitstamp.
@@ -20,15 +21,13 @@ pub struct BitstampAdapter {
 }
 
 impl BitstampAdapter {
-    const REQUESTED_DEPTH: usize = 100;
-
     /// Bounds and depth owned by the Bitstamp adapter.
     pub(crate) fn session_bounds() -> SessionBounds {
         SessionBounds {
             max_symbols: mdc_providers::bitstamp::BITSTAMP_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REQUESTED_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

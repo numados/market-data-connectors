@@ -10,7 +10,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 
 /// Session adapter for Coinbase Advanced.
@@ -19,14 +20,13 @@ pub struct CoinbaseAdvancedAdapter {
 }
 
 impl CoinbaseAdvancedAdapter {
-    const REQUESTED_DEPTH: usize = 100;
     const MAX_SYMBOLS: usize = 25;
 
     /// Bounds and depth owned by the Coinbase Advanced adapter.
     pub(crate) fn session_bounds() -> SessionBounds {
         SessionBounds {
             max_symbols: Self::MAX_SYMBOLS,
-            projector_depth: Self::REQUESTED_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }

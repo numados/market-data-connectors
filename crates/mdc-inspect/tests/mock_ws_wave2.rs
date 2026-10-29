@@ -240,7 +240,10 @@ fn huobi_frame(fixture: &str, replacements: &[(&str, &str)]) -> Vec<u8> {
         assert!(json.contains(from), "fixture missing {from:?}");
         json = json.replace(from, to);
     }
-    let payload = json.as_bytes();
+    gzip_payload(json.as_bytes())
+}
+
+fn gzip_payload(payload: &[u8]) -> Vec<u8> {
     let length = u16::try_from(payload.len()).expect("fixture fits one stored block");
     let mut gzip = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
     gzip.extend_from_slice(&length.to_le_bytes());
@@ -258,14 +261,18 @@ fn huobi_frame(fixture: &str, replacements: &[(&str, &str)]) -> Vec<u8> {
     gzip
 }
 
-fn huobi_snapshot(request: &str, sequence: &str) -> Vec<u8> {
-    let id = request
+fn huobi_request_id(request: &str) -> &str {
+    request
         .split("\"id\":\"")
         .nth(1)
         .unwrap()
         .split('"')
         .next()
-        .unwrap();
+        .unwrap()
+}
+
+fn huobi_snapshot(request: &str, sequence: &str) -> Vec<u8> {
+    let id = huobi_request_id(request);
     huobi_frame(
         "order_book_snapshot",
         &[
@@ -276,5 +283,9 @@ fn huobi_snapshot(request: &str, sequence: &str) -> Vec<u8> {
     )
 }
 
+#[path = "mock_ws_wave2/depth.rs"]
+mod depth;
+#[path = "depth/levels.rs"]
+mod depth_levels;
 #[path = "mock_ws_wave2/scenarios.rs"]
 mod scenarios;

@@ -25,12 +25,12 @@ fn config() -> SessionConfig {
 }
 
 fn bounds() -> SessionBounds {
-    SessionBounds {
-        max_symbols: 25,
-        projector_depth: 1000,
-        affected_connection: 1,
-    }
+    ProviderKind::Binance.session_bounds()
 }
+
+mod depth;
+#[path = "../../../tests/depth/levels.rs"]
+mod depth_levels;
 
 /// Spawns the real session over the mock servers and returns the display
 /// receiver plus the session-join handle.
@@ -166,8 +166,17 @@ fn depth_delta_with_sizes(
     ask: &str,
     ask_size: &str,
 ) -> String {
+    depth_delta_levels(
+        first,
+        final_seq,
+        &format!(r#"["{bid}","{bid_size}"]"#),
+        &format!(r#"["{ask}","{ask_size}"]"#),
+    )
+}
+
+fn depth_delta_levels(first: u64, final_seq: u64, bids: &str, asks: &str) -> String {
     format!(
-        r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":{first},"u":{final_seq},"b":[["{bid}","{bid_size}"]],"a":[["{ask}","{ask_size}"]]}}}}"#
+        r#"{{"stream":"btcusdt@depth@100ms","data":{{"e":"depthUpdate","E":1600000000000,"s":"BTCUSDT","U":{first},"u":{final_seq},"b":[{bids}],"a":[{asks}]}}}}"#
     )
 }
 

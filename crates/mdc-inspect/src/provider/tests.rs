@@ -28,7 +28,7 @@ fn registry_bounds_are_supplied_by_each_adapter() {
 fn binance_bounds_come_from_capabilities() {
     let bounds = ProviderKind::Binance.session_bounds();
     assert_eq!(bounds.max_symbols, 25);
-    assert_eq!(bounds.projector_depth, 1000);
+    assert_eq!(bounds.projector_depth, MAX_RETAINED_BOOK_DEPTH);
     assert_eq!(bounds.affected_connection, 1);
     assert!(ProviderKind::Binance.capabilities().is_some());
 }
@@ -217,7 +217,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 12,
-                projector_depth: 250,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );
@@ -238,7 +238,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 25,
-                projector_depth: 50,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );
@@ -259,7 +259,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 25,
-                projector_depth: 100,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );
@@ -280,7 +280,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 25,
-                projector_depth: 150,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );
@@ -301,7 +301,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 25,
-                projector_depth: 100,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );
@@ -315,7 +315,7 @@ mod remaining_bounds {
             kind.session_bounds(),
             SessionBounds {
                 max_symbols: 26,
-                projector_depth: 20,
+                projector_depth: MAX_RETAINED_BOOK_DEPTH,
                 affected_connection: 1
             }
         );

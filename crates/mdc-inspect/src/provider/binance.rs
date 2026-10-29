@@ -14,7 +14,8 @@ use url::Url;
 use crate::config::SessionConfig;
 use crate::error::Error;
 use crate::provider::{
-    ProviderFuture, ProviderRun, SessionAdapter, SessionBounds, validation_sink,
+    MAX_RETAINED_BOOK_DEPTH, ProviderFuture, ProviderRun, SessionAdapter, SessionBounds,
+    validation_sink,
 };
 use mdc_sinks::loss_intolerant::LossIntolerantSender;
 
@@ -27,15 +28,13 @@ pub struct BinanceAdapter {
 }
 
 impl BinanceAdapter {
-    const REST_DEPTH: usize = 1000;
-
-    /// Bounds owned by the Binance adapter and its REST snapshot contract.
+    /// Bounds owned by the Binance adapter, independent of the REST snapshot depth.
     pub(crate) fn session_bounds() -> SessionBounds {
         SessionBounds {
             max_symbols: mdc_providers::binance::BINANCE_CAPABILITIES
                 .bounds
                 .max_symbols_per_connection,
-            projector_depth: Self::REST_DEPTH,
+            projector_depth: MAX_RETAINED_BOOK_DEPTH,
             affected_connection: 1,
         }
     }
