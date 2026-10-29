@@ -1,10 +1,9 @@
 //! Bounded redacting in-memory diagnostics (PRD 31 §3.8).
 //!
-//! A custom `tracing` subscriber feeds a 256-record ring. Only the level,
-//! target, event name, and an allow-list of field names (venue, symbol,
-//! connection identifier, provider) are retained; arbitrary messages and
-//! field values — URLs, configuration `Debug` output, error chains,
-//! credentials — are dropped by default (requirement 128).
+//! A custom `tracing` subscriber feeds INFO-and-above events to a 256-record
+//! ring. It retains metadata, bounded non-secret context and fixed summaries.
+//! Message text is classified transiently, never retained; URLs, configuration
+//! output, error chains, credentials and other unapproved values are dropped.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -15,8 +14,12 @@ use tracing::{Event, Level, Metadata, Subscriber};
 
 use crate::config::DIAGNOSTICS_RING;
 
-/// Field names safe to retain.
-const ALLOWED_FIELDS: &[&str] = &["venue", "symbol", "connection", "connection_id", "provider"];
+mod summary;
+
+/// Reserved output field; native fields with this name are not accepted.
+pub(crate) const EVENT_FIELD: &str = "event";
+
+const CONTEXT_LIMIT: usize = 64;
 
 /// One retained diagnostics record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +32,24 @@ pub struct DiagnosticRecord {
     pub name: String,
     /// Allow-listed, non-secret field values.
     pub fields: Vec<(String, String)>,
+}
+
+impl DiagnosticRecord {
+    pub(crate) fn summary(&self) -> &'static str {
+        self.fields
+            .iter()
+            .find(|(name, _)| name == EVENT_FIELD)
+            .map_or(summary::DEFAULT_SUMMARY, |(_, value)| {
+                summary::trusted_label(value)
+            })
+    }
+
+    pub(crate) fn context_fields(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.fields.iter().filter_map(|(name, value)| {
+            let name = context_field_name(name)?;
+            safe_context_value(value).then_some((name, value.as_str()))
+        })
+    }
 }
 
 /// Bounded diagnostics ring with an eviction counter.
@@ -94,21 +115,29 @@ pub struct DiagnosticsSnapshot {
 /// Redacting `tracing` subscriber writing into a shared ring.
 pub struct DiagnosticsSubscriber {
     ring: Arc<Mutex<DiagnosticsRing>>,
+    max_level: Level,
 }
 
 impl DiagnosticsSubscriber {
     /// Creates a subscriber over a fresh ring and returns both.
     pub fn new() -> (Arc<Mutex<DiagnosticsRing>>, Self) {
         let ring = Arc::new(Mutex::new(DiagnosticsRing::new()));
-        let subscriber = Self {
-            ring: Arc::clone(&ring),
-        };
+        let subscriber = Self::from_ring(Arc::clone(&ring));
         (ring, subscriber)
     }
 
     /// Creates a subscriber over an existing ring.
     pub fn from_ring(ring: Arc<Mutex<DiagnosticsRing>>) -> Self {
-        Self { ring }
+        Self {
+            ring,
+            max_level: Level::INFO,
+        }
+    }
+
+    /// Selects capture verbosity. Redaction remains active at every level.
+    pub fn with_max_level(mut self, max_level: Level) -> Self {
+        self.max_level = max_level;
+        self
     }
 }
 
@@ -120,8 +149,8 @@ impl Default for DiagnosticsSubscriber {
 }
 
 impl Subscriber for DiagnosticsSubscriber {
-    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-        true
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        *metadata.level() <= self.max_level
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
@@ -137,8 +166,18 @@ impl Subscriber for DiagnosticsSubscriber {
     fn exit(&self, _span: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
+        if !self.enabled(event.metadata()) {
+            return;
+        }
         let mut visitor = AllowListVisitor::default();
         event.record(&mut visitor);
+        visitor.fields.push((
+            EVENT_FIELD.to_string(),
+            visitor
+                .summary
+                .unwrap_or(summary::DEFAULT_SUMMARY)
+                .to_string(),
+        ));
         let record = DiagnosticRecord {
             level: *event.metadata().level(),
             target: event.metadata().target().to_string(),
@@ -159,101 +198,58 @@ impl Subscriber for DiagnosticsSubscriber {
 #[derive(Default)]
 struct AllowListVisitor {
     fields: Vec<(String, String)>,
+    summary: Option<&'static str>,
 }
 
 impl Visit for AllowListVisitor {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if is_allowed(field.name()) {
-            self.fields
-                .push((field.name().to_string(), format!("{value:?}")));
+        if field.name() == "message" {
+            if self.summary.is_none() {
+                self.summary = Some(summary::from_debug(value));
+            }
+            return;
+        }
+        if let Some(name) = context_field_name(field.name()) {
+            if let Some(value) = summary::bounded_debug(value, CONTEXT_LIMIT)
+                .filter(|value| safe_context_value(value))
+            {
+                self.fields.push((name.to_string(), value));
+            }
         }
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
-        if is_allowed(field.name()) {
-            self.fields
-                .push((field.name().to_string(), value.to_string()));
+        if field.name() == "message" {
+            if self.summary.is_none() {
+                self.summary = Some(summary::from_text(value));
+            }
+            return;
+        }
+        if let Some(name) = context_field_name(field.name()) {
+            if safe_context_value(value) {
+                self.fields.push((name.to_string(), value.to_string()));
+            }
         }
     }
 }
 
-fn is_allowed(name: &str) -> bool {
-    ALLOWED_FIELDS.contains(&name)
+fn context_field_name(name: &str) -> Option<&str> {
+    match name {
+        "sym" => Some("symbol"),
+        "venue" | "symbol" | "connection" | "connection_id" | "provider" => Some(name),
+        _ => None,
+    }
+}
+
+pub(crate) fn safe_context_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= CONTEXT_LIMIT
+        && !value.contains("://")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'/' | b'.' | b':')
+        })
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use tracing::info;
-
-    #[test]
-    fn ring_is_bounded_and_reports_evictions() {
-        let mut ring = DiagnosticsRing::with_capacity(4);
-        for index in 0..10 {
-            ring.push(DiagnosticRecord {
-                level: Level::INFO,
-                target: "t".to_string(),
-                name: format!("n{index}"),
-                fields: Vec::new(),
-            });
-        }
-        let snapshot = ring.snapshot();
-        assert_eq!(snapshot.records.len(), 4);
-        assert_eq!(snapshot.evicted, 6);
-        assert_eq!(snapshot.records.last().unwrap().name, "n9");
-    }
-
-    #[test]
-    fn subscriber_retains_allow_listed_fields_and_drops_messages() {
-        let (ring, subscriber) = DiagnosticsSubscriber::new();
-        tracing::subscriber::with_default(subscriber, || {
-            info!(
-                message = "secret-url https://user:pass@example.com/creds",
-                venue = "binance",
-                symbol = "BTCUSDT",
-                connection_id = 7,
-                password = "hunter2",
-                "event text with secrets"
-            );
-        });
-        let snapshot = ring.lock().unwrap().snapshot();
-        assert_eq!(snapshot.records.len(), 1);
-        let record = &snapshot.records[0];
-        let names: Vec<&str> = record
-            .fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
-        assert!(names.contains(&"venue"));
-        assert!(names.contains(&"symbol"));
-        assert!(names.contains(&"connection_id"));
-        assert!(!names.contains(&"message"));
-        assert!(!names.contains(&"password"));
-        for (_, value) in &record.fields {
-            assert!(!value.contains("secret"));
-            assert!(!value.contains("hunter2"));
-        }
-    }
-
-    #[test]
-    fn poisoned_ring_recovers_without_panicking() {
-        let ring = Arc::new(Mutex::new(DiagnosticsRing::new()));
-        let holder = Arc::clone(&ring);
-        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = holder.lock().unwrap();
-            panic!("poison the diagnostics mutex");
-        }));
-        assert!(poisoned.is_err());
-        // A poisoned mutex must not panic the subscriber (requirement 131).
-        let subscriber = DiagnosticsSubscriber::from_ring(Arc::clone(&ring));
-        tracing::subscriber::with_default(subscriber, || {
-            info!(venue = "binance", "event after poison");
-        });
-        let snapshot = ring
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .snapshot();
-        assert_eq!(snapshot.records.len(), 1);
-    }
-}
+mod tests;

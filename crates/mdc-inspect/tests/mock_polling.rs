@@ -50,7 +50,8 @@ fn diagnostics_ring() -> Arc<Mutex<DiagnosticsRing>> {
     DIAGNOSTICS_RING
         .get_or_init(|| {
             let ring = Arc::new(Mutex::new(DiagnosticsRing::new()));
-            let subscriber = DiagnosticsSubscriber::from_ring(Arc::clone(&ring));
+            let subscriber = DiagnosticsSubscriber::from_ring(Arc::clone(&ring))
+                .with_max_level(tracing::Level::TRACE);
             tracing::subscriber::set_global_default(subscriber)
                 .expect("mock polling diagnostics subscriber must install once");
             ring

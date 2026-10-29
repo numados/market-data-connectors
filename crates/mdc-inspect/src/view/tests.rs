@@ -11,6 +11,9 @@ use ratatui::{Terminal, backend::TestBackend};
 use rust_decimal::Decimal;
 
 use super::*;
+
+#[path = "tests/diagnostics.rs"]
+mod diagnostics;
 use crate::diagnostics::DiagnosticRecord;
 use crate::display::{AlertRecord, DisplayedQuote, LevelView, QuoteView, SymbolDisplay};
 

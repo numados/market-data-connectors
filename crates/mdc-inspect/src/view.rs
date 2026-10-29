@@ -23,6 +23,10 @@ use crate::setup::SetupState;
 /// Minimum width below which panes stack vertically.
 const NARROW_WIDTH: u16 = 70;
 
+mod diagnostics;
+
+use diagnostics::draw_diagnostics;
+
 /// Draws the guided-configuration screen.
 pub fn draw_setup(frame: &mut Frame<'_>, setup: &SetupState) {
     let area = frame.area();
@@ -447,42 +451,6 @@ fn draw_alerts(frame: &mut Frame<'_>, area: Rect, snapshot: &DisplaySnapshot, ui
             "Integrity alerts (focus {})",
             focus_label(ui.focus)
         )),
-    );
-    frame.render_widget(list, area);
-}
-
-fn draw_diagnostics(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    diagnostics: &DiagnosticsSnapshot,
-    ui: &UiState,
-) {
-    let mut lines = Vec::new();
-    if diagnostics.evicted > 0 {
-        lines.push(ListItem::new(format!(
-            "... {} older diagnostics evicted",
-            diagnostics.evicted
-        )));
-    }
-    for record in &diagnostics.records {
-        let fields = record
-            .fields
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        lines.push(ListItem::new(format!(
-            "{} {} {} {fields}",
-            record.level, record.target, record.name
-        )));
-    }
-    if lines.is_empty() {
-        lines.push(ListItem::new("no diagnostics"));
-    }
-    let list = List::new(lines.into_iter().skip(ui.diagnostics_scroll)).block(
-        Block::new()
-            .borders(Borders::ALL)
-            .title(format!("Diagnostics (focus {})", focus_label(ui.focus))),
     );
     frame.render_widget(list, area);
 }
