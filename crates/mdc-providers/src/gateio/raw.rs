@@ -57,24 +57,66 @@ pub fn extract_symbol(s: &str) -> &str {
 }
 
 /// Top-level raw envelope for all messages on the Gate.io WebSocket feed.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct RawEnvelope<'a> {
     /// Channel name (e.g. `"spot.obu"`, `"spot.trades"`, `"spot.ping"`).
     pub channel: &'a str,
     /// Event name if present (e.g. `"subscribe"`, `"unsubscribe"`, `"update"`).
-    #[serde(default)]
     pub event: Option<&'a str>,
-    /// Server timestamp in seconds.
+    /// Server timestamp in seconds, derived from `time_ms` when `time` is absent.
     pub time: u64,
     /// Server timestamp in milliseconds if present.
-    #[serde(default)]
     pub time_ms: Option<u64>,
     /// Raw unparsed result payload.
-    #[serde(borrow, default)]
     pub result: Option<&'a RawValue>,
     /// Raw unparsed error payload if present.
-    #[serde(borrow, default)]
     pub error: Option<&'a RawValue>,
+}
+
+// Keep the public normalized envelope unchanged while accepting either wire timestamp.
+#[derive(Deserialize)]
+struct RawEnvelopeFields<'a> {
+    channel: &'a str,
+    #[serde(default)]
+    event: Option<&'a str>,
+    #[serde(default, deserialize_with = "optional_seconds")]
+    time: Option<u64>,
+    #[serde(default)]
+    time_ms: Option<u64>,
+    #[serde(borrow, default)]
+    result: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    error: Option<&'a RawValue>,
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for RawEnvelope<'a> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let fields = RawEnvelopeFields::<'a>::deserialize(deserializer)?;
+        let time = server_seconds(fields.time, fields.time_ms)
+            .ok_or_else(|| serde::de::Error::missing_field("time or time_ms"))?;
+        Ok(Self {
+            channel: fields.channel,
+            event: fields.event,
+            time,
+            time_ms: fields.time_ms,
+            result: fields.result,
+            error: fields.error,
+        })
+    }
+}
+
+fn optional_seconds<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    u64::deserialize(deserializer).map(Some)
+}
+
+fn server_seconds(time: Option<u64>, time_ms: Option<u64>) -> Option<u64> {
+    time.or_else(|| time_ms.map(|millis| millis / 1000))
 }
 
 /// Raw order book update (`spot.obu`) result object with owned level vectors.
@@ -362,7 +404,7 @@ pub struct GateioDepthFrameHeader<'de> {
     pub channel: &'de str,
     /// Event name (`"update"` or `"subscribe"`).
     pub event: Option<&'de str>,
-    /// Server timestamp in seconds.
+    /// Server timestamp in seconds; zero if neither envelope timestamp is present.
     pub time: u64,
     /// Server timestamp in milliseconds if present.
     pub time_ms: Option<u64>,
@@ -413,7 +455,7 @@ impl<'de, 'buf> Visitor<'de> for GateioDepthFrameVisitor<'buf> {
     {
         let mut channel = None;
         let mut event = None;
-        let mut time = 0;
+        let mut time = None;
         let mut time_ms = None;
         let mut obu = None;
 
@@ -421,7 +463,7 @@ impl<'de, 'buf> Visitor<'de> for GateioDepthFrameVisitor<'buf> {
             match key {
                 "channel" => channel = Some(map.next_value::<&'de str>()?),
                 "event" => event = Some(map.next_value::<&'de str>()?),
-                "time" => time = map.next_value::<u64>()?,
+                "time" => time = Some(map.next_value::<u64>()?),
                 "time_ms" => time_ms = Some(map.next_value::<u64>()?),
                 "result" => {
                     let h = map.next_value_seed(ObuSeed::new(self.scratch))?;
@@ -439,7 +481,7 @@ impl<'de, 'buf> Visitor<'de> for GateioDepthFrameVisitor<'buf> {
         Ok(GateioDepthFrameHeader {
             channel,
             event,
-            time,
+            time: server_seconds(time, time_ms).unwrap_or_default(),
             time_ms,
             obu,
         })
@@ -448,177 +490,4 @@ impl<'de, 'buf> Visitor<'de> for GateioDepthFrameVisitor<'buf> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_symbol() {
-        assert_eq!(extract_symbol("ob.BTC_USDT.400"), "BTC_USDT");
-        assert_eq!(extract_symbol("ob.ETH_USDT.50"), "ETH_USDT");
-        assert_eq!(extract_symbol("BTC_USDT"), "BTC_USDT");
-    }
-
-    #[test]
-    fn test_parse_create_time_ms() {
-        let ts = parse_create_time_ms("1700000000123.456").unwrap();
-        assert_eq!(ts.as_nanos(), 1_700_000_000_123_456_000);
-
-        let ts2 = parse_create_time_ms("1700000000123").unwrap();
-        assert_eq!(ts2.as_nanos(), 1_700_000_000_123_000_000);
-
-        let ts3 = parse_create_time_ms("1700000000123.5").unwrap();
-        assert_eq!(ts3.as_nanos(), 1_700_000_000_123_500_000);
-
-        assert!(parse_create_time_ms("invalid").is_err());
-        assert!(parse_create_time_ms("123.").is_err());
-    }
-
-    #[test]
-    fn test_parse_snapshot_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/order_book_snapshot.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.obu");
-        assert_eq!(env.event, Some("update"));
-
-        let obu: RawObu<'_> = serde_json::from_str(env.result.unwrap().get()).unwrap();
-        assert!(obu.full);
-        assert_eq!(obu.s, "ob.BTC_USDT.400");
-        assert_eq!(obu.u, 123456);
-        assert_eq!(obu.b.len(), 2);
-        assert_eq!(obu.a.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_snapshot_seed_zero_alloc() {
-        let data = include_str!("../../tests/fixtures/gateio/order_book_snapshot.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        let mut scratch = GateioConnectionScratch::with_capacity(16);
-
-        let mut de = serde_json::Deserializer::from_str(env.result.unwrap().get());
-        let header = ObuSeed::new(&mut scratch).deserialize(&mut de).unwrap();
-
-        assert!(header.full);
-        assert_eq!(header.s, "ob.BTC_USDT.400");
-        assert_eq!(header.last_id, 123456);
-        assert_eq!(scratch.bids.len(), 2);
-        assert_eq!(scratch.asks.len(), 2);
-        assert_eq!(scratch.bids[0].price, Decimal::from(50000));
-        assert_eq!(scratch.asks[0].price, Decimal::from(50001));
-    }
-
-    #[test]
-    fn test_parse_depth_update_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/depth_update.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.obu");
-        assert_eq!(env.event, Some("update"));
-
-        let obu: RawObu<'_> = serde_json::from_str(env.result.unwrap().get()).unwrap();
-        assert!(!obu.full);
-        assert_eq!(obu.first_id, 123457);
-        assert_eq!(obu.u, 123460);
-        assert_eq!(obu.b.len(), 2);
-        assert_eq!(obu.a.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_depth_update_seed_zero_alloc() {
-        let data = include_str!("../../tests/fixtures/gateio/depth_update.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        let mut scratch = GateioConnectionScratch::with_capacity(16);
-
-        let mut de = serde_json::Deserializer::from_str(env.result.unwrap().get());
-        let header = ObuSeed::new(&mut scratch).deserialize(&mut de).unwrap();
-
-        assert!(!header.full);
-        assert_eq!(header.first_id, 123457);
-        assert_eq!(header.last_id, 123460);
-        assert_eq!(scratch.bids.len(), 2);
-        assert_eq!(scratch.asks.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_depth_update_bid_only() {
-        let data = include_str!("../../tests/fixtures/gateio/depth_update_bid_only.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        let mut scratch = GateioConnectionScratch::with_capacity(16);
-
-        let mut de = serde_json::Deserializer::from_str(env.result.unwrap().get());
-        let header = ObuSeed::new(&mut scratch).deserialize(&mut de).unwrap();
-
-        assert_eq!(scratch.bids.len(), 1);
-        assert!(scratch.asks.is_empty());
-        assert_eq!(header.first_id, 123461);
-        assert_eq!(header.last_id, 123462);
-    }
-
-    #[test]
-    fn test_parse_depth_update_ask_only() {
-        let data = include_str!("../../tests/fixtures/gateio/depth_update_ask_only.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        let mut scratch = GateioConnectionScratch::with_capacity(16);
-
-        let mut de = serde_json::Deserializer::from_str(env.result.unwrap().get());
-        let header = ObuSeed::new(&mut scratch).deserialize(&mut de).unwrap();
-
-        assert!(scratch.bids.is_empty());
-        assert_eq!(scratch.asks.len(), 1);
-        assert_eq!(header.first_id, 123463);
-        assert_eq!(header.last_id, 123464);
-    }
-
-    #[test]
-    fn test_parse_heartbeat_or_ping_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/heartbeat_or_ping.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.ping");
-        assert_eq!(env.time, 1700000030);
-        assert!(env.event.is_none());
-        assert!(env.result.is_none());
-
-        let pong = SpotPong::new(env.time);
-        let serialized = serde_json::to_string(&pong).unwrap();
-        assert_eq!(serialized, r#"{"time":1700000030,"channel":"spot.pong"}"#);
-    }
-
-    #[test]
-    fn test_parse_trade_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/trade.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.trades");
-        assert_eq!(env.event, Some("update"));
-
-        let trade: RawTrade<'_> = serde_json::from_str(env.result.unwrap().get()).unwrap();
-        assert_eq!(trade.id.to_small_str().as_str(), "987654321");
-        assert_eq!(trade.currency_pair, "BTC_USDT");
-        assert_eq!(trade.side, "sell");
-        assert_eq!(trade.price, Decimal::from(50000));
-        assert_eq!(trade.amount, Decimal::from_str_exact("0.01").unwrap());
-    }
-
-    #[test]
-    fn test_parse_subscribe_ack_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/subscribe_ack.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.obu");
-        assert_eq!(env.event, Some("subscribe"));
-
-        let ack: RawSubAckResult<'_> = serde_json::from_str(env.result.unwrap().get()).unwrap();
-        assert_eq!(ack.status, "success");
-    }
-
-    #[test]
-    fn test_parse_subscribe_ack_error_fixture() {
-        let data = include_str!("../../tests/fixtures/gateio/subscribe_ack_error.json");
-        let env: RawEnvelope<'_> = serde_json::from_str(data).unwrap();
-        assert_eq!(env.channel, "spot.obu");
-        assert_eq!(env.event, Some("subscribe"));
-
-        let ack: RawSubAckResult<'_> = serde_json::from_str(env.result.unwrap().get()).unwrap();
-        assert_eq!(ack.status, "fail");
-
-        let err: RawSubAckError<'_> = serde_json::from_str(env.error.unwrap().get()).unwrap();
-        assert_eq!(err.code, 2);
-        assert_eq!(err.message, "invalid symbol");
-    }
-}
+mod tests;

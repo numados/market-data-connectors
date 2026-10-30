@@ -9,7 +9,7 @@ fn gate_frame(sequence: u64, full: bool, bids: &str, asks: &str) -> String {
         format!(r#""U":{sequence},"#)
     };
     format!(
-        r#"{{"time":1700000000,"channel":"spot.obu","event":"update","result":{{"t":1700000000000,{header}"s":"ob.BTC_USDT.50","u":{sequence},"b":[{bids}],"a":[{asks}]}}}}"#
+        r#"{{"time_ms":1700000000000,"channel":"spot.obu","event":"update","result":{{"t":1700000000000,{header}"s":"ob.BTC_USDT.50","u":{sequence},"b":[{bids}],"a":[{asks}]}}}}"#
     )
 }
 
