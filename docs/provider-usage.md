@@ -1,6 +1,6 @@
-# Connector & Stale Algorithm Usage Guide
+# Connector and Stale-Algorithm Usage Guide
 
-This guide explains how to configure and run market data connectors **with** and **without** staleness/integrity algorithms, both at the common sink/projection layer (`mdc-core`, `mdc-sinks`) and per supported venue (`mdc-providers`).
+This guide explains how to configure market data connectors at two levels: provider-side wire integrity (`mdc-providers`, `mdc-core`) and downstream quote projection (`mdc-sinks`). It also shows how to run feeds without the optional book projection.
 
 ---
 
@@ -32,7 +32,7 @@ Market data staleness and integrity are separated into two composable layers so 
 
 | Layer | Component | Responsibility | Can Be Bypassed / Relaxed? |
 |---|---|---|---|
-| **Layer 1: Connector Wire Integrity** | `mdc-providers` + `mdc-core::integrity` | Detects sequence gaps ($U/u$, `prevSeqNum`), CRC32 checksum mismatches, stale diffs ($t \le T$), heartbeat loss, and socket silence. Emits in-band `IntegrityAlert` events and triggers self-healing snapshot resynchronization. | **Yes** — disable L2 depth (use `@bookTicker` or trades only), set `ChecksumPolicy::Optional` / `NoChecksum`, set `SequencePolicy::Optional`, or widen watchdog/heartbeat timeouts. |
+| **Layer 1: Connector Wire Integrity** | `mdc-providers` + `mdc-core::integrity` | Detects sequence gaps ($U/u$, `prevSeqNum`), CRC32 checksum mismatches, stale diffs ($t \le T$), heartbeat loss, and socket silence. Emits in-band `IntegrityAlert` events and starts snapshot resynchronization. | **Yes** — disable L2 depth (use `@bookTicker` or trades only), set `ChecksumPolicy::Optional` / `NoChecksum`, set `SequencePolicy::Optional`, or widen watchdog/heartbeat timeouts. |
 | **Layer 2: Downstream Stale & Book Projection** | `mdc-sinks::TopOfBookProjector` & `L2Book` | Consumes `MarketEvent` streams, immediately withdraws quotes (`QuoteProjection::Unavailable`) on any invalidating `IntegrityAlert`, stages recovery books until `ResyncCompleted`, and tracks older-side `effective_ts` for quote age checks. | **Yes** — consume events directly via `FnSink`, `VecSink`, or custom `StreamingSink` / `MarketDataSink` without `TopOfBookProjector`. |
 
 ---
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let sink = FnSink::new(|event: MarketEvent<MarketDataKind>| {
-        match &event.data {
+        match &event.kind {
             MarketDataKind::BookTicker(t) => {
                 println!("{} bid={} ask={}", event.symbol, t.best_bid.price, t.best_ask.price);
             }
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 2.2 Zero-Allocation Hot-Path Sink (`StreamingSink`)
 
-Implement [`StreamingSink`](../crates/mdc-core/src/sink/streaming.rs) and pass it via `.streaming_sink(my_sink)` to receive price levels one by one (`begin_book` → `level` → `end_book`) with **zero heap allocations per frame** after scratch buffer warm-up:
+Implement [`StreamingSink`](../crates/mdc-core/src/sink/streaming.rs) and pass it through a connector's `.streaming_sink(my_sink)` builder method when that method is available. The sink receives price levels one by one (`begin_book` → `level` → `end_book`) with **zero heap allocations per frame** after scratch-buffer warm-up:
 
 ```rust
 use mdc_core::{
@@ -156,12 +156,12 @@ impl StreamingSink for HotPathSink {
 
 ## 3. Common Usage: With Stale & Integrity Projection (`TopOfBookProjector` + `L2Book`)
 
-Use [`TopOfBookProjector`](../crates/mdc-sinks/src/top_of_book.rs) when downstream pricing or execution logic requires **guaranteed non-stale, uncrossed quotes**:
+Use [`TopOfBookProjector`](../crates/mdc-sinks/src/top_of_book.rs) when downstream pricing or execution logic must withhold quotes during synchronization and integrity faults. The projector reports availability; the consumer remains responsible for applying any maximum-age policy:
 
-1. **Immediate Stale Withdrawal**: Any invalidating `IntegrityAlert` (`SequenceGap`, `SequenceReset`, `ChecksumMismatch`, `SilenceTimeout`, `Disconnected`, `ResyncStarted`, `Quarantined`, `SourceError`, `SinkFailure`, `Shutdown`) immediately transitions the projector to `QuoteProjection::Unavailable { reason: UnavailableReason::IntegrityAlert(...) }`.
-2. **Candidate Book Staging**: During resynchronization, snapshots and replayed deltas are staged in a candidate book and only promoted to active when `IntegrityAlert::ResyncCompleted` arrives (or a valid full L2 snapshot replaces an out-of-sync book).
-3. **Crossed-Book & Empty-Side Guards**: Automatically withdraws quotes with `UnavailableReason::CrossedBook` (`best_bid >= best_ask`) or `UnavailableReason::EmptySide`.
-4. **Effective Freshness Timestamp (`effective_ts`)**: Across single-sided book updates, `effective_ts` retains the **older** of the best bid and best ask timestamps, allowing you to enforce an age threshold (`received_ts.0.saturating_sub(effective_ts.0) > max_age_nanos`).
+1. **Immediate Withdrawal**: Invalidating `IntegrityAlert` values (`SequenceGap`, `SequenceReset`, `ChecksumMismatch`, `SilenceTimeout`, `Disconnected`, `ResyncStarted`, `Quarantined`, `SourceError`, `SinkFailure`, `Shutdown`) produce `QuoteProjection::Unavailable` with an integrity-alert reason.
+2. **Candidate Book Staging**: During resynchronization, snapshots and replayed deltas are staged in a candidate book and promoted only after `IntegrityAlert::ResyncCompleted` (or a valid full L2 snapshot replaces an out-of-sync book).
+3. **Crossed-Book and Empty-Side Guards**: The projector reports `UnavailableReason::CrossedBook` (`best_bid >= best_ask`) or `UnavailableReason::EmptySide` instead of returning a quote.
+4. **Effective Freshness Timestamp (`effective_ts`)**: Across single-sided book updates, `effective_ts` retains the older best bid or ask timestamp. Consumers can compare it with `received_ts` to enforce an age threshold (`received_ts.0.saturating_sub(effective_ts.0) > max_age_nanos`).
 
 ```rust
 use mdc_core::{MarketDataKind, MarketEvent, Symbol, SymbolTag};
@@ -578,7 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 5.10 VWD / Infront FX REST (`vwd`)
 
-VWD polls authenticated `SNAPQUOTE` endpoints, extracts per-side `bid.dateTime` and `ask.dateTime` provenance (never trusting `last.dateTime`), and validates direct, inverse (`allow_inverse`), and scaled quotes:
+VWD polls authenticated `SNAPQUOTE` endpoints, uses `bid.dateTime` and `ask.dateTime` for side-specific timestamps, and validates direct, inverse, and scaled quotes. Keep credentials outside the source tree:
 
 ```rust,no_run
 use std::time::Duration;
@@ -589,8 +589,11 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = VwdConfig::builder()
-        .account_path("customer-account")
-        .credentials(VwdCredentials::new("username", "password"))
+        .account_path(std::env::var("VWD_ACCOUNT_PATH")?)
+        .credentials(VwdCredentials::new(
+            std::env::var("VWD_USERNAME")?,
+            std::env::var("VWD_PASSWORD")?,
+        ))
         .add_symbol(VwdSymbol::direct("EURUSD"))
         .add_symbol(VwdSymbol::with_inverse("USDJPY"))
         .poll_interval(Duration::from_secs(5))

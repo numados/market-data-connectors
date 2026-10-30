@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to `market-data-connectors`.
 
-This repository maintains strict engineering standards to ensure low latency, zero allocations on hot paths, deterministic book integrity, and robust structured concurrency.
+This repository uses engineering standards for latency-sensitive paths, bounded allocations, deterministic book integrity, and structured task lifetime.
 
 ---
 
@@ -42,4 +42,4 @@ When contributing a new exchange connector, follow the protocol outlined in [Eng
 2. Implement zero-copy serde/borrowed wire parsers.
 3. Wire the venue's integrity checks (sequence gaps, checksums, watchdogs).
 4. Build deterministic mock tests using `mdc-testkit`.
-5. Pass conformance checks and criterion benchmarks with zero allocations on the streaming path.
+5. Pass conformance checks and criterion benchmarks, including the streaming-path allocation budget.

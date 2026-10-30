@@ -5,6 +5,7 @@ members = [
     "crates/mdc-providers",
     "crates/mdc-sinks",
     "crates/mdc-testkit",
+    "crates/mdc-inspect",
 ]
 
 [workspace.package]
@@ -38,6 +39,11 @@ bytes = "1"
 crc32fast = "1"
 flate2 = "1"
 
+# Terminal UI & CLI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+clap = { version = "4", features = ["derive"] }
+
 # Errors & Observability
 thiserror = "2"
 tracing = "0.1"
@@ -65,5 +71,6 @@ allocation-counter = "0.8"
 
 # Internal crates
 mdc-core = { path = "crates/mdc-core" }
+mdc-providers = { path = "crates/mdc-providers", default-features = false }
 mdc-sinks = { path = "crates/mdc-sinks" }
 mdc-testkit = { path = "crates/mdc-testkit" }
