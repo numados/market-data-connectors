@@ -10,7 +10,8 @@
 //! - **REST Base URL**: `https://www.bitstamp.net/api/v2` (configurable)
 //! - **Limits**: Default 25 symbols per connection bucket; REST rate limit 400 requests / 10s.
 //! - **Integrity**: Microsecond timestamp gating against REST order book snapshots. Diffs arriving
-//!   before a snapshot are dropped and trigger a snapshot; diffs with `microtimestamp <= T` are dropped.
+//!   before a snapshot are buffered while the snapshot is requested; after reconciliation, diffs
+//!   with `microtimestamp <= T` are dropped.
 //! - **Keepalive**: Connection watchdog and venue `bts:request_reconnect` handling.
 //! - **Credentials**: None required (public market data feeds).
 //!

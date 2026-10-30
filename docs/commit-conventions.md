@@ -50,7 +50,8 @@ The scope must identify the **changed crate, domain topic, or workspace componen
 - `resync`: Self-healing resync FSM, snapshot reconciliation, delta buffering.
 - `model`: Canonical market data models (`PriceLevel`, `L2Delta`, `MarketEvent`, `Symbol`).
 - `sink`: `StreamingSink`, `MarketDataSink`, and downstream dispatch abstractions.
-- Venue-specific scopes: `binance`, `kraken`, `coinbase`, `bitfinex`, `gateio`, `bitstamp`, `huobi`, `lmax`, `vwd`, `frankfurter`.
+- Venue-specific scopes: `binance`, `kraken`, `coinbase`, `coinbase-advanced`, `bitfinex`, `gateio`, `bitstamp`, `huobi`, `lmax`, `vwd`, `frankfurter`.
+- Workspace component scopes: `inspect`, `catalog`, `rest-quote`, and `conformance`.
 
 ### Meta & Workspace Scopes
 - `workspace`: Workspace root, root `Cargo.toml`, dependency definitions.

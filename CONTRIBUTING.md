@@ -23,7 +23,7 @@ All contributions must adhere to our engineering contract:
 - `gitleaks` (for secret scanning)
 
 ### Testing & Verification
-All changes must pass the full verification gate before being merged:
+Run the applicable checks before merging. The commands below form the repository's local verification gate; `cargo bench --no-run` compiles benchmark targets, while hot-path changes also require running the relevant benchmarks to exercise allocation assertions.
 
 ```bash
 cargo fmt --check

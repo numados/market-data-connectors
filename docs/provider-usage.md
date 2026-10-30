@@ -1,56 +1,33 @@
-# Connector and Stale-Algorithm Usage Guide
+# Provider usage
 
-This guide explains how to configure market data connectors at two levels: provider-side wire integrity (`mdc-providers`, `mdc-core`) and downstream quote projection (`mdc-sinks`). It also shows how to run feeds without the optional book projection.
+This guide describes the public integration boundary in the current workspace and the consumer contract around it.
 
----
+## 1. Two integrity layers
 
-## Table of Contents
+The connector and the application have different responsibilities.
 
-1. [Architecture Overview: Two Layers of Staleness & Integrity](#1-architecture-overview-two-layers-of-staleness--integrity)
-2. [Common Usage: Without Stale Projection (Raw Event Stream)](#2-common-usage-without-stale-projection-raw-event-stream)
-3. [Common Usage: With Stale & Integrity Projection (`TopOfBookProjector` + `L2Book`)](#3-common-usage-with-stale--integrity-projection-topofbookprojector--l2book)
-4. [Common Usage: Bounded Loss-Intolerant Delivery (`loss_intolerant_channel`)](#4-common-usage-bounded-loss-intolerant-delivery-loss_intolerant_channel)
-5. [Provider-Specific Configuration & Examples](#5-provider-specific-configuration--examples)
-   - [5.1 Binance Spot (`binance`)](#51-binance-spot-binance)
-   - [5.2 Kraken WebSocket v2 (`kraken`)](#52-kraken-websocket-v2-kraken)
-   - [5.3 Coinbase Exchange (`coinbase`)](#53-coinbase-exchange-coinbase)
-   - [5.4 Coinbase Advanced Trade (`coinbase-advanced`)](#54-coinbase-advanced-trade-coinbase-advanced)
-   - [5.5 Bitfinex WebSocket v2 (`bitfinex`)](#55-bitfinex-websocket-v2-bitfinex)
-   - [5.6 Gate.io Spot v4 (`gateio`)](#56-gateio-spot-v4-gateio)
-   - [5.7 Bitstamp WebSocket v2 (`bitstamp`)](#57-bitstamp-websocket-v2-bitstamp)
-   - [5.8 Huobi / HTX Spot (`huobi`)](#58-huobi--htx-spot-huobi)
-   - [5.9 LMAX Digital (`lmax`)](#59-lmax-digital-lmax)
-   - [5.10 VWD / Infront FX REST (`vwd`)](#510-vwd--infront-fx-rest-vwd)
-   - [5.11 Frankfurter ECB Reference Rates (`frankfurter`)](#511-frankfurter-ecb-reference-rates-frankfurter)
-6. [Runtime Operator Control (`ConnectorHandle`)](#6-runtime-operator-control-connectorhandle)
+| Layer | Owned by | What it does |
+|---|---|---|
+| Provider integrity | `mdc-providers` and `mdc-core` | Parses a venue feed, applies the venue's sequence/timestamp/checksum/heartbeat rules, emits `IntegrityAlert` values, and performs the provider's recovery flow. |
+| Application projection | Your application or optional `mdc-sinks` | Builds a book, rejects crossed or incomplete quotes, applies maximum-age rules, stores data, and runs business logic. |
 
----
+`TopOfBookProjector` is optional. You can consume provider events directly and implement a different book or freshness algorithm. Skipping the projector does not remove provider-side sequence, checksum, heartbeat, or transport handling.
 
-## 1. Architecture Overview: Two Layers of Staleness & Integrity
+## 2. Direct event consumption
 
-Market data staleness and integrity are separated into two composable layers so you can choose the exact level of protection your application needs:
+`MarketDataSink` receives owned `MarketEvent<MarketDataKind>` values. `FnSink` is a closure adapter. Connector builders clone the sink for connection tasks, so wrap a `FnSink` in `Arc` when using a builder that accepts `.sink(...)`.
 
-| Layer | Component | Responsibility | Can Be Bypassed / Relaxed? |
-|---|---|---|---|
-| **Layer 1: Connector Wire Integrity** | `mdc-providers` + `mdc-core::integrity` | Detects sequence gaps ($U/u$, `prevSeqNum`), CRC32 checksum mismatches, stale diffs ($t \le T$), heartbeat loss, and socket silence. Emits in-band `IntegrityAlert` events and starts snapshot resynchronization. | **Yes** — disable L2 depth (use `@bookTicker` or trades only), set `ChecksumPolicy::Optional` / `NoChecksum`, set `SequencePolicy::Optional`, or widen watchdog/heartbeat timeouts. |
-| **Layer 2: Downstream Stale & Book Projection** | `mdc-sinks::TopOfBookProjector` & `L2Book` | Consumes `MarketEvent` streams, immediately withdraws quotes (`QuoteProjection::Unavailable`) on any invalidating `IntegrityAlert`, stages recovery books until `ResyncCompleted`, and tracks older-side `effective_ts` for quote age checks. | **Yes** — consume events directly via `FnSink`, `VecSink`, or custom `StreamingSink` / `MarketDataSink` without `TopOfBookProjector`. |
-
----
-
-## 2. Common Usage: Without Stale Projection (Raw Event Stream)
-
-Use this mode when you want direct access to every normalized event (`L2Snapshot`, `L2Delta`, `BookTicker`, `Trade`, `ReferenceRate`, `IntegrityAlert`) — for example in market data recorders, trade analytics, or engines that maintain their own book state.
-
-### 2.1 Owned Event Sink (`MarketDataSink` / `FnSink`)
+This example uses the Binance API as currently implemented and selects only book-ticker and trade streams. With `depth: false`, Binance does not request REST depth snapshots or run depth reconciliation. The transport watchdog still exists.
 
 ```rust,no_run
+use std::sync::Arc;
+
 use mdc_core::{FnSink, MarketDataKind, MarketEvent, Symbol};
 use mdc_providers::binance::{BinanceConfig, BinanceConnector, BinanceStreams};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Ticker + trades only: no REST depth snapshots or L2 sequence reconciliation
     let mut config = BinanceConfig::default();
     config.streams = BinanceStreams {
         depth: false,
@@ -58,13 +35,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trade: true,
     };
 
-    let sink = FnSink::new(|event: MarketEvent<MarketDataKind>| {
+    let sink = Arc::new(FnSink::new(|event: MarketEvent<MarketDataKind>| {
         match &event.kind {
-            MarketDataKind::BookTicker(t) => {
-                println!("{} bid={} ask={}", event.symbol, t.best_bid.price, t.best_ask.price);
+            MarketDataKind::BookTicker(ticker) => {
+                println!("{} bid={} ask={}", event.symbol, ticker.best_bid.price, ticker.best_ask.price);
             }
-            MarketDataKind::Trade(tr) => {
-                println!("{} trade {} @ {}", event.symbol, tr.volume, tr.price);
+            MarketDataKind::Trade(trade) => {
+                println!("{} trade {} @ {}", event.symbol, trade.volume, trade.price);
             }
             MarketDataKind::IntegrityAlert(alert) => {
                 println!("{} alert: {:?}", event.symbol, alert);
@@ -72,11 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
         Ok::<(), std::convert::Infallible>(())
-    });
+    }));
 
     let cancel = CancellationToken::new();
     let (connector, _handle) = BinanceConnector::builder(config)
-        .symbols(["BTCUSDT", "ETHUSDT"].map(Symbol::from))
+        .symbols([Symbol::from("BTCUSDT")])
         .sink(sink)
         .build()?;
 
@@ -85,55 +62,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### 2.2 Zero-Allocation Hot-Path Sink (`StreamingSink`)
+The callback runs synchronously on the connector task. It must not block. A sink error is fatal to the producing connection and is surfaced through the connector's error path.
 
-Implement [`StreamingSink`](../crates/mdc-core/src/sink/streaming.rs) and pass it through a connector's `.streaming_sink(my_sink)` builder method when that method is available. The sink receives price levels one by one (`begin_book` → `level` → `end_book`) with **zero heap allocations per frame** after scratch-buffer warm-up:
+## 3. Low-allocation streaming sink
 
-```rust
+`StreamingSink` is the lower-allocation contract. It receives `begin_book`, one `level` callback per price level, and `end_book` for a book update. Trade, ticker, reference-rate, and alert callbacks receive borrowed payloads. The context contains the venue, symbol, timestamps, source sequence, connection ID, and delivery stamp.
+
+```rust,no_run
 use mdc_core::{
-    BookKind, BookTicker, EventContext, IntegrityAlert, RawLevelText, ReferenceRate, SequenceRange,
-    Side, StreamingSink, Trade,
+    BookKind, BookTicker, EventContext, IntegrityAlert, ReferenceRate, SequenceRange, Side,
+    StreamingSink, Trade,
 };
 use rust_decimal::Decimal;
 
 #[derive(Clone, Default)]
-struct HotPathSink;
+struct ApplicationSink;
 
-impl StreamingSink for HotPathSink {
+impl StreamingSink for ApplicationSink {
     type Error = std::convert::Infallible;
 
     fn begin_book(&mut self, _ctx: &EventContext<'_>, _kind: BookKind) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn level(
-        &mut self,
-        _ctx: &EventContext<'_>,
-        _side: Side,
-        _price: Decimal,
-        _volume: Decimal,
-        _raw: Option<RawLevelText<'_>>,
-    ) -> Result<(), Self::Error> {
+    fn level(&mut self, _side: Side, _price: Decimal, _volume: Decimal) -> Result<(), Self::Error> {
         Ok(())
     }
 
     fn end_book(
         &mut self,
         _ctx: &EventContext<'_>,
-        _kind: BookKind,
-        _sequence: Option<SequenceRange>,
+        _seq: Option<SequenceRange>,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn trade(&mut self, _ctx: &EventContext<'_>, _trade: Trade) -> Result<(), Self::Error> {
+    fn trade(&mut self, _ctx: &EventContext<'_>, _trade: &Trade) -> Result<(), Self::Error> {
         Ok(())
     }
 
     fn book_ticker(
         &mut self,
         _ctx: &EventContext<'_>,
-        _ticker: BookTicker,
+        _ticker: &BookTicker,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -141,60 +112,62 @@ impl StreamingSink for HotPathSink {
     fn reference_rate(
         &mut self,
         _ctx: &EventContext<'_>,
-        _rate: ReferenceRate,
+        _rate: &ReferenceRate,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    fn alert(&mut self, _ctx: &EventContext<'_>, _alert: IntegrityAlert) -> Result<(), Self::Error> {
+    fn alert(
+        &mut self,
+        _ctx: &EventContext<'_>,
+        _alert: IntegrityAlert,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 }
 ```
 
----
+The provider implementations reuse parsing scratch buffers and the streaming contract avoids constructing an owned event for every individual book level. The exact allocation behavior is provider-specific; use the repository benchmarks before making latency claims for an application sink.
 
-## 3. Common Usage: With Stale & Integrity Projection (`TopOfBookProjector` + `L2Book`)
+For checksum-capable feeds, implement `level_raw` when the consumer needs the venue's original price and volume tokens. The default method delegates to `level`.
 
-Use [`TopOfBookProjector`](../crates/mdc-sinks/src/top_of_book.rs) when downstream pricing or execution logic must withhold quotes during synchronization and integrity faults. The projector reports availability; the consumer remains responsible for applying any maximum-age policy:
+## 4. Book projection and application-owned freshness
 
-1. **Immediate Withdrawal**: Invalidating `IntegrityAlert` values (`SequenceGap`, `SequenceReset`, `ChecksumMismatch`, `SilenceTimeout`, `Disconnected`, `ResyncStarted`, `Quarantined`, `SourceError`, `SinkFailure`, `Shutdown`) produce `QuoteProjection::Unavailable` with an integrity-alert reason.
-2. **Candidate Book Staging**: During resynchronization, snapshots and replayed deltas are staged in a candidate book and promoted only after `IntegrityAlert::ResyncCompleted` (or a valid full L2 snapshot replaces an out-of-sync book).
-3. **Crossed-Book and Empty-Side Guards**: The projector reports `UnavailableReason::CrossedBook` (`best_bid >= best_ask`) or `UnavailableReason::EmptySide` instead of returning a quote.
-4. **Effective Freshness Timestamp (`effective_ts`)**: Across single-sided book updates, `effective_ts` retains the older best bid or ask timestamp. Consumers can compare it with `received_ts` to enforce an age threshold (`received_ts.0.saturating_sub(effective_ts.0) > max_age_nanos`).
+Use `TopOfBookProjector` when you want the supplied L2 book and quote checks:
 
-```rust
-use mdc_core::{MarketDataKind, MarketEvent, Symbol, SymbolTag};
+1. while `ResyncStarted` is active, a recovery snapshot is staged until `ResyncCompleted`; an authoritative full snapshot can also recover the projector directly when no resync is active;
+2. deltas are applied through `L2Book`;
+3. crossed books, empty sides, invalid prices/volumes, and depth-limit failures produce `QuoteProjection::Unavailable`;
+4. valid quotes produce `QuoteProjection::Available`;
+5. `effective_ts` represents the older current bid/ask timestamp.
+
+The projector does not start a timer or expire a quote by age. For an age decision at processing time, the consumer compares `effective_ts` with its current clock; `received_ts` is the provider's ingestion/dispatch timestamp and can help measure transport delay. The exact capture point is provider-specific. The consumer should also use its own timer if a quote must expire while the feed is quiet.
+
+```rust,no_run
+use mdc_core::{MarketDataKind, MarketEvent, Symbol, SymbolTag, UnixNanos};
 use mdc_sinks::{QuoteProjection, TopOfBookProjector};
 
-fn process_with_stale_protection(events: &[MarketEvent<MarketDataKind>]) {
+fn process(events: &[MarketEvent<MarketDataKind>], now: UnixNanos) {
     let symbol = Symbol::from("BTCUSDT");
-    // L2 projection mode with a 1000-level depth cap (use TopOfBookProjector::new_ticker for @bookTicker)
-    let mut projector = TopOfBookProjector::new_l2(symbol, SymbolTag::default(), Some(1000));
-
-    let max_quote_age_ns: u64 = 5_000_000_000; // 5 seconds
+    let mut projector = TopOfBookProjector::new_l2(symbol, SymbolTag::default(), None);
+    let max_age_ns = 5_000_000_000;
 
     for event in events {
         if let Some(projection) = projector.handle_event(event) {
             match projection {
                 QuoteProjection::Available {
-                    symbol,
                     bid,
                     ask,
                     effective_ts,
-                    received_ts,
                     ..
                 } => {
-                    let age_ns = received_ts.0.saturating_sub(effective_ts.0);
-                    if age_ns > max_quote_age_ns {
-                        println!("{symbol} STALE by age ({age_ns} ns)");
-                    } else {
-                        println!("{symbol} LIVE bid={bid} ask={ask}");
+                    let age_ns = now.0.saturating_sub(effective_ts.0);
+                    if age_ns <= max_age_ns {
+                        println!("live bid={bid} ask={ask}");
                     }
                 }
-                QuoteProjection::Unavailable { symbol, reason, .. } => {
-                    // Quote withdrawn due to gap, checksum error, disconnect, crossed book, etc.
-                    println!("{symbol} UNAVAILABLE: {reason:?}");
+                QuoteProjection::Unavailable { reason, .. } => {
+                    println!("withhold quote: {reason:?}");
                 }
             }
         }
@@ -202,17 +175,17 @@ fn process_with_stale_protection(events: &[MarketEvent<MarketDataKind>]) {
 }
 ```
 
----
+For native `BookTicker` events, use `TopOfBookProjector::new_ticker`. `ReferenceRate` events are not projected by `TopOfBookProjector`; handle them directly.
 
-## 4. Common Usage: Bounded Loss-Intolerant Delivery (`loss_intolerant_channel`)
+## 5. Asynchronous application logic
 
-To bridge a synchronous connector sink to an async consumer task **without silent packet drops**, pair [`loss_intolerant_channel`](../crates/mdc-sinks/src/loss_intolerant.rs) with [`TopOfBookProjector`](../crates/mdc-sinks/src/top_of_book.rs). If the bounded queue fills up, the channel automatically cancels the connector's `CancellationToken` and yields a terminal `Err(DeliveryFault)` after draining queued events:
+The connector callback is synchronous, while database writes, HTTP calls, and other application operations are often asynchronous. `loss_intolerant_channel` provides a bounded FIFO bridge:
 
 ```rust,no_run
 use futures_util::StreamExt;
 use mdc_core::{Symbol, SymbolTag};
 use mdc_providers::binance::{BinanceConfig, BinanceConnector};
-use mdc_sinks::{TopOfBookProjector, loss_intolerant_channel};
+use mdc_sinks::{loss_intolerant_channel, QuoteProjection, TopOfBookProjector};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -224,424 +197,96 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .symbols([Symbol::from("BTCUSDT")])
         .sink(sender)
         .build()?;
+    let connector_task = tokio::spawn(connector.run(cancel.clone()));
 
-    let conn_task = tokio::spawn(connector.run(cancel.clone()));
+    let mut projector = TopOfBookProjector::new_l2(
+        Symbol::from("BTCUSDT"),
+        SymbolTag::default(),
+        None,
+    );
 
-    let mut projector = TopOfBookProjector::new_l2(Symbol::from("BTCUSDT"), SymbolTag::default(), Some(1000));
     while let Some(item) = stream.next().await {
         match item {
             Ok(event) => {
-                if let Some(quote) = projector.handle_event(&event) {
-                    println!("{quote:?}");
+                if let Some(projection) = projector.handle_event(&event) {
+                    match projection {
+                        QuoteProjection::Available { bid, ask, .. } => {
+                            // Call application-owned async business logic here.
+                            println!("usable quote bid={bid} ask={ask}");
+                        }
+                        QuoteProjection::Unavailable { reason, .. } => {
+                            println!("quote unavailable: {reason:?}");
+                        }
+                    }
                 }
             }
             Err(fault) => {
-                eprintln!("Terminal delivery fault (consumer lagged or closed): {fault}");
+                eprintln!("delivery stopped: {fault}");
                 break;
             }
         }
     }
 
     cancel.cancel();
-    let _ = conn_task.await;
+    let _ = connector_task.await;
     Ok(())
 }
 ```
 
----
+When the queue is full, the channel records a terminal `DeliveryFault`, cancels the producer token, and does not silently drop an accepted event prefix. Dropping the receiver cancels the producer immediately; a subsequent send reports the receiver-closed delivery fault. The application owns the response to that terminal condition.
 
-## 5. Provider-Specific Configuration & Examples
+## 6. Alerts and validity
 
-### Summary Matrix: Integrity & Stale Controls by Provider
+The public `IntegrityAlert` variants are:
 
-| Provider | Default Integrity / Stale Mechanism | How to Tune / Customize Integrity | How to Run Without Book Stale Algo |
+- `GapDetected`;
+- `ChecksumMismatch`;
+- `SilenceTimeout`;
+- `HeartbeatTimeout`;
+- `ResyncStarted`;
+- `ResyncCompleted`;
+- `Quarantined`;
+- `SourceError`;
+- `ConnectionLost`;
+- `SinkFailure`.
+
+`ConnectionLost` carries a `DisconnectKind`, such as `Closed`, `TransportError`, `Paused`, or `Shutdown`. A connector emits only the alerts relevant to its provider and current state. A consumer should not assume that every provider emits every variant. Trade, ticker, and reference-rate payloads are borrowed in `StreamingSink`; alerts are passed by value.
+
+## 7. Provider selection
+
+The provider feature names and public configuration types are listed in [`crates/mdc-providers/Cargo.toml`](../crates/mdc-providers/Cargo.toml). The following table is a short selection guide; the linked module rustdoc and configuration types are authoritative for exact fields and defaults.
+
+| Provider | Feature | Streams or polling output | Main provider-side behavior |
 |---|---|---|---|
-| **Binance** | `@depth@100ms` $U/u$ sequence tracker + REST snapshot reconciliation (`ResyncController`) + `SilenceWatchdog` + HTTP 429/418 `EmbargoTracker` | `.resync_policy(...)`, `resync_buffer_capacity`, `snapshot_retry_cooldown`, `watchdog_ping_after`, `watchdog_reconnect_after` | Set `streams.depth = false`, `streams.book_ticker = true` (uses `@bookTicker` with zero REST snapshot calls) |
-| **Kraken** | Top-10 CRC32 book checksum (`KrakenChecksum`) + `TimeoutQuarantinePolicy` + subscription rejection escalation + `SilenceWatchdog` | `.checksum_strategy(...)`, `checksum_policy`, `resubscribe_timeout`, `quarantine_duration`, `rejection_policy` | Set `checksum_policy = ChecksumPolicy::Optional` or `.checksum_strategy(Arc::new(NoChecksum))`, or `streams.depth = false` |
-| **Coinbase Exchange** | `heartbeat` channel sequence jump detector (`sequence_gap_threshold = Some(3000)`) + `HeartbeatMonitor` (`5s`) + `SilenceWatchdog` | `heartbeat_timeout`, `sequence_gap_threshold`, `resubscribe_timeout`, `quarantine_duration` | Set `sequence_gap_threshold = None` to disable heartbeat jump resyncs, or `streams.depth = false, streams.matches = true` |
-| **Coinbase Advanced** | Connection-wide `GlobalSequenceTracker` + sequence reset detector (`reset_threshold = 2`) + `SilenceWatchdog` | `sequence_policy`, `reset_threshold`, `resync_timeout`, `silence_timeout` | Set `sequence_policy = SequencePolicy::Optional` to accept frames without sequence numbers, or `.level2(false).market_trades(true)` |
-| **Bitfinex** | Top-25 signed CRC32 interleaved checksum (`BitfinexChecksum`) + per-channel quarantine FSM + `te`/`tu` trade deduplication | `watchdog_ping_after`, `watchdog_reconnect_after`, `resubscribe_timeout`, `quarantine_duration` | Set `.enable_depth(false).enable_trades(true)` for trade-only streaming |
-| **Gate.io** | `spot.obu` $U/u$ sequence tracker + `ResyncController` + in-place resubscribe cooldown + `spot.ping`/`spot.pong` watchdog | `.resync_policy(...)`, `resync_buffer_capacity`, `resync_timeout`, `watchdog_ping_after`, `watchdog_reconnect_after` | Set `streams.depth = false, streams.trades = true` |
-| **Bitstamp** | Microsecond timestamp gate ($t > T_{\text{snapshot}}$) + buffered diff replay + REST snapshot embargo + `bts:request_reconnect` | `.resync_policy(...)`, `.buffer_capacity(...)`, `snapshot_retry_cooldown`, `request_timeout` | Set `streams.depth = false, streams.trades = true` |
-| **Huobi (HTX)** | Gzip `mbp.{levels}` `prevSeqNum == seqNum` continuity + in-band WebSocket `req` snapshot reconciliation + decompressed frame cap | `.resync_policy(...)`, `resync_buffer_capacity`, `resync_timeout`, `snapshot_cooldown`, `silence_timeout` | Set `streams.mbp = false, streams.trades = true` |
-| **LMAX Digital** | Validated top-20 full `ORDER_BOOK` replacement + `ControlPacing` rate-limit backoff + `SilenceWatchdog` | `.control_pacing(...)`, `silence_timeout`, `ping_interval` | Full snapshots on every tick (no delta drift); set `streams.book = false, streams.trades = true` for trades only |
-| **VWD (Infront)** | Per-side bid/ask timestamp extraction (ignores `last.dateTime`), crossed/zero-price rejection, inverse quote revalidation, `SourceError` → `ResyncCompleted` alerts | `poll_interval`, `request_timeout`, `VwdSymbol::direct` vs `VwdSymbol::with_inverse` vs `VwdSymbol::with_scale` | Set `emit_book_ticker = true` to receive direct `BookTicker` events on each poll |
-| **Frankfurter (ECB)** | Full batch completeness check (all configured quotes must be present and positive, identity pairs skipped) + civil-date UTC normalization | `poll_interval`, `request_timeout`, `body_cap_bytes` | Emits `ReferenceRate` events directly per poll |
+| Binance Spot | `binance` | `depth`, `book_ticker`, `trade` | REST depth snapshots, `[U, u]` reconciliation, silence watchdog |
+| Kraken v2 | `kraken` | `book`, `trade` | CRC32 book verification, resubscription and quarantine |
+| Coinbase Exchange | `coinbase` | `level2_batch`, `heartbeat`, `matches` | Heartbeat/sequence monitoring and level-2 resubscription |
+| Coinbase Advanced Trade | `coinbase-advanced` | `level2`, `heartbeats`, `market_trades` | Connection-wide sequence tracking and resubscription |
+| Bitfinex v2 | `bitfinex` | `book`, `trades` | Signed CRC32 book verification and channel recovery |
+| Gate.io Spot v4 | `gateio` | `spot.obu`, `spot.trades` | Sequence continuity and in-place resubscription |
+| Bitstamp v2 | `bitstamp` | `diff_order_book_*`, `live_trades_*` | Timestamp-gated snapshot reconciliation |
+| Huobi / HTX Spot | `huobi` | MBP book and trades | Sequence continuity, in-band snapshot requests, bounded gzip handling |
+| LMAX Digital | `lmax` | `ORDER_BOOK`, `TRADE` | Full-book replacement and silence monitoring |
+| VWD / Infront | `vwd` | REST `SNAPQUOTE` polling | Validated indicative quotes, optional inverse and scaling transforms |
+| Frankfurter | `frankfurter` | REST reference-rate polling | Complete configured currency batches and UTC date normalization |
 
----
+For exact current builder methods, read the provider module and its `connector.rs`, `config.rs`, and `control.rs` files. The providers do not share one universal control-handle API. In particular, VWD and Frankfurter are polling connectors and do not expose the WebSocket reconnect commands used by several streaming providers.
 
-### 5.1 Binance Spot (`binance`)
+## 8. Custom policies and boundaries
 
-**With full L2 integrity & custom resync policy:**
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Symbol, resync::CooldownPolicy};
-use mdc_providers::binance::{BinanceConfig, BinanceConnector};
-use tokio_util::sync::CancellationToken;
+Some providers expose custom resynchronization policies through their builders. Kraken exposes a checksum strategy. These are provider-specific extension points; they do not form one universal policy API.
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut config = BinanceConfig::default();
-    config.watchdog_ping_after = Duration::from_secs(5);
-    config.watchdog_reconnect_after = Duration::from_secs(5);
-    config.resync_buffer_capacity = 5_000;
+There is no general public switch that removes sequence/checksum validation from an L2 stream while preserving the same L2 stream. If an application does not need depth data, select a provider's ticker or trade stream where available. If it needs depth data, keep the provider's integrity path and implement custom book/freshness/business logic after the sink.
 
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let cancel = CancellationToken::new();
+The connector does not provide order entry, persistence, a message broker, or an application-specific business workflow. VWD emits indicative FX quotes, and Frankfurter emits reference rates; neither represents executable order-book or trade data.
 
-    let (connector, _handle) = BinanceConnector::builder(config)
-        .symbols([Symbol::from("BTCUSDT")])
-        .resync_policy(CooldownPolicy::new(Duration::from_secs(2)))
-        .sink(sink)
-        .build()?;
+## 9. Local verification
 
-    connector.run(cancel).await?;
-    Ok(())
-}
+The public examples are checked by the workspace documentation build when they are Rust documentation examples. Markdown fences are not automatically compiled by Cargo. Run the repository checks before publishing an integration:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 ```
-
-**Without L2 snapshot/resync overhead (`@bookTicker` only):**
-```rust,no_run
-use mdc_core::{FnSink, Symbol};
-use mdc_providers::binance::{BinanceConfig, BinanceConnector, BinanceStreams};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = BinanceConfig {
-        streams: BinanceStreams {
-            depth: false,       // Disables @depth@100ms and REST snapshot reconciliation
-            book_ticker: true,  // Streams low-latency @bookTicker directly
-            trade: false,
-        },
-        ..BinanceConfig::default()
-    };
-
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = BinanceConnector::builder(config)
-        .symbols([Symbol::from("BTCUSDT")])
-        .sink(sink)
-        .build()?;
-
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.2 Kraken WebSocket v2 (`kraken`)
-
-**With strict CRC32 top-10 checksum & quarantine (default) vs. without checksum enforcement:**
-```rust,no_run
-use std::sync::Arc;
-use mdc_core::{ChecksumPolicy, FnSink, NoChecksum, Symbol};
-use mdc_providers::kraken::{KrakenConfig, KrakenConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Default strict mode: ChecksumPolicy::Required + KrakenChecksum (CRC32 over top 10 levels)
-    let strict_config = KrakenConfig::default();
-
-    // 2. Without checksum verification: allow missing checksums and bypass CRC32 calculation
-    let mut relaxed_config = KrakenConfig::default();
-    relaxed_config.checksum_policy = ChecksumPolicy::Optional;
-
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = KrakenConnector::builder(relaxed_config)
-        .symbols([Symbol::from("BTC/USD")])
-        .checksum_strategy(Arc::new(NoChecksum))
-        .sink(sink)
-        .build()?;
-
-    let _ = strict_config;
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.3 Coinbase Exchange (`coinbase`)
-
-> **Note:** Coinbase Exchange validates that `streams.heartbeat` is `true` whenever `streams.depth` is `true`.
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Symbol};
-use mdc_providers::coinbase::{CoinbaseConfig, CoinbaseConnector, CoinbaseStreams};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Strict mode (default): 5s heartbeat silence monitor + 3,000 sequence-jump threshold
-    let mut config = CoinbaseConfig::default();
-    config.heartbeat_timeout = Duration::from_secs(5);
-    config.sequence_gap_threshold = Some(3_000);
-
-    // To disable sequence-jump resyncs while keeping depth, set:
-    // config.sequence_gap_threshold = None;
-
-    // For trade-only mode without depth/heartbeat resync FSM:
-    let trade_only_config = CoinbaseConfig {
-        streams: CoinbaseStreams {
-            depth: false,
-            heartbeat: false,
-            matches: true,
-        },
-        ..CoinbaseConfig::default()
-    };
-
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = CoinbaseConnector::builder(config)
-        .symbols([Symbol::from("BTC-USD")])
-        .sink(sink)
-        .build()?;
-
-    let _ = trade_only_config;
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.4 Coinbase Advanced Trade (`coinbase-advanced`)
-
-**With strict connection-wide sequence tracking (default) vs. relaxed `SequencePolicy::Optional`:**
-```rust,no_run
-use mdc_core::{FnSink, SequencePolicy, Symbol};
-use mdc_providers::coinbase_advanced::{CoinbaseAdvancedConfig, CoinbaseAdvancedConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Strict mode (default): SequencePolicy::Required + reset_threshold = 2
-    let strict_config = CoinbaseAdvancedConfig::default();
-
-    // Relaxed mode: SequencePolicy::Optional
-    let relaxed_config = CoinbaseAdvancedConfig::builder()
-        .with_sequence_policy(SequencePolicy::Optional)
-        .with_reset_threshold(5)
-        .build()?;
-
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = CoinbaseAdvancedConnector::builder(relaxed_config)
-        .symbols([Symbol::from("BTC-USD")])
-        .owned_sink(sink)
-        .build()?;
-
-    let _ = strict_config;
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.5 Bitfinex WebSocket v2 (`bitfinex`)
-
-Bitfinex negotiates `conf` flags `163840` (`SEQ_ALL | CHECKSUM`) and validates top-25 signed CRC32 interleaved checksums per book channel. Note that `BitfinexConnector::run` takes `(sink, cancel)` and returns `(BitfinexHandle, impl Future)`:
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Owned, Symbol};
-use mdc_providers::bitfinex::BitfinexConnector;
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // With L2 checksum & quarantine FSM (set .enable_depth(false).enable_trades(true) for trades only)
-    let connector = BitfinexConnector::builder()
-        .symbols([Symbol::from("tBTCUSD")])
-        .orderbook_depth(25)?
-        .resubscribe_timeout(Duration::from_secs(5))
-        .quarantine_duration(Duration::from_secs(30))
-        .build()?;
-
-    let sink = Owned::new(FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(())));
-    let (_handle, fut) = connector.run(sink, CancellationToken::new());
-    fut.await?;
-    Ok(())
-}
-```
-
----
-
-### 5.6 Gate.io Spot v4 (`gateio`)
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Symbol, resync::CooldownPolicy};
-use mdc_providers::gateio::{GateioConfig, GateioConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = GateioConnector::builder(GateioConfig::default())
-        .symbols([Symbol::from("BTC_USDT")])
-        .orderbook_levels(50)?
-        .resync_policy(CooldownPolicy::new(Duration::from_secs(3)))
-        .sink(sink)
-        .build()?;
-
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.7 Bitstamp WebSocket v2 (`bitstamp`)
-
-Bitstamp gates incremental diffs by microsecond timestamp ($t > T_{\text{snapshot}}$) and replays diffs buffered while a REST snapshot is in flight:
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Symbol, resync::CooldownPolicy};
-use mdc_providers::bitstamp::{BitstampConfig, BitstampConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = BitstampConnector::builder(BitstampConfig::default())
-        .symbols([Symbol::from("btcusd")])
-        .buffer_capacity(2048)
-        .resync_policy(CooldownPolicy::new(Duration::from_secs(5)))
-        .sink(sink)
-        .build()?;
-
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.8 Huobi / HTX Spot (`huobi`)
-
-Huobi streams gzip-compressed `mbp.{levels}` frames, enforces `prevSeqNum == seqNum` continuity, and requests in-band snapshots over the WebSocket on sequence gaps:
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Symbol, resync::CooldownPolicy};
-use mdc_providers::huobi::{HuobiConfig, HuobiConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = HuobiConfig::builder()
-        .mbp_levels(150)
-        .silence_timeout(Duration::from_secs(15))
-        .build()?;
-
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = HuobiConnector::builder(config)
-        .symbols([Symbol::from("btcusdt")])
-        .resync_policy(CooldownPolicy::new(Duration::from_secs(5)))
-        .sink(sink)
-        .build()?;
-
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.9 LMAX Digital (`lmax`)
-
-LMAX publishes full top-20 `ORDER_BOOK` snapshots on every update (eliminating delta drift) and enforces control command pacing:
-
-```rust,no_run
-use mdc_core::{FnSink, Symbol};
-use mdc_providers::lmax::{LmaxConfig, LmaxConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sink = FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(()));
-    let (connector, _handle) = LmaxConnector::builder(LmaxConfig::default())
-        .symbols([Symbol::from("btc-usd")])
-        .sink(sink)
-        .build()?;
-
-    connector.run(CancellationToken::new()).await?;
-    Ok(())
-}
-```
-
----
-
-### 5.10 VWD / Infront FX REST (`vwd`)
-
-VWD polls authenticated `SNAPQUOTE` endpoints, uses `bid.dateTime` and `ask.dateTime` for side-specific timestamps, and validates direct, inverse, and scaled quotes. Keep credentials outside the source tree:
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Owned};
-use mdc_providers::vwd::{VwdConfig, VwdConnector, VwdCredentials, VwdSymbol};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = VwdConfig::builder()
-        .account_path(std::env::var("VWD_ACCOUNT_PATH")?)
-        .credentials(VwdCredentials::new(
-            std::env::var("VWD_USERNAME")?,
-            std::env::var("VWD_PASSWORD")?,
-        ))
-        .add_symbol(VwdSymbol::direct("EURUSD"))
-        .add_symbol(VwdSymbol::with_inverse("USDJPY"))
-        .poll_interval(Duration::from_secs(5))
-        .emit_book_ticker(true) // Also emit BookTicker alongside single-level L2Snapshot
-        .build()?;
-
-    let connector = VwdConnector::builder(config).build()?;
-    let sink = Owned::new(FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(())));
-    let (_handle, join) = connector.run(sink, CancellationToken::new());
-    join.await??;
-    Ok(())
-}
-```
-
----
-
-### 5.11 Frankfurter ECB Reference Rates (`frankfurter`)
-
-Polls European Central Bank reference FX rates, enforces full batch completeness across all configured quote currencies, and normalizes civil dates to UTC midnight timestamps:
-
-```rust,no_run
-use std::time::Duration;
-use mdc_core::{FnSink, Owned};
-use mdc_providers::frankfurter::{FrankfurterConfig, FrankfurterConnector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = FrankfurterConfig::builder()
-        .base_currency("EUR")
-        .quote_currencies(["USD", "GBP", "CHF", "JPY"])
-        .poll_interval(Duration::from_secs(3600))
-        .build()?;
-
-    let connector = FrankfurterConnector::builder(config).build()?;
-    let sink = Owned::new(FnSink::new(|_ev| Ok::<(), std::convert::Infallible>(())));
-    let (_handle, join) = connector.run(sink, CancellationToken::new());
-    join.await??;
-    Ok(())
-}
-```
-
----
-
-## 6. Runtime Operator Control (`ConnectorHandle`)
-
-Every connector returns a cloneable `ConnectorHandle` (or `BitfinexHandle`) that allows you to trigger manual resynchronizations, socket reconnects, or pause/resume cycles at runtime:
-
-- **Pause / Resume**: `handle.pause().await` cleanly closes or pauses the feed and emits `IntegrityAlert::Disconnected { kind: DisconnectKind::Paused }`; `handle.resume().await` reconnects and forces a fresh snapshot resynchronization.
-- **Manual Resync**: `handle.resync_symbol(Symbol::from("BTCUSDT")).await` / `handle.resync_all().await` invalidates in-memory book state and requests a fresh snapshot.
-- **Forced Reconnect**: `handle.reconnect().await` drops the active socket and reconnects immediately.

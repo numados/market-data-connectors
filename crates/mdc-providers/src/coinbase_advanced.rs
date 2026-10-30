@@ -3,14 +3,16 @@
 //! # Overview
 //! Connects to Coinbase Advanced Trade WebSocket feed (`wss://advanced-trade-ws.coinbase.com`),
 //! ingesting public Level 2 order book updates (`channel: "level2"` -> received as `"l2_data"`),
-//! tracking connection-wide sequence numbers across all envelopes, maintaining silence watchdog
-//! via continuous heartbeats (`channel: "heartbeats"`), and optionally streaming trades (`channel: "market_trades"`).
+//! tracking connection-wide sequence numbers across all envelopes, optionally informing the
+//! silence watchdog with heartbeats (`channel: "heartbeats"`), and optionally streaming trades
+//! (`channel: "market_trades"`).
 //!
 //! - **WebSocket URL**: `wss://advanced-trade-ws.coinbase.com` (configurable)
 //! - **Limits**: Up to 25 products per connection (default).
 //! - **Integrity**: Global connection-wide sequence counter (`sequence_num` on every envelope).
 //!   A gap on any message invalidates all products on the connection and triggers a connection-wide resubscription.
-//! - **Keepalive**: `heartbeats` channel is subscribed automatically on every connection to keep the watchdog quiet.
+//! - **Keepalive**: The `heartbeats` channel can be enabled in `CoinbaseAdvancedStreams` to keep
+//!   the watchdog informed; it is enabled by default.
 //! - **Credentials**: None required for public market data channels.
 //!
 //! # Example
@@ -27,7 +29,7 @@
 //! let sink = Arc::new(VecSink::new());
 //! let (connector, handle) = CoinbaseAdvancedConnectorBuilder::new(config)
 //!     .symbols(symbols)
-//!     .sink(sink)
+//!     .owned_sink(sink)
 //!     .build()?;
 //! # Ok(())
 //! # }
