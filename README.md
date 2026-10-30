@@ -6,7 +6,7 @@ A modular, zero-unsafe Rust workspace providing deterministic, low-latency marke
 
 ## Highlights
 
-- **First-Class Book Integrity**: Built-in sequence continuity tracking ($U/u$, `prevSeqNum`, connection-wide sequences), CRC32 order book checksum verification (Kraken, Bitfinex), microsecond timestamp gating (Bitstamp), heartbeat monitors, and silence watchdogs.
+- **Book Integrity**: Built-in sequence continuity tracking ($U/u$, `prevSeqNum`, connection-wide sequences), CRC32 order book checksum verification (Kraken, Bitfinex), microsecond timestamp gating (Bitstamp), heartbeat monitors, and silence watchdogs.
 - **In-Band Lifecycle & Fault Ordering**: Connection loss, resynchronization starts/completions, checksum mismatches, and sink failures are emitted in-band as [`IntegrityAlert`](crates/mdc-core/src/model/alert.rs) events ordered strictly with the market data they invalidate.
 - **Hot-Path Zero Allocations**: Borrowing `serde` wire parsers (`RawValue`, `DeserializeSeed` into reused scratch buffers) and inline 16-byte [`Symbol`](crates/mdc-core/src/model/symbol.rs) identifiers achieve zero heap allocations per streaming frame after warm-up.
 - **Bounded Resources & Structured Concurrency**: Every connection worker, snapshot task, and forwarder is owned by a `JoinSet` and tied to a `CancellationToken`. HTTP snapshot/catalog responses and gzip inflation streams enforce strict byte caps.
@@ -18,7 +18,7 @@ A modular, zero-unsafe Rust workspace providing deterministic, low-latency marke
 
 | Crate | Description |
 |---|---|
-| [`mdc-core`](crates/mdc-core) | Pure domain models (`MarketEvent`, `L2Snapshot`, `L2Delta`, `BookTicker`, `Trade`, `ReferenceRate`), `StreamingSink` / `MarketDataSink` traits, sequence/checksum/embargo/watchdog integrity primitives, and self-healing `ResyncController`. Zero async or I/O dependencies. |
+| [`mdc-core`](crates/mdc-core) | Pure domain models (`MarketEvent`, `L2Snapshot`, `L2Delta`, `BookTicker`, `Trade`, `ReferenceRate`), `StreamingSink` / `MarketDataSink` traits, sequence/checksum/embargo/watchdog integrity primitives, and `ResyncController` for snapshot recovery. Zero async or I/O dependencies. |
 | [`mdc-providers`](crates/mdc-providers) | Feature-gated WebSocket and REST market data connectors, instrument catalog discovery (`InstrumentCatalog`), and REST quote snapshot clients (`RestQuoteSource`). |
 | [`mdc-sinks`](crates/mdc-sinks) | Downstream adapters including [`L2Book`](crates/mdc-sinks/src/book.rs), [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs), and bounded [`loss_intolerant_channel`](crates/mdc-sinks/src/loss_intolerant.rs) with a reserved terminal fault slot. |
 | [`mdc-testkit`](crates/mdc-testkit) | Deterministic in-process mock WebSocket (`MockWsServer`) and REST (`MockRest`, `MockCatalogServer`, `MockRestQuoteServer`) harnesses, fault injectors, and end-to-end conformance runners. |
@@ -52,22 +52,16 @@ Enable individual venues on `mdc-providers` (or `all` for every venue). TLS defa
 Pass any [`FnSink`](crates/mdc-core/src/sink.rs) or [`StreamingSink`](crates/mdc-core/src/sink.rs) directly to a connector when you want normalized `MarketEvent` frames (`Trade`, `BookTicker`, `L2Snapshot`, `L2Delta`, `ReferenceRate`) and in-band `IntegrityAlert` notifications without maintaining a stateful order book or staleness state machine in [`mdc-sinks`](crates/mdc-sinks):
 
 ```rust,no_run
-use mdc_core::{FnSink, IntegrityAlert, MarketDataKind, MarketEvent, Symbol};
+use mdc_core::{FnSink, MarketDataKind, MarketEvent, Symbol};
 use mdc_providers::binance::{BinanceConfig, BinanceConnector};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let sink = FnSink::new(
-        |event: MarketEvent<MarketDataKind>| {
-            println!("{:?} {} {:?}", event.venue, event.symbol, event.data);
-            Ok::<(), std::convert::Infallible>(())
-        },
-        |alert: IntegrityAlert| {
-            eprintln!("alert: {:?}", alert);
-            Ok::<(), std::convert::Infallible>(())
-        },
-    );
+    let sink = FnSink::new(|event: MarketEvent<MarketDataKind>| {
+        println!("{:?} {} {:?}", event.venue, event.symbol, event.kind);
+        Ok::<(), std::convert::Infallible>(())
+    });
 
     let cancel = CancellationToken::new();
     let connector = BinanceConnector::builder(BinanceConfig::default())
@@ -82,41 +76,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### 2. Stateful Projection (With Stale & Book Integrity Algorithms)
 
-Wrap your downstream sink in [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs) (and optionally [`loss_intolerant_channel`](crates/mdc-sinks/src/loss_intolerant.rs)) so that out-of-order sequences, CRC32 mismatches, silence timeouts, or reconnects automatically transition affected instruments into `InstrumentHealth::Stale` and quarantine deltas until a fresh snapshot restores `InstrumentHealth::Healthy`:
+Use [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs) as a downstream event processor when pricing or execution logic needs quotes withheld during synchronization and integrity faults. The projector is not a connector sink adapter: feed it canonical `MarketEvent` values and handle the resulting `QuoteProjection` values. Pair it with [`loss_intolerant_channel`](crates/mdc-sinks/src/loss_intolerant.rs) when events must cross an asynchronous boundary without silent drops:
 
 ```rust,no_run
-use mdc_core::{FnSink, IntegrityAlert, MarketEvent, Symbol};
-use mdc_providers::binance::{BinanceConfig, BinanceConnector};
-use mdc_sinks::{TopOfBookEvent, TopOfBookProjector};
-use tokio_util::sync::CancellationToken;
+use mdc_core::{MarketDataKind, MarketEvent, Symbol, SymbolTag};
+use mdc_sinks::{QuoteProjection, TopOfBookProjector};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let inner = FnSink::new(
-        |event: MarketEvent<TopOfBookEvent>| {
-            match &event.data {
-                TopOfBookEvent::BookTicker(bbo) => {
-                    println!("HEALTHY {} bid={} ask={}", event.symbol, bbo.bid_price, bbo.ask_price);
-                }
-                TopOfBookEvent::HealthChanged { symbol, health, reason } => {
-                    println!("STATE {} -> {:?} ({:?})", symbol, health, reason);
-                }
-            }
-            Ok::<(), std::convert::Infallible>(())
-        },
-        |_alert: IntegrityAlert| Ok::<(), std::convert::Infallible>(),
+fn process_with_integrity_projection(events: &[MarketEvent<MarketDataKind>]) {
+    let mut projector = TopOfBookProjector::new_l2(
+        Symbol::from("BTCUSDT"),
+        SymbolTag::default(),
+        Some(1000),
     );
 
-    let projector = TopOfBookProjector::new(inner);
-    let cancel = CancellationToken::new();
-
-    let connector = BinanceConnector::builder(BinanceConfig::default())
-        .symbols([Symbol::from("BTCUSDT")])
-        .sink(projector)
-        .build()?;
-
-    connector.run(cancel).await?;
-    Ok(())
+    for event in events {
+        if let Some(projection) = projector.handle_event(event) {
+            match projection {
+                QuoteProjection::Available { symbol, bid, ask, .. } => {
+                    println!("AVAILABLE {symbol} bid={bid} ask={ask}");
+                }
+                QuoteProjection::Unavailable { symbol, reason, .. } => {
+                    println!("UNAVAILABLE {symbol}: {reason:?}");
+                }
+            }
+        }
+    }
 }
 ```
 
@@ -127,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Market data integrity operates at two composable layers:
 
 1. **Downstream Sink Layer (Common Across All Providers)**:
-   - **With Stale Projection**: Use [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs), [`L2Book`](crates/mdc-sinks/src/book.rs), and [`loss_intolerant_channel`](crates/mdc-sinks/src/loss_intolerant.rs) to maintain a state machine per symbol (`Healthy` vs. `Stale`), suppress quotes from uninitialized/crossed/faulted books, and trigger `HealthChangeReason` transitions on `IntegrityAlert` events.
+   - **With Stale Projection**: Feed events to [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs), optionally using [`loss_intolerant_channel`](crates/mdc-sinks/src/loss_intolerant.rs) for delivery. It returns `QuoteProjection::Unavailable` while a book is unsynchronized, crossed, empty, or invalidated by an `IntegrityAlert`.
    - **Without Stale Projection**: Implement [`StreamingSink`](crates/mdc-core/src/sink.rs) or [`FnSink`](crates/mdc-core/src/sink.rs) directly to consume raw events and handle (or ignore) `on_alert` notifications yourself.
 2. **Provider Transport Layer (Per-Venue Configuration)**:
    - Each provider exposes channel selection (`enable_depth`, `subscribe_book`, `subscribe_trades`) and watchdog/staleness knobs (`read_timeout`, `heartbeat_timeout`, `stale_threshold`, `silence_timeout_ms`, `max_quote_age`) on its config struct.
@@ -146,7 +130,7 @@ Market data integrity operates at two composable layers:
 | **VWD / Infront** (`vwd`) | Configure `max_quote_age = Some(Duration::from_secs(300))` on `VwdPairMapping` so per-side timestamps (`zeit_bid`, `zeit_ask`) older than the threshold emit `IntegrityAlert::Custom` and drop stale quotes. | Set `max_quote_age = None` on `VwdPairMapping` to accept the latest polled quotes regardless of venue timestamp age. |
 | **Frankfurter** (`frankfurter`) | Pair with [`TopOfBookProjector`](crates/mdc-sinks/src/top_of_book.rs) or inspect `on_alert` to react to HTTP 429/5xx backoff, schema failures, or missing expected target currencies. | Pass a direct `FnSink` and ignore `on_alert` if your consumer only needs the latest successfully polled ECB reference rates. |
 
-See [**docs/provider-usage.md**](docs/provider-usage.md) for complete, copy-pasteable code examples for every provider and pattern.
+See [**docs/provider-usage.md**](docs/provider-usage.md) for provider-specific configuration details and usage examples.
 
 ---
 

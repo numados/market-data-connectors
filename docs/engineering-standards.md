@@ -6,17 +6,17 @@ This document defines the engineering standards, architecture invariants, code c
 
 ## 1. Mission & Architecture Invariants
 
-Build a modular, zero-leak Rust workspace providing standalone market data connectors for cryptocurrency and FX venues, completely decoupled from any proprietary shared memory or C-ABI IPC layout, so that any downstream project (trading engine, OMS, analytics, custom shared-memory host) can embed them through public contracts without forking a provider.
+The workspace provides standalone market-data connectors for cryptocurrency and FX venues. Providers do not depend on proprietary shared-memory or C-ABI layouts; downstream projects integrate through public contracts.
 
 ### Non-Negotiable Invariants
 
-1. **Decoupled Transport & Sinks**: Core networking and parsing crates must never mandate downstream transport or storage. Providers emit through the per-level `StreamingSink`; `MarketDataSink` (owned events), channels, and async streams are adapters on top. Connection loss, pause, and every integrity transition are signalled **in-band** as `IntegrityAlert` events, ordered with the data they invalidate, never only through hooks or logs.
-2. **First-Class Integrity**: Every connector must maintain strict book integrity. Sequence gaps ($U/u$), CRC32 checksum mismatches (Kraken, Bitfinex), heartbeat loss, and silence timeouts trigger deterministic self-healing resynchronization flows rather than passing corrupt states downstream. The book is invalid from the alert until the next snapshot; nothing for that symbol is emitted in between.
-3. **Zero Leaks & Bounded Memory**: All connection tasks use structured concurrency (`tokio_util::sync::CancellationToken`). In-flight delta buffers during snapshot reconciliation are strictly bounded. Nothing grows unbounded with uptime.
-4. **Hot-Path Zero Heap**: Zero-copy parsing (borrowing `serde_json` with `RawValue` where a venue checksum needs the exact tokens), zero-heap symbols (`SmallString<[u8; 16]>`), level arrays deserialized into reused scratch buffers (never `Vec` fields on raw message structs), ingestion timestamp captured immediately upon socket frame receipt before decompression and parsing. The `StreamingSink` path demonstrates 0 allocations per frame in benchmark scenarios after warm-up; owned-event adapters may allocate and document it.
-5. **Pluggable Policies**: Staleness, resync retry/quarantine, sequence rules, checksums, backoff, HTTP transport, and handshake auth are traits with per-venue defaults. A consumer replaces a policy through the builder, never by patching a provider.
-6. **Clock Injection**: Every state machine in `mdc-core` takes `now: Instant` as a parameter. Only runtime drivers read clocks. This makes integrity logic fully deterministic and testable without wall-clock time.
-7. **No Secrets, Ever**: No credentials, account paths, tenant names, or internal hosts in source, fixtures, docs, or history. Credentials are configuration, wrapped in a zeroizing secret type, absent from `Debug` output, and checked via secret scanning.
+1. **Decoupled Transport and Sinks**: Core networking and parsing crates must not mandate downstream transport or storage. Providers emit through the per-level `StreamingSink`; `MarketDataSink` (owned events), channels, and async streams are adapters on top. Connection loss, pause, and integrity transitions are signalled **in-band** as `IntegrityAlert` events, ordered with the data they invalidate, rather than only through hooks or logs.
+2. **Book Integrity**: Every connector must maintain book integrity. Sequence gaps ($U/u$), CRC32 checksum mismatches (Kraken, Bitfinex), heartbeat loss, and silence timeouts trigger deterministic resynchronization instead of passing corrupt states downstream. The book is invalid from the alert until the next snapshot; no data for that symbol is emitted in between.
+3. **Bounded Memory and Task Lifetime**: All connection tasks use structured concurrency (`tokio_util::sync::CancellationToken`). In-flight delta buffers during snapshot reconciliation are bounded, and task or buffer lifetime must not grow with uptime.
+4. **Hot-Path Allocation Budget**: Use zero-copy parsing (borrowing `serde_json` with `RawValue` where a venue checksum needs exact tokens), fixed-size symbols (`SmallString<[u8; 16]>`), and reused scratch buffers. Capture the ingestion timestamp immediately upon socket-frame receipt, before decompression and parsing. The `StreamingSink` path is tested for zero allocations per frame after warm-up; owned-event adapters may allocate and must document it.
+5. **Pluggable Policies**: Staleness, resync retry/quarantine, sequence rules, checksums, backoff, HTTP transport, and handshake auth are traits with per-venue defaults. A consumer replaces a policy through the builder rather than patching a provider.
+6. **Clock Injection**: Every state machine in `mdc-core` takes `now: Instant` as a parameter. Only runtime drivers read clocks. This keeps integrity logic deterministic and testable without wall-clock time.
+7. **Secrets and Sensitive Configuration**: Do not store credentials, account paths, tenant names, or internal hosts in source, fixtures, docs, or history. Credentials are configuration, wrapped in a zeroizing secret type, absent from `Debug` output, and checked with secret scanning.
 
 ---
 
@@ -33,7 +33,7 @@ Build a modular, zero-leak Rust workspace providing standalone market data conne
 
 Dependencies point strictly downward. `mdc-core` never learns about a venue's wire format.
 
-> **Architecture Note on Runtime & Supervisor Deferral**: The standalone `mdc-runtime` crate and generic connection `Supervisor` originally planned are deferred. Transport runtime, socket loops, backoff, and REST snapshot execution currently live within `mdc-providers` alongside each venue implementation. Downstream consumers embed connectors directly or compose them via custom supervisors as described in the architecture specifications.
+> **Runtime and supervisor deferral**: The standalone `mdc-runtime` crate and generic connection `Supervisor` are deferred. Transport runtime, socket loops, backoff, and REST snapshot execution currently live within `mdc-providers` alongside each venue implementation. Downstream consumers embed connectors directly or compose them with custom supervisors.
 
 ### 2.2 Modules and Visibility
 
@@ -100,8 +100,8 @@ All verification is pushed to the earliest possible stage: types, schema contrac
 1. **Type-Driven Defect Prevention**: Make invalid protocol states unrepresentable via newtypes, typed enums, and typestates for connection lifecycle (`Disconnected`, `Connecting`, `Connected`). Per-symbol sync state (`BufferingDiffs`, `InSync`, `Quarantined`) is a runtime enum inside a `Symbol`-keyed collection, verified with `proptest-state-machine`.
 2. **Contract & Golden Fixture First**: Capture real venue payloads as static JSON files in `tests/fixtures/<provider>/` before implementing network handlers. Unit tests verify schema compatibility and edge cases (negative values, scientific notation, empty arrays, one-sided updates).
 3. **Property-Based Testing (`proptest`)**: Sequence validation ($U/u$), checksum algorithms, time gating, and backoff curves are verified with randomized inputs simulating gaps, out-of-order delivery, duplicates, and mutations. State machines get a `proptest-state-machine` reference model with invariants checked after every transition.
-4. **100% Deterministic Local Testing**: **Never connect to a live venue during automated tests.** All networking terminates at `127.0.0.1:0` through `mdc-testkit`. Timers run under `tokio::time::pause()`; tests advance time explicitly instead of sleeping.
-5. **Every Fault Has a Test**: Gap injection, bad checksum, silence timeout, close frame, TCP drop, HTTP 429/418 with and without `Retry-After`, stale snapshot, pause/resume, and cancellation.
+4. **Deterministic Local Testing**: **Never connect to a live venue during automated tests.** All networking terminates at `127.0.0.1:0` through `mdc-testkit`. Timers run under `tokio::time::pause()`; tests advance time explicitly instead of sleeping.
+5. **Fault Coverage**: Tests cover gap injection, bad checksum, silence timeout, close frame, TCP drop, HTTP 429/418 with and without `Retry-After`, stale snapshots, pause/resume, and cancellation.
 
 ### Test Placement
 
