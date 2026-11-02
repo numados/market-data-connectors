@@ -76,6 +76,10 @@ Feature names are declared in the provider manifest. Use each provider module's 
 
 ## Quickstart: receive normalized events
 
+For a separate application, start with the [complete manifest and application](docs/getting-started.md#1-create-an-external-project).
+It includes provider/TLS features, async consumption, Ctrl-C handling, and bounded shutdown.
+The callback example below only illustrates event delivery; it does not install a shutdown handler.
+
 This example disables Binance depth updates and receives only native book-ticker and trade events. It therefore avoids depth snapshots and depth sequence reconciliation. It does not disable the connector's transport watchdog.
 
 ```rust,no_run
@@ -137,77 +141,14 @@ An application can instead consume raw events and implement its own book, freshn
 
 ## Run asynchronous business logic
 
-Connector callbacks are synchronous. Do not perform blocking I/O or await database/network work inside them. Use the bounded channel when the consumer needs an asynchronous task:
-
-```rust,no_run
-use futures_util::StreamExt;
-use mdc_core::{Symbol, SymbolTag};
-use mdc_providers::binance::{BinanceConfig, BinanceConnector};
-use mdc_sinks::{loss_intolerant_channel, QuoteProjection, TopOfBookProjector};
-use tokio_util::sync::CancellationToken;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cancel = CancellationToken::new();
-    let (sender, mut stream) = loss_intolerant_channel(4096, 1, cancel.clone());
-
-    let (connector, _handle) = BinanceConnector::builder(BinanceConfig::default())
-        .symbols([Symbol::from("BTCUSDT")])
-        .sink(sender)
-        .build()?;
-    let connector_task = tokio::spawn(connector.run(cancel.clone()));
-
-    let mut projector = TopOfBookProjector::new_l2(
-        Symbol::from("BTCUSDT"),
-        SymbolTag::default(),
-        None,
-    );
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(event) => {
-                if let Some(projection) = projector.handle_event(&event) {
-                    match projection {
-                        QuoteProjection::Available { bid, ask, effective_ts, .. } => {
-                            let age_ns = mdc_providers::now_nanos().0.saturating_sub(effective_ts.0);
-                            println!("live quote bid={bid} ask={ask} age_ns={age_ns}");
-                        }
-                        QuoteProjection::Unavailable { reason, .. } => {
-                            println!("withhold quote: {reason:?}");
-                        }
-                    }
-                }
-            }
-            Err(fault) => {
-                eprintln!("delivery stopped: {fault}");
-                break;
-            }
-        }
-    }
-
-    cancel.cancel();
-    let _ = connector_task.await;
-    Ok(())
-}
-```
-
-The channel is bounded. If it cannot accept an event, it records a terminal delivery fault and cancels the producer rather than silently dropping the accepted event prefix. Dropping the receiver cancels the producer; a subsequent send reports the receiver-closed fault. The consumer must decide whether to stop, retry its own work, or recover application state.
+Connector callbacks are synchronous and must not block. Use `loss_intolerant_channel` for async database or network work.
+The [complete external application](docs/getting-started.md#2-run-a-complete-application) shows consumption, cancellation, fault reporting, and shutdown.
+[Provider usage](docs/provider-usage.md#5-asynchronous-application-logic) defines the channel's overflow and receiver-closure contract.
 
 ## Integrity alerts
 
-`IntegrityAlert` is exhaustive. Current variants are:
-
-- `GapDetected`;
-- `ChecksumMismatch`;
-- `SilenceTimeout`;
-- `HeartbeatTimeout`;
-- `ResyncStarted` and `ResyncCompleted`;
-- `Quarantined`;
-- `SourceError`;
-- `ConnectionLost`, whose `reason` can include shutdown, pause, closure, or transport failure;
-- `SinkFailure`.
-
-A provider may emit only the variants relevant to its protocol. Consumers should handle alerts before treating an L2-derived quote as usable.
+Providers deliver integrity alerts in the same event path as market data. Handle them before using an L2-derived quote.
+The [alert reference](docs/provider-usage.md#6-alerts-and-validity) lists the current variants and their validity implications.
 
 ## Scope and limits
 
@@ -233,7 +174,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --lock
 
 ## Documentation
 
-- [Provider usage](docs/provider-usage.md): integration patterns, projections, delivery, and provider selection.
+- [Getting started from another Rust application](docs/getting-started.md): external-project dependencies, a complete lifecycle example, provider API families, credentials, and operational behavior.
+- [Provider usage](docs/provider-usage.md): sink contracts, projections, delivery, alerts, and provider selection.
 - [Engineering standards](docs/engineering-standards.md): architecture and verification rules.
 - [Contributing](CONTRIBUTING.md): development checks and provider contribution workflow.
 - [Commit conventions](docs/commit-conventions.md): repository commit format.

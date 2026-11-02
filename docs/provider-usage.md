@@ -1,6 +1,6 @@
 # Provider usage
 
-This guide describes the public integration boundary in the current workspace and the consumer contract around it.
+This guide describes the public integration boundary in the current workspace and the consumer contract around it. If you are integrating from a separate Rust application, start with [Getting started from another Rust application](getting-started.md), then use this guide for sink contracts, projections, alerts, and provider selection.
 
 ## 1. Two integrity layers
 
@@ -15,7 +15,7 @@ The connector and the application have different responsibilities.
 
 ## 2. Direct event consumption
 
-`MarketDataSink` receives owned `MarketEvent<MarketDataKind>` values. `FnSink` is a closure adapter. Connector builders clone the sink for connection tasks, so wrap a `FnSink` in `Arc` when using a builder that accepts `.sink(...)`.
+`MarketDataSink` receives owned `MarketEvent<MarketDataKind>` values. `FnSink` is a closure adapter. For builders that require a cloneable sink, wrap `FnSink` in `Arc`. The method for owned sinks differs between [provider API families](getting-started.md#3-provider-apis-and-symbols).
 
 This example uses the Binance API as currently implemented and selects only book-ticker and trade streams. With `depth: false`, Binance does not request REST depth snapshots or run depth reconciliation. The transport watchdog still exists.
 
@@ -62,11 +62,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The callback runs synchronously on the connector task. It must not block. A sink error is fatal to the producing connection and is surfaced through the connector's error path.
+The callback runs synchronously on the connector task. It must not block. A sink error stops the producing connection. See [lifecycle and errors](getting-started.md#5-lifecycle-controls-and-errors) for task results and best-effort failure alerts. This example only demonstrates the callback; the complete application adds shutdown handling.
 
 ## 3. Low-allocation streaming sink
 
 `StreamingSink` is the lower-allocation contract. It receives `begin_book`, one `level` callback per price level, and `end_book` for a book update. Trade, ticker, reference-rate, and alert callbacks receive borrowed payloads. The context contains the venue, symbol, timestamps, source sequence, connection ID, and delivery stamp.
+
+For this implementation, add `rust_decimal = "1"` to the application's dependencies because its method signatures name `Decimal` directly. The no-op example shows the contract; replace its callbacks with application processing.
 
 ```rust,no_run
 use mdc_core::{
@@ -179,78 +181,44 @@ For native `BookTicker` events, use `TopOfBookProjector::new_ticker`. `Reference
 
 ## 5. Asynchronous application logic
 
-The connector callback is synchronous, while database writes, HTTP calls, and other application operations are often asynchronous. `loss_intolerant_channel` provides a bounded FIFO bridge:
+Connector callbacks cannot await database writes or HTTP calls. `loss_intolerant_channel` bridges them to an async consumer.
+The [complete application](getting-started.md#2-run-a-complete-application) shows the manifest, channel creation, event loop, and bounded shutdown.
+Use `stream.recv().await` directly. No `futures-util` dependency is needed for this method.
 
-```rust,no_run
-use futures_util::StreamExt;
-use mdc_core::{Symbol, SymbolTag};
-use mdc_providers::binance::{BinanceConfig, BinanceConnector};
-use mdc_sinks::{loss_intolerant_channel, QuoteProjection, TopOfBookProjector};
-use tokio_util::sync::CancellationToken;
+The channel contract is:
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cancel = CancellationToken::new();
-    let (sender, mut stream) = loss_intolerant_channel(4096, 1, cancel.clone());
+1. Cloned senders share one bounded FIFO queue. Events from different connection tasks can interleave in that queue.
+2. The second argument to `loss_intolerant_channel` is a diagnostic label for terminal faults, not a connection filter.
+3. On overflow, the sender records one terminal `DeliveryFault` and cancels the producer token immediately.
+4. The receiver can then drain the accepted prefix, receive the fault once, and reach EOF. No further events are accepted after the fault.
+5. Dropping the receiver immediately cancels the producer. A subsequent send reports the receiver-closed fault; a dropped receiver cannot observe it.
+6. After all senders are dropped, the receiver drains any remaining events and reaches EOF.
 
-    let (connector, _handle) = BinanceConnector::builder(BinanceConfig::default())
-        .symbols([Symbol::from("BTCUSDT")])
-        .sink(sender)
-        .build()?;
-    let connector_task = tokio::spawn(connector.run(cancel.clone()));
-
-    let mut projector = TopOfBookProjector::new_l2(
-        Symbol::from("BTCUSDT"),
-        SymbolTag::default(),
-        None,
-    );
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(event) => {
-                if let Some(projection) = projector.handle_event(&event) {
-                    match projection {
-                        QuoteProjection::Available { bid, ask, .. } => {
-                            // Call application-owned async business logic here.
-                            println!("usable quote bid={bid} ask={ask}");
-                        }
-                        QuoteProjection::Unavailable { reason, .. } => {
-                            println!("quote unavailable: {reason:?}");
-                        }
-                    }
-                }
-            }
-            Err(fault) => {
-                eprintln!("delivery stopped: {fault}");
-                break;
-            }
-        }
-    }
-
-    cancel.cancel();
-    let _ = connector_task.await;
-    Ok(())
-}
-```
-
-When the queue is full, the channel records a terminal `DeliveryFault`, cancels the producer token, and does not silently drop an accepted event prefix. Dropping the receiver cancels the producer immediately; a subsequent send reports the receiver-closed delivery fault. The application owns the response to that terminal condition.
+The application chooses whether to drain or discard pending events on local shutdown.
+A terminal delivery fault invalidates the affected run's derived state, even if some accepted events remain queued.
+Cancellation alone does not tell the application whether delivery overflowed. Observe the stream fault and task result.
+Async application work still needs bounded execution time so that shutdown and event consumption can proceed.
 
 ## 6. Alerts and validity
 
-The public `IntegrityAlert` variants are:
+`IntegrityAlert` is exhaustive. Its current variants describe these transitions:
 
-- `GapDetected`;
-- `ChecksumMismatch`;
-- `SilenceTimeout`;
-- `HeartbeatTimeout`;
-- `ResyncStarted`;
-- `ResyncCompleted`;
-- `Quarantined`;
-- `SourceError`;
-- `ConnectionLost`;
-- `SinkFailure`.
+| Alert | Consumer implication |
+|---|---|
+| `GapDetected` | Sequence continuity failed. Withhold book-derived quotes until recovery. |
+| `ChecksumMismatch` | The local book differs from the venue's checksum. Invalidate the derived book. |
+| `SilenceTimeout`, `HeartbeatTimeout` | Transport or heartbeat health failed. Do not assume retained data is current. |
+| `ResyncStarted` | Recovery is in progress. Stage snapshots and withhold derived quotes. |
+| `ResyncCompleted` | Provider recovery completed. Projection validation and application age limits still apply. |
+| `Quarantined` | Recovery is deferred. Keep the book invalid during the retry interval. |
+| `SourceError` | The polling response or source failed. Withhold affected data until valid delivery. |
+| `ConnectionLost` | The symbol's connection stopped, paused, or closed. Invalidate live state. |
+| `SinkFailure` | Delivery failed. Notification is best effort because it uses the sink that failed. |
 
-`ConnectionLost` carries a `DisconnectKind`, such as `Closed`, `TransportError`, `Paused`, or `Shutdown`. A connector emits only the alerts relevant to its provider and current state. A consumer should not assume that every provider emits every variant. Trade, ticker, and reference-rate payloads are borrowed in `StreamingSink`; alerts are passed by value.
+`ConnectionLost` carries `DisconnectKind`. Match it and other non-exhaustive types such as `SourceErrorKind` and `MdcError` with a wildcard fallback.
+A provider emits only alerts relevant to its protocol and state.
+Trade, ticker, and reference-rate payloads are borrowed in `StreamingSink`; alerts are passed by value.
+See the [alert definitions](../crates/mdc-core/src/model/alert.rs) for payload fields.
 
 ## 7. Provider selection
 
@@ -282,11 +250,14 @@ The connector does not provide order entry, persistence, a message broker, or an
 
 ## 9. Local verification
 
-The public examples are checked by the workspace documentation build when they are Rust documentation examples. Markdown fences are not automatically compiled by Cargo. Run the repository checks before publishing an integration:
+`cargo doc` renders rustdoc, but does not compile its examples. `cargo test --doc` checks rustdoc examples. Neither command automatically checks Markdown fences in `README.md` or `docs/`. Compile those snippets in an external consumer crate with the selected features, as described in [Getting started](getting-started.md#6-consumer-policy-and-verification).
+
+Run the repository checks before publishing an integration:
 
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
+cargo test --workspace --doc --all-features --locked
 ```
